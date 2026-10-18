@@ -10,7 +10,6 @@ class AndroidAppPlugin : Plugin<Project> {
     override fun apply(target: Project) {
         with(target) {
             with(pluginManager) {
-                // Только плагин Android-приложения и Compose-компилятор
                 apply("com.android.application")
                 apply("org.jetbrains.kotlin.plugin.compose")
             }

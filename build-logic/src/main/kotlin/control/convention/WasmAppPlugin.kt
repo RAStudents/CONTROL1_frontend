@@ -3,6 +3,7 @@ package control.convention
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.kotlin.dsl.configure
+import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
 
 class WasmAppPlugin : Plugin<Project> {
@@ -15,7 +16,7 @@ class WasmAppPlugin : Plugin<Project> {
             }
 
             extensions.configure<KotlinMultiplatformExtension> {
-                @OptIn(org.jetbrains.kotlin.gradle.ExperimentalWasmDsl::class)
+                @OptIn(ExperimentalWasmDsl::class)
                 wasmJs {
                     browser {
                         commonWebpackConfig {
@@ -23,6 +24,13 @@ class WasmAppPlugin : Plugin<Project> {
                         }
                     }
                     binaries.executable()
+                }
+
+                sourceSets.named("commonMain").configure {
+                    dependencies {
+                        implementation(libs.findLibrary("compose-runtime").get())
+                        implementation(libs.findLibrary("compose-ui").get())
+                    }
                 }
             }
         }

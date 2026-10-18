@@ -3,6 +3,7 @@ package control.convention
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.kotlin.dsl.configure
+import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
 
 class KmpComposePlugin : Plugin<Project> {
@@ -15,6 +16,17 @@ class KmpComposePlugin : Plugin<Project> {
             }
 
             extensions.configure<KotlinMultiplatformExtension> {
+                @OptIn(ExperimentalWasmDsl::class)
+                wasmJs {
+                    browser {
+                        testTask {
+                            useKarma {
+                                useChromiumHeadless()
+                            }
+                        }
+                    }
+                    binaries.executable()
+                }
                 sourceSets.named("commonMain").configure {
                     dependencies {
                         implementation(libs.findLibrary("compose-runtime").get())
@@ -22,6 +34,7 @@ class KmpComposePlugin : Plugin<Project> {
                         implementation(libs.findLibrary("compose-material3").get())
                         implementation(libs.findLibrary("compose-ui").get())
                         implementation(libs.findLibrary("compose-components-resources").get())
+                        implementation(libs.findLibrary("compose-uiToolingPreview").get())
                     }
                 }
             }

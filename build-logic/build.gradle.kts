@@ -6,7 +6,6 @@ plugins {
 
 group = "control.buildlogic"
 
-// Настраиваем компилятор на генерацию байткода Java 17 силами текущего JDK (21)
 java {
     sourceCompatibility = JavaVersion.VERSION_17
     targetCompatibility = JavaVersion.VERSION_17
@@ -23,7 +22,6 @@ dependencies {
     compileOnly(libs.kotlin.gradlePlugin)
     compileOnly(libs.compose.gradlePlugin)
     compileOnly(libs.compose.compiler.gradlePlugin)
-    compileOnly(libs.kotlin.serialization.gradlePlugin)
 }
 
 gradlePlugin {

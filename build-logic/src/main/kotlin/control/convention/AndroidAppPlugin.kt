@@ -16,11 +16,7 @@ class AndroidAppPlugin : Plugin<Project> {
                 apply("org.jlleitschuh.gradle.ktlint")
             }
 
-            extensions.configure<KtlintExtension> {
-                filter {
-                    exclude { element -> element.file.path.contains("/build/") }
-                }
-            }
+            configureKtlint()
 
             extensions.configure<ApplicationExtension> {
                 namespace = "studio.acmenra.control"

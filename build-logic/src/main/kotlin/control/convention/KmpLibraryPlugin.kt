@@ -8,6 +8,7 @@ import org.gradle.kotlin.dsl.configure
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
+import org.jlleitschuh.gradle.ktlint.KtlintExtension
 
 class KmpLibraryPlugin : Plugin<Project> {
     override fun apply(target: Project) {
@@ -15,6 +16,13 @@ class KmpLibraryPlugin : Plugin<Project> {
             with(pluginManager) {
                 apply("org.jetbrains.kotlin.multiplatform")
                 apply("com.android.kotlin.multiplatform.library")
+                apply("org.jlleitschuh.gradle.ktlint")
+            }
+
+            extensions.configure<KtlintExtension> {
+                filter {
+                    exclude { element -> element.file.path.contains("/build/") }
+                }
             }
 
             extensions.configure<KotlinMultiplatformExtension> {

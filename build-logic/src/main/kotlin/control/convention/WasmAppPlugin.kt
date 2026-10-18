@@ -5,6 +5,7 @@ import org.gradle.api.Project
 import org.gradle.kotlin.dsl.configure
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
+import org.jlleitschuh.gradle.ktlint.KtlintExtension
 
 class WasmAppPlugin : Plugin<Project> {
     override fun apply(target: Project) {
@@ -13,6 +14,13 @@ class WasmAppPlugin : Plugin<Project> {
                 apply("org.jetbrains.kotlin.multiplatform")
                 apply("org.jetbrains.compose")
                 apply("org.jetbrains.kotlin.plugin.compose")
+                apply("org.jlleitschuh.gradle.ktlint")
+            }
+
+            extensions.configure<KtlintExtension> {
+                filter {
+                    exclude { element -> element.file.path.contains("/build/") }
+                }
             }
 
             extensions.configure<KotlinMultiplatformExtension> {

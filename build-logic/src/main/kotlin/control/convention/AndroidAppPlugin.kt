@@ -5,6 +5,7 @@ import org.gradle.api.JavaVersion
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.kotlin.dsl.configure
+import org.jlleitschuh.gradle.ktlint.KtlintExtension
 
 class AndroidAppPlugin : Plugin<Project> {
     override fun apply(target: Project) {
@@ -12,6 +13,13 @@ class AndroidAppPlugin : Plugin<Project> {
             with(pluginManager) {
                 apply("com.android.application")
                 apply("org.jetbrains.kotlin.plugin.compose")
+                apply("org.jlleitschuh.gradle.ktlint")
+            }
+
+            extensions.configure<KtlintExtension> {
+                filter {
+                    exclude { element -> element.file.path.contains("/build/") }
+                }
             }
 
             extensions.configure<ApplicationExtension> {

@@ -71,8 +71,6 @@ jobs:
 
             - name: Locate Chrome
               run: echo "CHROME_BIN=$(which google-chrome)" >> "$GITHUB_ENV"
-            - name: Locate Chrome
-              run: echo "CHROME_BIN=$(which google-chrome)" >> "$GITHUB_ENV"
 
             - name: Wasm tests (shared)
               run: ./gradlew :shared:wasmJsBrowserTest --stacktrace

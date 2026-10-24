@@ -5,10 +5,11 @@ android-minSdk = "24"
 android-targetSdk = "37"
 androidx-activity = "1.13.0"
 androidx-lifecycle = "2.11.0"
-composeMultiplatform = "1.12.0"
-kotlin = "2.4.20"
+composeMultiplatform = "1.12.2"
+kotlin = "2.4.21"
 material3 = "1.12.0-alpha03"
 ktlintGradle = "14.2.0"
+buildkonfig = "0.23.0"
 
 [libraries]
 # Артефакты плагинов для build-logic dependencies
@@ -44,3 +45,4 @@ composeMultiplatform = { id = "org.jetbrains.compose", version.ref = "composeMul
 composeCompiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
 ktlint = { id = "org.jlleitschuh.gradle.ktlint", version.ref = "ktlintGradle" }
+buildkonfig = { id = "com.codingfeline.buildkonfig", version.ref = "buildkonfig"}

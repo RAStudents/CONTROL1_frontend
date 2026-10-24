@@ -28,6 +28,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "control"
 
+include(":core:network")
 include(":androidApp")
 include(":shared")
 include(":webApp")

@@ -1,16 +1,13 @@
 package studio.acmenra.control.core.network.auth
 
+import studio.acmenra.control.core.network.model.TokenPair
+
 interface TokenStorage {
-    fun getAccessToken(): String?
+    fun getTokens(): TokenPair?
 
-    fun getRefreshToken(): String?
-
-    fun saveTokens(
-        accessToken: String,
-        refreshToken: String,
-    )
+    fun saveTokens(tokens: TokenPair)
 
     fun clear()
 
-    fun hasTokens(): Boolean = !getAccessToken().isNullOrBlank() && !getRefreshToken().isNullOrBlank()
+    fun hasTokens(): Boolean = getTokens()?.isValid() == true
 }

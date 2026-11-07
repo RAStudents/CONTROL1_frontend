@@ -38,6 +38,7 @@ kotlin {
         commonTest.dependencies {
             implementation(libs.ktor.client.mock)
             implementation(libs.kotlinx.coroutines.test)
+            implementation(libs.multiplatformSettings.test)
         }
     }
 }

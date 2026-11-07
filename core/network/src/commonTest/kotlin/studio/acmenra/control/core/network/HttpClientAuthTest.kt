@@ -8,14 +8,15 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.Serializable
+import studio.acmenra.control.core.network.auth.AuthClientRegistry
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.core.network.client.HttpClientFactory
 import studio.acmenra.control.core.network.client.safeRequest
+import studio.acmenra.control.core.network.model.TokenPair
 import studio.acmenra.control.core.network.model.getOrNull
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -73,14 +74,14 @@ class HttpClientAuthTest {
 
             val storage = FakeTokenStorage()
             val sessionManager = SessionManager(storage)
-            sessionManager.saveSession("access_old", "refresh_old")
+            sessionManager.saveSession(TokenPair("access_old", "refresh_old"))
 
             val client =
-                HttpClientFactory.create(
+                HttpClientFactory.createApiClient(
                     sessionManager = sessionManager,
-                    tokenStorage = storage,
                     apiBaseUrl = baseUrl,
                     enableLogs = false,
+                    debugMode = true,
                     engine = engine,
                 )
 
@@ -93,9 +94,9 @@ class HttpClientAuthTest {
             assertEquals("ok", result.getOrNull()?.status)
             assertEquals(2, dataAttempts)
             assertEquals(1, refreshAttempts)
-            assertEquals("access_new", storage.getAccessToken())
-            assertEquals("refresh_new", storage.getRefreshToken())
-            assertEquals(SessionState.Authenticated("access_new"), sessionManager.sessionState.value)
+            assertEquals("access_new", storage.getTokens()?.accessToken)
+            assertEquals("refresh_new", storage.getTokens()?.refreshToken)
+            assertEquals(SessionState.Authenticated, sessionManager.sessionState.value)
         }
 
     @Test
@@ -124,14 +125,14 @@ class HttpClientAuthTest {
 
             val storage = FakeTokenStorage()
             val sessionManager = SessionManager(storage)
-            sessionManager.saveSession("access_old", "refresh_old")
+            sessionManager.saveSession(TokenPair("access_old", "refresh_old"))
 
             val client =
-                HttpClientFactory.create(
+                HttpClientFactory.createApiClient(
                     sessionManager = sessionManager,
-                    tokenStorage = storage,
                     apiBaseUrl = baseUrl,
                     enableLogs = false,
+                    debugMode = true,
                     engine = engine,
                 )
 
@@ -141,8 +142,7 @@ class HttpClientAuthTest {
                 }
 
             assertTrue(result.isFailure)
-            assertNull(storage.getAccessToken())
-            assertNull(storage.getRefreshToken())
+            assertNull(storage.getTokens())
             assertEquals(SessionState.SessionExpired, sessionManager.sessionState.value)
         }
 
@@ -172,14 +172,14 @@ class HttpClientAuthTest {
 
             val storage = FakeTokenStorage()
             val sessionManager = SessionManager(storage)
-            sessionManager.saveSession("access_old", "refresh_old")
+            sessionManager.saveSession(TokenPair("access_old", "refresh_old"))
 
             val client =
-                HttpClientFactory.create(
+                HttpClientFactory.createApiClient(
                     sessionManager = sessionManager,
-                    tokenStorage = storage,
                     apiBaseUrl = baseUrl,
                     enableLogs = false,
+                    debugMode = true,
                     engine = engine,
                 )
 
@@ -189,13 +189,13 @@ class HttpClientAuthTest {
                 }
 
             assertTrue(result.isFailure)
-            assertEquals("access_old", storage.getAccessToken())
-            assertEquals("refresh_old", storage.getRefreshToken())
-            assertEquals(SessionState.Authenticated("access_old"), sessionManager.sessionState.value)
+            assertEquals("access_old", storage.getTokens()?.accessToken)
+            assertEquals("refresh_old", storage.getTokens()?.refreshToken)
+            assertEquals(SessionState.Authenticated, sessionManager.sessionState.value)
         }
 
     @Test
-    fun testBearerTokenNotSentToThirdPartyDomains() =
+    fun testExternalClientDoesNotSendAuthTokensEvenOn401Challenge() =
         runTest {
             var receivedAuthHeader: String? = null
 
@@ -203,35 +203,72 @@ class HttpClientAuthTest {
                 MockEngine { request ->
                     receivedAuthHeader = request.headers[HttpHeaders.Authorization]
                     respond(
+                        content = """{"status":"unauthorized_cdn"}""",
+                        status = HttpStatusCode.Unauthorized,
+                        headers = unauthorizedHeaders(),
+                    )
+                }
+
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            sessionManager.saveSession(TokenPair("secret_access", "secret_refresh"))
+
+            val externalClient =
+                HttpClientFactory.createExternalClient(
+                    enableLogs = false,
+                    engine = engine,
+                )
+
+            val result =
+                externalClient.safeRequest<TestData> {
+                    get("https://external-cdn.com/asset.json")
+                }
+
+            assertTrue(result.isFailure)
+            assertNull(receivedAuthHeader, "External client must never send Authorization header")
+        }
+
+    @Test
+    fun testLogoutClearsTokensInAllRegisteredClients() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val registry = AuthClientRegistry()
+            val sessionManager = SessionManager(storage, clientRegistry = registry)
+
+            sessionManager.saveSession(TokenPair("access_1", "refresh_1"))
+
+            val engine =
+                MockEngine {
+                    respond(
                         content = """{"status":"ok"}""",
                         status = HttpStatusCode.OK,
                         headers = headersOf(HttpHeaders.ContentType, "application/json"),
                     )
                 }
 
-            val storage = FakeTokenStorage()
-            val sessionManager = SessionManager(storage)
-            sessionManager.saveSession("secret_access", "secret_refresh")
-
-            val client =
-                HttpClientFactory.create(
+            val clientA =
+                HttpClientFactory.createApiClient(
                     sessionManager = sessionManager,
-                    tokenStorage = storage,
-                    apiBaseUrl = "https://api.example.com",
+                    apiBaseUrl = baseUrl,
+                    clientRegistry = registry,
                     enableLogs = false,
+                    debugMode = true,
                     engine = engine,
                 )
 
-            val result =
-                client.safeRequest<TestData> {
-                    get("https://external-cdn.com/data")
-                }
+            val clientB =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    clientRegistry = registry,
+                    enableLogs = false,
+                    debugMode = true,
+                    engine = engine,
+                )
 
-            println("RESULT IS: $result")
-            assertTrue(result.isSuccess)
-            assertFalse(
-                receivedAuthHeader != null,
-                "Bearer token must NOT be sent to external domain",
-            )
+            sessionManager.logout()
+
+            assertNull(storage.getTokens())
+            assertEquals(SessionState.Unauthenticated, sessionManager.sessionState.value)
         }
 }

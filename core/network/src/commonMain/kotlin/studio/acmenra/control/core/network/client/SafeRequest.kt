@@ -2,6 +2,8 @@ package studio.acmenra.control.core.network.client
 
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
+import io.ktor.client.network.sockets.ConnectTimeoutException
+import io.ktor.client.network.sockets.SocketTimeoutException
 import io.ktor.client.plugins.ClientRequestException
 import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.plugins.ServerResponseException
@@ -53,6 +55,20 @@ suspend inline fun <reified T> HttpClient.safeRequest(
         NetworkResult.Failure(
             NetworkError.Connectivity(
                 message = "Request timed out: ${e.message}",
+                cause = e,
+            ),
+        )
+    } catch (e: ConnectTimeoutException) {
+        NetworkResult.Failure(
+            NetworkError.Connectivity(
+                message = "Connection timed out: ${e.message}",
+                cause = e,
+            ),
+        )
+    } catch (e: SocketTimeoutException) {
+        NetworkResult.Failure(
+            NetworkError.Connectivity(
+                message = "Socket timed out: ${e.message}",
                 cause = e,
             ),
         )

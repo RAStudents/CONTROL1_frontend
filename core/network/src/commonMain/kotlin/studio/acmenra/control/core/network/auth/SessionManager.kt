@@ -1,64 +1,92 @@
 package studio.acmenra.control.core.network.auth
 
-import io.ktor.client.HttpClient
-import io.ktor.client.plugins.auth.clearAuthTokens
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import studio.acmenra.control.core.network.model.TokenPair
 
 class SessionManager(
     private val tokenStorage: TokenStorage,
+    private val clientRegistry: AuthClientRegistry? = null,
 ) {
-    private var httpClient: HttpClient? = null
+    private val mutex = Mutex()
+    private var currentRevision: Long = 0L
 
     private val _sessionState =
         MutableStateFlow<SessionState>(
             if (tokenStorage.hasTokens()) {
-                SessionState.Authenticated(tokenStorage.getAccessToken().orEmpty())
+                SessionState.Authenticated
             } else {
                 SessionState.Unauthenticated
             },
         )
     val sessionState: StateFlow<SessionState> = _sessionState.asStateFlow()
 
-    fun attachClient(client: HttpClient) {
-        this.httpClient = client
-    }
-
-    fun saveSession(
-        accessToken: String,
-        refreshToken: String,
-    ) {
-        tokenStorage.saveTokens(accessToken, refreshToken)
-        httpClient?.clearAuthTokens()
-        _sessionState.value = SessionState.Authenticated(accessToken)
-    }
-
-    fun saveRefreshedSession(
-        originalRefreshToken: String,
-        newAccessToken: String,
-        newRefreshToken: String,
-    ): Boolean {
-        if (_sessionState.value !is SessionState.Authenticated) {
-            return false
+    suspend fun getSnapshot(): SessionSnapshot? =
+        mutex.withLock {
+            val tokens = tokenStorage.getTokens() ?: return null
+            if (!tokens.isValid()) return null
+            SessionSnapshot(tokens = tokens, revision = currentRevision)
         }
-        val currentStoredRefresh = tokenStorage.getRefreshToken()
-        if (currentStoredRefresh != originalRefreshToken) {
-            return false
+
+    suspend fun saveSession(tokens: TokenPair): SessionSnapshot =
+        mutex.withLock {
+            require(tokens.isValid()) { "Tokens must not be blank" }
+            tokenStorage.saveTokens(tokens)
+            currentRevision++
+            val snapshot = SessionSnapshot(tokens = tokens, revision = currentRevision)
+            _sessionState.value = SessionState.Authenticated
+            clientRegistry?.clearAllAuthTokens()
+            snapshot
         }
-        saveSession(newAccessToken, newRefreshToken)
-        return true
-    }
 
-    fun logout() {
-        tokenStorage.clear()
-        httpClient?.clearAuthTokens()
-        _sessionState.value = SessionState.Unauthenticated
-    }
+    suspend fun saveRefreshedSession(
+        expected: SessionSnapshot,
+        newTokens: TokenPair,
+    ): Boolean =
+        mutex.withLock {
+            require(newTokens.isValid()) { "New refreshed tokens must not be blank" }
+            if (_sessionState.value !is SessionState.Authenticated) {
+                return false
+            }
+            if (currentRevision != expected.revision) {
+                return false
+            }
+            val currentTokens = tokenStorage.getTokens()
+            if (currentTokens != expected.tokens) {
+                return false
+            }
 
-    fun notifySessionExpired() {
-        tokenStorage.clear()
-        httpClient?.clearAuthTokens()
-        _sessionState.value = SessionState.SessionExpired
-    }
+            tokenStorage.saveTokens(newTokens)
+            currentRevision++
+            _sessionState.value = SessionState.Authenticated
+            true
+        }
+
+    suspend fun expireSessionIfMatches(expected: SessionSnapshot): Boolean =
+        mutex.withLock {
+            if (currentRevision != expected.revision) {
+                return false
+            }
+            val currentTokens = tokenStorage.getTokens()
+            if (currentTokens != expected.tokens) {
+                return false
+            }
+
+            tokenStorage.clear()
+            currentRevision++
+            _sessionState.value = SessionState.SessionExpired
+            clientRegistry?.clearAllAuthTokens()
+            true
+        }
+
+    suspend fun logout(): Unit =
+        mutex.withLock {
+            tokenStorage.clear()
+            currentRevision++
+            _sessionState.value = SessionState.Unauthenticated
+            clientRegistry?.clearAllAuthTokens()
+        }
 }

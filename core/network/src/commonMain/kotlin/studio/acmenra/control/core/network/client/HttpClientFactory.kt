@@ -2,6 +2,7 @@ package studio.acmenra.control.core.network.client
 
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
+import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.plugins.auth.Auth
 import io.ktor.client.plugins.auth.providers.BearerTokens
 import io.ktor.client.plugins.auth.providers.bearer
@@ -36,6 +37,7 @@ object HttpClientFactory {
         enableLogs: Boolean = NetworkConfig.ENABLE_LOGS,
         refreshPath: String = "api/auth/refresh",
         customLogger: Logger? = null,
+        engine: HttpClientEngine? = null,
     ): HttpClient {
         val expectedOrigin =
             runCatching {
@@ -46,8 +48,9 @@ object HttpClientFactory {
                 }
             }.getOrNull()
 
+        val baseClient = engine?.let { HttpClient(it) } ?: HttpClient(createHttpEngineFactory())
         val client =
-            HttpClient(createHttpEngineFactory()) {
+            baseClient.config {
                 installNetworkTimeouts()
 
                 defaultRequest {
@@ -146,9 +149,19 @@ object HttpClientFactory {
                             if (expectedOrigin == null || expectedOrigin.host.isBlank()) {
                                 false
                             } else {
+                                val requestPort =
+                                    if (request.url.port == 0) request.url.protocol.defaultPort else request.url.port
+                                val expectedPort =
+                                    if (expectedOrigin.port ==
+                                        0
+                                    ) {
+                                        expectedOrigin.protocol.defaultPort
+                                    } else {
+                                        expectedOrigin.port
+                                    }
                                 request.url.protocol == expectedOrigin.protocol &&
                                     request.url.host == expectedOrigin.host &&
-                                    request.url.port == expectedOrigin.port
+                                    requestPort == expectedPort
                             }
                         }
                     }

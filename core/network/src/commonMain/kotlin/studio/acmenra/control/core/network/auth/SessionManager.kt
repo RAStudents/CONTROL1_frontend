@@ -34,6 +34,22 @@ class SessionManager(
         _sessionState.value = SessionState.Authenticated(accessToken)
     }
 
+    fun saveRefreshedSession(
+        originalRefreshToken: String,
+        newAccessToken: String,
+        newRefreshToken: String,
+    ): Boolean {
+        if (_sessionState.value !is SessionState.Authenticated) {
+            return false
+        }
+        val currentStoredRefresh = tokenStorage.getRefreshToken()
+        if (currentStoredRefresh != originalRefreshToken) {
+            return false
+        }
+        saveSession(newAccessToken, newRefreshToken)
+        return true
+    }
+
     fun logout() {
         tokenStorage.clear()
         httpClient?.clearAuthTokens()

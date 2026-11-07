@@ -100,4 +100,64 @@ class SessionManagerTest {
             )
         assertEquals(404, failValue)
     }
+
+    @Test
+    fun testSaveRefreshedSessionSucceedsWhenActiveAndMatching() {
+        val storage = FakeTokenStorage()
+        val manager = SessionManager(storage)
+
+        manager.saveSession("access_old", "refresh_old")
+        val saved =
+            manager.saveRefreshedSession(
+                originalRefreshToken = "refresh_old",
+                newAccessToken = "access_new",
+                newRefreshToken = "refresh_new",
+            )
+
+        assertTrue(saved)
+        assertEquals("access_new", storage.getAccessToken())
+        assertEquals("refresh_new", storage.getRefreshToken())
+        assertEquals(SessionState.Authenticated("access_new"), manager.sessionState.value)
+    }
+
+    @Test
+    fun testSaveRefreshedSessionRejectedIfLoggedOutDuringRefresh() {
+        val storage = FakeTokenStorage()
+        val manager = SessionManager(storage)
+
+        manager.saveSession("access_old", "refresh_old")
+        manager.logout()
+
+        val saved =
+            manager.saveRefreshedSession(
+                originalRefreshToken = "refresh_old",
+                newAccessToken = "access_new",
+                newRefreshToken = "refresh_new",
+            )
+
+        assertFalse(saved)
+        assertEquals(null, storage.getAccessToken())
+        assertEquals(null, storage.getRefreshToken())
+        assertEquals(SessionState.Unauthenticated, manager.sessionState.value)
+    }
+
+    @Test
+    fun testSaveRefreshedSessionRejectedIfTokenMismatch() {
+        val storage = FakeTokenStorage()
+        val manager = SessionManager(storage)
+
+        manager.saveSession("access_old", "refresh_current")
+
+        val saved =
+            manager.saveRefreshedSession(
+                originalRefreshToken = "refresh_stale",
+                newAccessToken = "access_new",
+                newRefreshToken = "refresh_new",
+            )
+
+        assertFalse(saved)
+        assertEquals("access_old", storage.getAccessToken())
+        assertEquals("refresh_current", storage.getRefreshToken())
+        assertEquals(SessionState.Authenticated("access_old"), manager.sessionState.value)
+    }
 }

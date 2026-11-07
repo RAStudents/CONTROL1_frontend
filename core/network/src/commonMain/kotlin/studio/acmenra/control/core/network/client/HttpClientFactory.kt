@@ -37,7 +37,14 @@ object HttpClientFactory {
         refreshPath: String = "api/auth/refresh",
         customLogger: Logger? = null,
     ): HttpClient {
-        val parsedHost = runCatching { Url(apiBaseUrl).host }.getOrNull().orEmpty()
+        val expectedOrigin =
+            runCatching {
+                if (apiBaseUrl.startsWith("http://") || apiBaseUrl.startsWith("https://")) {
+                    Url(apiBaseUrl)
+                } else {
+                    null
+                }
+            }.getOrNull()
 
         val client =
             HttpClient(createHttpEngineFactory()) {
@@ -116,21 +123,33 @@ object HttpClientFactory {
                                     else -> {
                                         val tokens = response.body<RefreshTokenResponse>()
                                         val newRefreshToken = tokens.refreshToken ?: refreshToken
-                                        sessionManager.saveSession(
-                                            accessToken = tokens.accessToken,
-                                            refreshToken = newRefreshToken,
-                                        )
-                                        BearerTokens(
-                                            accessToken = tokens.accessToken,
-                                            refreshToken = newRefreshToken,
-                                        )
+                                        val saved =
+                                            sessionManager.saveRefreshedSession(
+                                                originalRefreshToken = refreshToken,
+                                                newAccessToken = tokens.accessToken,
+                                                newRefreshToken = newRefreshToken,
+                                            )
+                                        if (saved) {
+                                            BearerTokens(
+                                                accessToken = tokens.accessToken,
+                                                refreshToken = newRefreshToken,
+                                            )
+                                        } else {
+                                            null
+                                        }
                                     }
                                 }
                             }
                         }
 
                         sendWithoutRequest { request ->
-                            parsedHost.isBlank() || request.url.host == parsedHost
+                            if (expectedOrigin == null || expectedOrigin.host.isBlank()) {
+                                false
+                            } else {
+                                request.url.protocol == expectedOrigin.protocol &&
+                                    request.url.host == expectedOrigin.host &&
+                                    request.url.port == expectedOrigin.port
+                            }
                         }
                     }
                 }

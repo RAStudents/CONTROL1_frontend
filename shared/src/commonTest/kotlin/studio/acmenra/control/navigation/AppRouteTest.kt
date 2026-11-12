@@ -7,14 +7,28 @@ import kotlin.test.assertEquals
 
 class AppRouteTest {
     @Test
-    fun testLoginRouteSerialization() {
-        val json = Json.encodeToString(LoginRoute)
-        assertEquals("{}", json)
+    fun loginRouteHasExpectedSerialName() {
+        assertEquals("login", LoginRoute.serializer().descriptor.serialName)
     }
 
     @Test
-    fun testEventsRouteSerialization() {
+    fun eventsRouteHasExpectedSerialName() {
+        assertEquals("events", EventsRoute.serializer().descriptor.serialName)
+    }
+
+    @Test
+    fun testLoginRouteSerializationRoundTrip() {
+        val json = Json.encodeToString(LoginRoute)
+        assertEquals("{}", json)
+        val decoded = Json.decodeFromString<LoginRoute>(json)
+        assertEquals(LoginRoute, decoded)
+    }
+
+    @Test
+    fun testEventsRouteSerializationRoundTrip() {
         val json = Json.encodeToString(EventsRoute)
         assertEquals("{}", json)
+        val decoded = Json.decodeFromString<EventsRoute>(json)
+        assertEquals(EventsRoute, decoded)
     }
 }

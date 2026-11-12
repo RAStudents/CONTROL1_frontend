@@ -28,6 +28,8 @@ kotlin {
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.multiplatformSettings)
             implementation(libs.multiplatformSettings.noArg)
+            implementation(project.dependencies.platform(libs.koin.bom))
+            implementation(libs.koin.core)
         }
         androidMain.dependencies {
             implementation(libs.ktor.client.okhttp)

@@ -1,20 +1,21 @@
 package studio.acmenra.control.navigation
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
-import org.koin.compose.viewmodel.koinViewModel
 import studio.acmenra.control.core.network.auth.SessionState
-import studio.acmenra.control.feature.auth.presentation.LoginScreen
-import studio.acmenra.control.feature.auth.presentation.LoginViewModel
-import studio.acmenra.control.feature.events.presentation.EventsScreen
-import studio.acmenra.control.feature.events.presentation.EventsViewModel
+import studio.acmenra.control.feature.auth.presentation.LoginRoute
+import studio.acmenra.control.feature.events.presentation.EventsRoute
 
 @Composable
 fun AppNavHost(
@@ -30,22 +31,12 @@ fun AppNavHost(
         when {
             sessionState == SessionState.Authenticated &&
                 destination?.hasRoute<LoginRoute>() == true -> {
-                navController.navigate(EventsRoute) {
-                    popUpTo<LoginRoute> {
-                        inclusive = true
-                    }
-                    launchSingleTop = true
-                }
+                navController.navigateToEvents()
             }
 
             sessionState != SessionState.Authenticated &&
                 destination?.hasRoute<EventsRoute>() == true -> {
-                navController.navigate(LoginRoute) {
-                    popUpTo<EventsRoute> {
-                        inclusive = true
-                    }
-                    launchSingleTop = true
-                }
+                navController.navigateToLogin()
             }
         }
     }
@@ -56,14 +47,19 @@ fun AppNavHost(
         modifier = modifier,
     ) {
         composable<LoginRoute> {
-            val viewModel = koinViewModel<LoginViewModel>()
-            LoginScreen(viewModel = viewModel)
+            LoginRoute()
         }
 
         composable<EventsRoute> {
             if (sessionState == SessionState.Authenticated) {
-                val viewModel = koinViewModel<EventsViewModel>()
-                EventsScreen(viewModel = viewModel)
+                EventsRoute()
+            } else {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator()
+                }
             }
         }
     }

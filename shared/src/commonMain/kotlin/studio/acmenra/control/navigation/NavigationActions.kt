@@ -4,7 +4,7 @@ import androidx.navigation.NavController
 
 fun NavController.navigateToLogin() {
     navigate(LoginRoute) {
-        popUpTo(0) {
+        popUpTo<EventsRoute> {
             inclusive = true
         }
         launchSingleTop = true

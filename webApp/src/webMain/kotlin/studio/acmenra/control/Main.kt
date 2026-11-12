@@ -11,7 +11,9 @@ import studio.acmenra.control.di.initKoin
 fun main() {
     initKoin()
 
-    val body = document.body ?: return
+    val body =
+        document.body
+            ?: error("Unable to initialize application: document.body is null")
 
     ComposeViewport(body) {
         App(

@@ -2,11 +2,10 @@ package studio.acmenra.control.di
 
 import org.koin.core.context.startKoin
 import org.koin.dsl.KoinAppDeclaration
-import org.koin.dsl.includes
 
-fun initKoin(config: KoinAppDeclaration? = null) {
+fun initKoin(appDeclaration: KoinAppDeclaration = {}) {
     startKoin {
-        includes(config)
+        appDeclaration()
         modules(appModule)
     }
 }

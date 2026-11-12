@@ -1,5 +1,6 @@
 package studio.acmenra.control
 
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -21,28 +22,42 @@ fun App(
     onNavHostReady: suspend (NavController) -> Unit = {},
 ) {
     val sessionManager = koinInject<SessionManager>()
-
     val sessionState by sessionManager.sessionState.collectAsState()
 
-    val navController = rememberNavController()
-
-    val startDestination =
-        remember {
-            if (sessionManager.sessionState.value == SessionState.Authenticated) {
-                EventsRoute
-            } else {
-                LoginRoute
-            }
-        }
-
-    AppNavHost(
-        navController = navController,
-        startDestination = startDestination,
+    AppContent(
         sessionState = sessionState,
         modifier = modifier,
+        onNavHostReady = onNavHostReady,
     )
+}
 
-    LaunchedEffect(navController) {
-        onNavHostReady(navController)
+@Composable
+fun AppContent(
+    sessionState: SessionState,
+    modifier: Modifier = Modifier,
+    onNavHostReady: suspend (NavController) -> Unit = {},
+) {
+    MaterialTheme {
+        val navController = rememberNavController()
+
+        val startDestination =
+            remember {
+                if (sessionState == SessionState.Authenticated) {
+                    EventsRoute
+                } else {
+                    LoginRoute
+                }
+            }
+
+        AppNavHost(
+            navController = navController,
+            startDestination = startDestination,
+            sessionState = sessionState,
+            modifier = modifier,
+        )
+
+        LaunchedEffect(navController) {
+            onNavHostReady(navController)
+        }
     }
 }

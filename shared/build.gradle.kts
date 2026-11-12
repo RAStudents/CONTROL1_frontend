@@ -17,7 +17,7 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
-            implementation(project(":core:network"))
+            api(project(":core:network"))
             implementation(project(":features:auth"))
             implementation(project(":features:events"))
 

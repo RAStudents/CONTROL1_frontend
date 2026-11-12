@@ -62,7 +62,7 @@ suspend inline fun <reified T> HttpClient.safeRequest(
                 )
             }
         } else {
-            val errorBody = runCatching { response.bodyAsText() }.getOrNull()
+            val errorBody = response.readErrorBodySafely()
             NetworkResult.Failure(
                 NetworkError.Http(
                     statusCode = response.status.value,
@@ -114,4 +114,14 @@ suspend inline fun <reified T> HttpClient.safeRequest(
                 cause = e,
             ),
         )
+    }
+
+@PublishedApi
+internal suspend fun HttpResponse.readErrorBodySafely(): String? =
+    try {
+        bodyAsText()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
     }

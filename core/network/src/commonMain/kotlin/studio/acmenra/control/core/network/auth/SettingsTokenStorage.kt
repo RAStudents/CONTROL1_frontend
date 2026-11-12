@@ -4,6 +4,17 @@ import com.russhwolf.settings.Settings
 import kotlinx.serialization.json.Json
 import studio.acmenra.control.core.network.model.TokenPair
 
+/**
+ * Insecure token storage implementation backed by [Settings].
+ *
+ * Warning: Tokens are stored in plaintext (e.g. SharedPreferences on Android, localStorage on Web
+ * where it is vulnerable to XSS). Do NOT use this as a secure token storage in production.
+ *
+ * TODO: Implement secure platform-specific [TokenStorage] implementations:
+ *   - Android: Android Keystore / EncryptedSharedPreferences
+ *   - iOS: Keychain Services
+ *   - Web: Secure HttpOnly cookie session or a dedicated in-memory / WebCrypto mechanism
+ */
 class SettingsTokenStorage(
     private val settings: Settings = Settings(),
     private val json: Json = Json { ignoreUnknownKeys = true },
@@ -11,10 +22,15 @@ class SettingsTokenStorage(
     override fun getTokens(): TokenPair? {
         val rawJson = settings.getStringOrNull(KEY_TOKEN_PAIR)
         if (!rawJson.isNullOrBlank()) {
-            return runCatching {
-                val pair = json.decodeFromString<TokenPair>(rawJson)
-                if (pair.isValid()) pair else null
-            }.getOrNull()
+            val parsedPair =
+                runCatching {
+                    val pair = json.decodeFromString<TokenPair>(rawJson)
+                    if (pair.isValid()) pair else null
+                }.getOrNull()
+            if (parsedPair != null) {
+                return parsedPair
+            }
+            settings.remove(KEY_TOKEN_PAIR)
         }
 
         // Migration from legacy individual keys

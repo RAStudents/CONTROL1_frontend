@@ -1,5 +1,6 @@
 plugins {
     id("control.convention.kmp.compose")
+    alias(libs.plugins.kotlinSerialization)
 }
 
 kotlin {
@@ -16,9 +17,23 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
+            implementation(project(":core:network"))
+            implementation(project(":features:auth"))
+            implementation(project(":features:events"))
+
             implementation(libs.androidx.lifecycle.viewmodelCompose)
             implementation(libs.androidx.lifecycle.runtimeCompose)
-            implementation(project(":core:network"))
+            implementation(libs.kotlinx.serialization.json)
+            api(libs.navigation.compose)
+
+            implementation(project.dependencies.platform(libs.koin.bom))
+            implementation(libs.koin.core)
+            implementation(libs.koin.compose)
+            implementation(libs.koin.compose.viewmodel)
+        }
+        commonTest.dependencies {
+            implementation(libs.kotlin.test)
+            implementation(libs.koin.test)
         }
     }
 }

@@ -11,7 +11,7 @@ import androidx.compose.ui.Modifier
 import org.koin.compose.viewmodel.koinViewModel
 
 @Composable
-fun EventsRoute(
+fun EventsRouteContent(
     modifier: Modifier = Modifier,
     viewModel: EventsViewModel = koinViewModel(),
 ) {

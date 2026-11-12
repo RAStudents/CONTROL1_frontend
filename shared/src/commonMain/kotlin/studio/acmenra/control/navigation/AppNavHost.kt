@@ -14,8 +14,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import studio.acmenra.control.core.network.auth.SessionState
-import studio.acmenra.control.feature.auth.presentation.LoginRoute
-import studio.acmenra.control.feature.events.presentation.EventsRoute
+import studio.acmenra.control.feature.auth.presentation.LoginRouteContent
+import studio.acmenra.control.feature.events.presentation.EventsRouteContent
 
 @Composable
 fun AppNavHost(
@@ -47,12 +47,12 @@ fun AppNavHost(
         modifier = modifier,
     ) {
         composable<LoginRoute> {
-            LoginRoute()
+            LoginRouteContent()
         }
 
         composable<EventsRoute> {
             if (sessionState == SessionState.Authenticated) {
-                EventsRoute()
+                EventsRouteContent()
             } else {
                 Box(
                     modifier = Modifier.fillMaxSize(),

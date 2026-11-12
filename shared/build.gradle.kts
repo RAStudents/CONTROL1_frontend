@@ -18,6 +18,7 @@ kotlin {
         commonMain.dependencies {
             implementation(libs.androidx.lifecycle.viewmodelCompose)
             implementation(libs.androidx.lifecycle.runtimeCompose)
+            implementation(project(":core:network"))
         }
     }
 }

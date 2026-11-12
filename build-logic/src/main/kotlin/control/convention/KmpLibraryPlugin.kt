@@ -33,7 +33,11 @@ class KmpLibraryPlugin : Plugin<Project> {
 
                 @OptIn(ExperimentalWasmDsl::class)
                 wasmJs {
-                    browser()
+                    browser {
+                        testTask {
+                            environment("CHROME_BIN", System.getenv("CHROME_BIN") ?: "/usr/bin/chromium")
+                        }
+                    }
                 }
 
                 sourceSets.named("commonTest").configure {

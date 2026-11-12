@@ -1,6 +1,11 @@
 package studio.acmenra.control.core.network
 
 import com.russhwolf.settings.MapSettings
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.SessionState
@@ -8,6 +13,8 @@ import studio.acmenra.control.core.network.auth.SettingsTokenStorage
 import studio.acmenra.control.core.network.auth.TokenStorage
 import studio.acmenra.control.core.network.model.NetworkError
 import studio.acmenra.control.core.network.model.NetworkResult
+import studio.acmenra.control.core.network.model.RefreshTokenRequest
+import studio.acmenra.control.core.network.model.RefreshTokenResponse
 import studio.acmenra.control.core.network.model.TokenPair
 import studio.acmenra.control.core.network.model.fold
 import studio.acmenra.control.core.network.model.map
@@ -91,7 +98,8 @@ class SessionManagerTest {
                     newTokens = TokenPair("access_2", "refresh_2"),
                 )
 
-            assertTrue(saved)
+            assertNotNull(saved)
+            assertEquals("access_2", saved.tokens.accessToken)
             assertEquals("access_2", storage.getTokens()?.accessToken)
             assertEquals("refresh_2", storage.getTokens()?.refreshToken)
             assertEquals(SessionState.Authenticated, manager.sessionState.value)
@@ -112,7 +120,7 @@ class SessionManagerTest {
                     newTokens = TokenPair("access_2", "refresh_2"),
                 )
 
-            assertFalse(saved)
+            assertNull(saved)
             assertNull(storage.getTokens())
             assertEquals(SessionState.Unauthenticated, manager.sessionState.value)
         }
@@ -132,7 +140,7 @@ class SessionManagerTest {
                     newTokens = TokenPair("access_A2", "refresh_A2"),
                 )
 
-            assertFalse(saved)
+            assertNull(saved)
             assertEquals("access_B", storage.getTokens()?.accessToken)
             assertEquals("refresh_B", storage.getTokens()?.refreshToken)
             assertEquals(SessionState.Authenticated, manager.sessionState.value)
@@ -170,6 +178,136 @@ class SessionManagerTest {
             assertEquals(SessionState.Authenticated, manager.sessionState.value)
         }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun testRefreshSessionSingleFlightConcurrentSuccess() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val manager = SessionManager(storage)
+            manager.saveSession(TokenPair("access_1", "refresh_1"))
+
+            val entered = CompletableDeferred<Unit>()
+            val gate = CompletableDeferred<Unit>()
+            var refreshCallCount = 0
+
+            val jobs =
+                List(10) {
+                    async {
+                        manager.refreshSession(failedAccessToken = "access_1") {
+                            refreshCallCount++
+                            entered.complete(Unit)
+                            gate.await()
+                            TokenPair("access_2", "refresh_2")
+                        }
+                    }
+                }
+
+            entered.await()
+            runCurrent()
+            gate.complete(Unit)
+            val results = jobs.awaitAll()
+
+            assertEquals(1, refreshCallCount)
+            assertEquals(10, results.size)
+            results.forEach { snapshot ->
+                assertNotNull(snapshot)
+                assertEquals("access_2", snapshot.tokens.accessToken)
+                assertEquals("refresh_2", snapshot.tokens.refreshToken)
+            }
+            assertEquals("access_2", storage.getTokens()?.accessToken)
+            assertEquals("refresh_2", storage.getTokens()?.refreshToken)
+            assertEquals(SessionState.Authenticated, manager.sessionState.value)
+        }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun testRefreshSessionReturnsNullExpiresSessionAndWaitingCallsGetNull() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val manager = SessionManager(storage)
+            manager.saveSession(TokenPair("access_1", "refresh_1"))
+
+            val entered = CompletableDeferred<Unit>()
+            val gate = CompletableDeferred<Unit>()
+            var refreshCallCount = 0
+
+            val jobs =
+                List(10) {
+                    async {
+                        manager.refreshSession(failedAccessToken = "access_1") {
+                            refreshCallCount++
+                            entered.complete(Unit)
+                            gate.await()
+                            null
+                        }
+                    }
+                }
+
+            entered.await()
+            runCurrent()
+            gate.complete(Unit)
+            val results = jobs.awaitAll()
+
+            assertEquals(1, refreshCallCount)
+            assertEquals(10, results.size)
+            results.forEach { assertNull(it) }
+            assertNull(storage.getTokens())
+            assertEquals(SessionState.SessionExpired, manager.sessionState.value)
+        }
+
+    @Test
+    fun testRefreshSessionOutdatedFailedAccessTokenReturnsCurrentSnapshotWithoutNetwork() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val manager = SessionManager(storage)
+            manager.saveSession(TokenPair("access_current", "refresh_current"))
+
+            var refreshCallCount = 0
+            val snapshot =
+                manager.refreshSession(failedAccessToken = "access_old") {
+                    refreshCallCount++
+                    TokenPair("access_new", "refresh_new")
+                }
+
+            assertEquals(0, refreshCallCount)
+            assertNotNull(snapshot)
+            assertEquals("access_current", snapshot.tokens.accessToken)
+            assertEquals("access_current", storage.getTokens()?.accessToken)
+            assertEquals(SessionState.Authenticated, manager.sessionState.value)
+        }
+
+    @Test
+    fun testRefreshSessionExceptionPreservesStorageAndNextCallCanRetry() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val manager = SessionManager(storage)
+            manager.saveSession(TokenPair("access_1", "refresh_1"))
+
+            var refreshCallCount = 0
+            assertFailsWith<IllegalStateException> {
+                manager.refreshSession(failedAccessToken = "access_1") {
+                    refreshCallCount++
+                    throw IllegalStateException("Transient network failure")
+                }
+            }
+
+            assertEquals(1, refreshCallCount)
+            assertEquals("access_1", storage.getTokens()?.accessToken)
+            assertEquals(SessionState.Authenticated, manager.sessionState.value)
+
+            val nextSnapshot =
+                manager.refreshSession(failedAccessToken = "access_1") {
+                    refreshCallCount++
+                    TokenPair("access_2", "refresh_2")
+                }
+
+            assertEquals(2, refreshCallCount)
+            assertNotNull(nextSnapshot)
+            assertEquals("access_2", nextSnapshot.tokens.accessToken)
+            assertEquals("access_2", storage.getTokens()?.accessToken)
+            assertEquals(SessionState.Authenticated, manager.sessionState.value)
+        }
+
     @Test
     fun testSettingsTokenStorageMigration() {
         val settings = MapSettings()
@@ -188,6 +326,41 @@ class SessionManagerTest {
         assertEquals(null, settings.getStringOrNull("auth_refresh_token"))
         // New single key should exist
         assertNotNull(settings.getStringOrNull("auth_token_pair"))
+    }
+
+    @Test
+    fun testCorruptJsonInTokenPairWithoutLegacyKeysReturnsNullAndRemovesCorruptKey() {
+        val settings = MapSettings()
+        settings.putString("auth_token_pair", "{corrupted_json")
+
+        val storage = SettingsTokenStorage(settings = settings)
+        val tokens = storage.getTokens()
+
+        assertNull(tokens)
+        assertNull(settings.getStringOrNull("auth_token_pair"))
+    }
+
+    @Test
+    fun testCorruptJsonInTokenPairWithLegacyKeysMigratesAndReplacesCorruptKey() {
+        val settings = MapSettings()
+        settings.putString("auth_token_pair", "{corrupted_json")
+        settings.putString("auth_access_token", "legacy_acc_1")
+        settings.putString("auth_refresh_token", "legacy_ref_1")
+
+        val storage = SettingsTokenStorage(settings = settings)
+        val tokens = storage.getTokens()
+
+        assertNotNull(tokens)
+        assertEquals("legacy_acc_1", tokens.accessToken)
+        assertEquals("legacy_ref_1", tokens.refreshToken)
+
+        assertNull(settings.getStringOrNull("auth_access_token"))
+        assertNull(settings.getStringOrNull("auth_refresh_token"))
+
+        val newRaw = settings.getStringOrNull("auth_token_pair")
+        assertNotNull(newRaw)
+        assertTrue(newRaw.contains("legacy_acc_1"))
+        assertTrue(newRaw.contains("legacy_ref_1"))
     }
 
     @Test
@@ -210,5 +383,21 @@ class SessionManagerTest {
                 onFailure = { (it as NetworkError.Http).statusCode },
             )
         assertEquals(404, failValue)
+    }
+
+    @Test
+    fun testTokenDtoToStringRedactsTokens() {
+        val req = RefreshTokenRequest(refreshToken = "super_secret_refresh_123")
+        assertFalse(req.toString().contains("super_secret_refresh_123"))
+        assertTrue(req.toString().contains("REDACTED"))
+
+        val resp =
+            RefreshTokenResponse(
+                accessToken = "super_secret_access_456",
+                refreshToken = "super_secret_refresh_789",
+            )
+        assertFalse(resp.toString().contains("super_secret_access_456"))
+        assertFalse(resp.toString().contains("super_secret_refresh_789"))
+        assertTrue(resp.toString().contains("REDACTED"))
     }
 }

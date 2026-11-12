@@ -36,6 +36,7 @@ kotlin {
             implementation(libs.ktor.client.js)
         }
         commonTest.dependencies {
+            implementation(libs.kotlin.test)
             implementation(libs.ktor.client.mock)
             implementation(libs.kotlinx.coroutines.test)
             implementation(libs.multiplatformSettings.test)
@@ -54,8 +55,27 @@ buildkonfig {
     objectName = "NetworkConfig"
 
     defaultConfigs {
-        buildConfigField(STRING, "BASE_URL", localProperties.getProperty("BASE_URL"))
-        buildConfigField(BOOLEAN, "ENABLE_LOGS", localProperties.getProperty("ENABLE_LOGS") ?: "false")
-        buildConfigField(BOOLEAN, "DEBUG_MODE", localProperties.getProperty("DEBUG_MODE") ?: "false")
+        buildConfigField(
+            STRING,
+            "BASE_URL",
+            localProperties.getProperty("BASE_URL") ?: System.getenv("BASE_URL") ?: "",
+        )
+        buildConfigField(
+            BOOLEAN,
+            "ENABLE_LOGS",
+            localProperties.getProperty("ENABLE_LOGS") ?: System.getenv("ENABLE_LOGS") ?: "false",
+        )
+        buildConfigField(
+            BOOLEAN,
+            "DEBUG_MODE",
+            localProperties.getProperty("DEBUG_MODE") ?: System.getenv("DEBUG_MODE") ?: "false",
+        )
+        buildConfigField(
+            BOOLEAN,
+            "ALLOW_INSECURE_TRANSPORT",
+            localProperties.getProperty("ALLOW_INSECURE_TRANSPORT")
+                ?: System.getenv("ALLOW_INSECURE_TRANSPORT")
+                ?: "false",
+        )
     }
 }

@@ -10,4 +10,7 @@ dependencies {
     debugImplementation(libs.compose.uiTooling)
     implementation(libs.compose.runtime)
     implementation(libs.compose.ui)
+
+    implementation(project.dependencies.platform(libs.koin.bom))
+    implementation(libs.koin.android)
 }

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="notice_offline_title">Нет интернета</string>
+    <string name="notice_online_restored">Связь восстановлена</string>
+    <string name="notice_close">Закрыть</string>
+</resources>

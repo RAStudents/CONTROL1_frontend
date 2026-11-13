@@ -21,55 +21,57 @@ class LoginViewModel : ViewModel() {
     private val _state = MutableStateFlow(LoginState())
     val state: StateFlow<LoginState> = _state.asStateFlow()
 
-    fun onNoticeConsumed() {
-        _state.update { it.copy(notice = null) }
+    private var nextNoticeId = 1L
+
+    fun onNoticeConsumed(id: Long) {
+        _state.update { state ->
+            state.copy(notices = state.notices.filterNot { it.id == id })
+        }
     }
 
     fun showInfoNotice() {
-        _state.update {
-            it.copy(
-                notice =
-                    Notice.info(
-                        title = Res.string.login_notice_info_title,
-                        message = Res.string.login_notice_info_message,
-                    ),
-            )
-        }
+        enqueueNotice(
+            Notice.info(
+                title = Res.string.login_notice_info_title,
+                message = Res.string.login_notice_info_message,
+                id = nextNoticeId++,
+            ),
+        )
     }
 
     fun showSuccessNotice() {
-        _state.update {
-            it.copy(
-                notice =
-                    Notice.success(
-                        title = Res.string.login_notice_success_title,
-                        message = Res.string.login_notice_success_message,
-                    ),
-            )
-        }
+        enqueueNotice(
+            Notice.success(
+                title = Res.string.login_notice_success_title,
+                message = Res.string.login_notice_success_message,
+                id = nextNoticeId++,
+            ),
+        )
     }
 
     fun showErrorNotice() {
-        _state.update {
-            it.copy(
-                notice =
-                    Notice.error(
-                        title = Res.string.login_notice_error_title,
-                        message = Res.string.login_notice_error_message,
-                    ),
-            )
-        }
+        enqueueNotice(
+            Notice.error(
+                title = Res.string.login_notice_error_title,
+                message = Res.string.login_notice_error_message,
+                id = nextNoticeId++,
+            ),
+        )
     }
 
     fun showOfflineNotice() {
-        _state.update {
-            it.copy(
-                notice =
-                    Notice(
-                        type = NoticeType.Offline,
-                        title = NoticeText.Resource(Res.string.login_notice_offline_title),
-                    ),
-            )
+        enqueueNotice(
+            Notice(
+                type = NoticeType.Offline,
+                title = NoticeText.Resource(Res.string.login_notice_offline_title),
+                id = nextNoticeId++,
+            ),
+        )
+    }
+
+    private fun enqueueNotice(notice: Notice) {
+        _state.update { state ->
+            state.copy(notices = state.notices + notice)
         }
     }
 }

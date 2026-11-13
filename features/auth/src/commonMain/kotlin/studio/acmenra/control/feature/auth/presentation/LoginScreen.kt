@@ -17,7 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.viewmodel.koinViewModel
-import studio.acmenra.control.core.ui.notice.ConsumeNotice
+import studio.acmenra.control.core.ui.notice.ConsumeNotices
 import studio.acmenra.control.core.ui.theme.AmberDimens
 import studio.acmenra.control.feature.auth.generated.resources.Res
 import studio.acmenra.control.feature.auth.generated.resources.login_btn_test_error
@@ -33,8 +33,8 @@ fun LoginRouteContent(
 ) {
     val state by viewModel.state.collectAsState()
 
-    ConsumeNotice(
-        notice = state.notice,
+    ConsumeNotices(
+        notices = state.notices,
         onConsumed = viewModel::onNoticeConsumed,
     )
 

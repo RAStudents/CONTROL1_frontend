@@ -97,7 +97,9 @@ fun NoticeHost(
 
         val frame =
             if (compact) {
-                Modifier.fillMaxWidth()
+                Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.statusBars)
             } else {
                 Modifier
                     .fillMaxWidth()
@@ -120,21 +122,26 @@ fun NoticeHost(
                 horizontalAlignment = if (compact) Alignment.CenterHorizontally else Alignment.End,
             ) {
                 val activeIds = remember(activeNotices) { activeNotices.map { it.id }.toSet() }
+                val activeDisplayed =
+                    remember(displayedNotices.toList(), activeIds) {
+                        displayedNotices.filter { it.id in activeIds }
+                    }
 
-                displayedNotices.forEachIndexed { index, notice ->
+                displayedNotices.forEach { notice ->
                     key(notice.id) {
                         val isActive = notice.id in activeIds
                         val isSwiping = swipingNoticeId == notice.id
-                        val isGluedToTop = compact && (index == 0)
+                        val activeIndex = activeDisplayed.indexOfFirst { it.id == notice.id }
+                        val isGluedToTop = compact && (activeIndex == 0)
 
                         val hasGluedAbove =
-                            (index > 0) &&
+                            (activeIndex > 0) &&
                                 !isSwiping &&
-                                (swipingNoticeId != displayedNotices[index - 1].id)
+                                (swipingNoticeId != activeDisplayed[activeIndex - 1].id)
                         val hasGluedBelow =
-                            (index < displayedNotices.size - 1) &&
+                            (activeIndex in 0 until activeDisplayed.size - 1) &&
                                 !isSwiping &&
-                                (swipingNoticeId != displayedNotices[index + 1].id)
+                                (swipingNoticeId != activeDisplayed[activeIndex + 1].id)
 
                         val targetTopCorner =
                             when {
@@ -176,7 +183,7 @@ fun NoticeHost(
                             notice = notice,
                             isActive = isActive,
                             shape = shape,
-                            edgeToEdge = isGluedToTop && !isSwiping,
+                            edgeToEdge = isGluedToTop,
                             offsetSpec = offsetSpec,
                             sizeSpec = sizeSpec,
                             scaleSpec = scaleSpec,
@@ -246,12 +253,12 @@ private fun AnimatedNoticeItem(
                 initialScale = NoticeDefaults.EnterScale,
                 transformOrigin = TransformOrigin(0.5f, 0f),
             ) +
-            expandVertically(sizeSpec, expandFrom = Alignment.Top, clip = false)
+            expandVertically(sizeSpec, expandFrom = Alignment.Top, clip = true)
 
     val exitTransition =
         if (dismissedBySwipe) {
             fadeOut(fadeSpec) +
-                shrinkVertically(sizeSpec, shrinkTowards = Alignment.Top, clip = false)
+                shrinkVertically(sizeSpec, shrinkTowards = Alignment.Top, clip = true)
         } else {
             slideOutVertically(offsetSpec) { -it } +
                 fadeOut(fadeSpec) +
@@ -260,7 +267,7 @@ private fun AnimatedNoticeItem(
                     targetScale = NoticeDefaults.EnterScale,
                     transformOrigin = TransformOrigin(0.5f, 0f),
                 ) +
-                shrinkVertically(sizeSpec, shrinkTowards = Alignment.Top, clip = false)
+                shrinkVertically(sizeSpec, shrinkTowards = Alignment.Top, clip = true)
         }
 
     AnimatedVisibility(

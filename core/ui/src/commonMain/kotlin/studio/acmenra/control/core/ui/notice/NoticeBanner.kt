@@ -14,15 +14,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.ZeroCornerSize
 import androidx.compose.material3.Icon
@@ -100,15 +95,6 @@ fun NoticeBanner(
             MaterialTheme.shapes.extraLarge
         }
 
-    val insets =
-        if (edgeToEdge) {
-            Modifier.windowInsetsPadding(
-                WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
-            )
-        } else {
-            Modifier
-        }
-
     Surface(
         // Screen readers announce the notice when it appears
         modifier =
@@ -123,7 +109,7 @@ fun NoticeBanner(
         Box {
             Row(
                 modifier =
-                    insets.padding(
+                    Modifier.padding(
                         start = AmberDimens.ScreenMargin,
                         end = AmberDimens.GapSmall,
                         top = AmberDimens.NoticeVerticalPadding,

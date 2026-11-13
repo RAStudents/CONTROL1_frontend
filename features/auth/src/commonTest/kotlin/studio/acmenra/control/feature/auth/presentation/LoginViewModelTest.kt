@@ -9,6 +9,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withTimeout
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.core.network.auth.TokenStorage
@@ -23,6 +24,8 @@ import studio.acmenra.control.feature.auth.domain.validation.isValidEmail
 import studio.acmenra.control.feature.auth.generated.resources.Res
 import studio.acmenra.control.feature.auth.generated.resources.login_error_bad_request
 import studio.acmenra.control.feature.auth.generated.resources.login_error_internal_server
+import studio.acmenra.control.feature.auth.generated.resources.login_error_not_found
+import studio.acmenra.control.feature.auth.generated.resources.login_error_service_unavailable
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -52,10 +55,16 @@ private class FakeLoginUseCase : LoginUseCase {
     var lastCredentials: LoginCredentials? = null
     var delayMs: Long = 0L
     var throwableToThrow: Throwable? = null
+    var triggerTimeout = false
 
     override suspend fun invoke(credentials: LoginCredentials): NetworkResult<AuthTokens> {
         invocationCount++
         lastCredentials = credentials
+        if (triggerTimeout) {
+            withTimeout(1) {
+                delay(100)
+            }
+        }
         if (delayMs > 0) {
             delay(delayMs)
         }
@@ -338,6 +347,82 @@ class LoginViewModelTest {
             assertNotNull(resourceMessage)
             assertEquals(Res.string.login_error_bad_request, resourceMessage.resource)
             assertEquals(listOf(400), resourceMessage.args)
+        }
+
+    @Test
+    fun testTimeoutCancellationExceptionResetsLoadingAndShowsNotice() =
+        runTest {
+            val customLoginUseCase =
+                FakeLoginUseCase().apply {
+                    triggerTimeout = true
+                }
+            val customViewModel = LoginViewModel(customLoginUseCase, sessionManager)
+
+            customViewModel.onEmailChanged("user@example.com")
+            customViewModel.onPasswordChanged("password")
+            customViewModel.onSubmit()
+
+            advanceUntilIdle()
+
+            assertFalse(customViewModel.state.value.isLoading)
+            assertFalse(customViewModel.state.value.isSuccess)
+            assertEquals(1, customViewModel.state.value.notices.size)
+        }
+
+    @Test
+    fun testHttp503ServiceUnavailableShowsCorrectNotice() =
+        runTest {
+            loginUseCase.result =
+                NetworkResult.Failure(
+                    NetworkError.Http(
+                        statusCode = 503,
+                        message = "Service Unavailable",
+                    ),
+                )
+
+            viewModel.onEmailChanged("user@example.com")
+            viewModel.onPasswordChanged("password")
+            viewModel.onSubmit()
+
+            advanceUntilIdle()
+
+            assertFalse(viewModel.state.value.isLoading)
+            assertEquals(1, viewModel.state.value.notices.size)
+            val notice =
+                viewModel.state.value.notices
+                    .first()
+            val resourceMessage = notice.message as? NoticeText.Resource
+            assertNotNull(resourceMessage)
+            assertEquals(Res.string.login_error_service_unavailable, resourceMessage.resource)
+            assertEquals(listOf(503), resourceMessage.args)
+        }
+
+    @Test
+    fun testHttp404EndpointNotFoundShowsCorrectNotice() =
+        runTest {
+            loginUseCase.result =
+                NetworkResult.Failure(
+                    NetworkError.Http(
+                        statusCode = 404,
+                        message = "Not Found",
+                    ),
+                )
+
+            viewModel.onEmailChanged("user@example.com")
+            viewModel.onPasswordChanged("password")
+            viewModel.onSubmit()
+
+            advanceUntilIdle()
+
+            assertFalse(viewModel.state.value.isLoading)
+            assertEquals(1, viewModel.state.value.notices.size)
+            val notice =
+                viewModel.state.value.notices
+                    .first()
+            val resourceMessage = notice.message as? NoticeText.Resource
+            assertNotNull(resourceMessage)
+            assertEquals(Res.string.login_error_not_found, resourceMessage.resource)
+            assertEquals(listOf(404), resourceMessage.args)
         }
 
     @Test

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -11,7 +12,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.client.isConnectivityError
-import studio.acmenra.control.core.network.client.isFatalError
 import studio.acmenra.control.core.network.model.NetworkError
 import studio.acmenra.control.core.network.model.NetworkResult
 import studio.acmenra.control.core.ui.notice.Notice
@@ -26,6 +26,7 @@ import studio.acmenra.control.feature.auth.generated.resources.login_error_gener
 import studio.acmenra.control.feature.auth.generated.resources.login_error_internal_server
 import studio.acmenra.control.feature.auth.generated.resources.login_error_network_no_connection
 import studio.acmenra.control.feature.auth.generated.resources.login_error_network_title
+import studio.acmenra.control.feature.auth.generated.resources.login_error_not_found
 import studio.acmenra.control.feature.auth.generated.resources.login_error_serialization
 import studio.acmenra.control.feature.auth.generated.resources.login_error_server_title
 import studio.acmenra.control.feature.auth.generated.resources.login_error_service_unavailable
@@ -119,10 +120,16 @@ class LoginViewModel(
                             handleFailure(result.error)
                         }
                     }
+                } catch (e: TimeoutCancellationException) {
+                    handleFailure(
+                        NetworkError.Connectivity(
+                            message = "Request timed out",
+                            cause = e,
+                        ),
+                    )
                 } catch (e: CancellationException) {
                     throw e
                 } catch (t: Throwable) {
-                    if (isFatalError(t)) throw t
                     val error =
                         if (isConnectivityError(t)) {
                             NetworkError.Connectivity(cause = t)
@@ -160,8 +167,9 @@ class LoginViewModel(
                         when (error.statusCode) {
                             400 -> Res.string.login_error_bad_request
                             403 -> Res.string.login_error_forbidden
-                            404 -> Res.string.login_error_service_unavailable
+                            404 -> Res.string.login_error_not_found
                             429 -> Res.string.login_error_too_many_requests
+                            503 -> Res.string.login_error_service_unavailable
                             in 500..599 -> Res.string.login_error_internal_server
                             else -> Res.string.login_error_general_server
                         }

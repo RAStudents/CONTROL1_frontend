@@ -56,4 +56,23 @@ class AuthRepositoryTest {
             assertTrue(result is NetworkResult.Failure)
             assertTrue(result.error is NetworkError.Serialization)
         }
+
+    @Test
+    fun testEmptyRefreshTokenInResponseProducesSerializationError() =
+        runTest {
+            val fakeDataSource =
+                FakeAuthRemoteDataSource(
+                    NetworkResult.Success(
+                        LoginResponseDto(
+                            accessToken = "access_123",
+                            refreshToken = "",
+                        ),
+                    ),
+                )
+            val repository = AuthRepositoryImpl(fakeDataSource)
+
+            val result = repository.login(LoginCredentials("user@example.com", "pass"))
+            assertTrue(result is NetworkResult.Failure)
+            assertTrue(result.error is NetworkError.Serialization)
+        }
 }

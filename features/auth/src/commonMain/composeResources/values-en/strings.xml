@@ -14,8 +14,9 @@
     <string name="login_error_unknown">Unknown error occurred</string>
     <string name="login_error_bad_request">Bad request (code %1$d)</string>
     <string name="login_error_forbidden">Access forbidden (code %1$d)</string>
-    <string name="login_error_service_unavailable">Authorization service unavailable (code %1$d)</string>
+    <string name="login_error_not_found">Service endpoint not found (code %1$d)</string>
     <string name="login_error_too_many_requests">Too many requests. Please try again later (code %1$d)</string>
+    <string name="login_error_service_unavailable">Service temporarily unavailable (code %1$d)</string>
     <string name="login_error_internal_server">Internal server error (code %1$d)</string>
     <string name="login_error_general_server">Server error (code %1$d)</string>
 </resources>

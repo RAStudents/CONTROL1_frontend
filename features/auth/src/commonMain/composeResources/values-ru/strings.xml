@@ -14,8 +14,9 @@
     <string name="login_error_unknown">Неизвестная ошибка</string>
     <string name="login_error_bad_request">Неверный запрос (код %1$d)</string>
     <string name="login_error_forbidden">Доступ запрещен (код %1$d)</string>
-    <string name="login_error_service_unavailable">Сервис авторизации недоступен (код %1$d)</string>
+    <string name="login_error_not_found">Сервис или адрес не найден (код %1$d)</string>
     <string name="login_error_too_many_requests">Слишком много запросов. Попробуйте позже (код %1$d)</string>
+    <string name="login_error_service_unavailable">Сервис временно недоступен (код %1$d)</string>
     <string name="login_error_internal_server">Внутренняя ошибка сервера (код %1$d)</string>
     <string name="login_error_general_server">Ошибка сервера (код %1$d)</string>
 </resources>

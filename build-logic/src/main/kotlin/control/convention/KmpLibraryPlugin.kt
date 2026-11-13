@@ -26,6 +26,10 @@ class KmpLibraryPlugin : Plugin<Project> {
                     compileSdk = libs.findVersion("android-compileSdk").get().requiredVersion.toInt()
                     minSdk = libs.findVersion("android-minSdk").get().requiredVersion.toInt()
 
+                    androidResources {
+                        enable = true
+                    }
+
                     compilerOptions {
                         jvmTarget.set(JvmTarget.JVM_17)
                     }

@@ -10,6 +10,7 @@ kotlin {
     sourceSets {
         commonMain.dependencies {
             implementation(project(":core:network"))
+            implementation(project(":core:ui"))
 
             implementation(project.dependencies.platform(libs.koin.bom))
             implementation(libs.koin.core)

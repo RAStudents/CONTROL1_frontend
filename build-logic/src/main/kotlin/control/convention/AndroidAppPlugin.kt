@@ -12,6 +12,7 @@ class AndroidAppPlugin : Plugin<Project> {
         with(target) {
             with(pluginManager) {
                 apply("com.android.application")
+                apply("org.jetbrains.compose")
                 apply("org.jetbrains.kotlin.plugin.compose")
                 apply("org.jlleitschuh.gradle.ktlint")
             }

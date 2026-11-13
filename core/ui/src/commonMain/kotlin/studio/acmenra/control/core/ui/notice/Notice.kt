@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import org.jetbrains.compose.resources.StringResource
 import org.jetbrains.compose.resources.stringResource
+import kotlin.random.Random
 
 enum class NoticeType { Info, Success, Error, Offline }
 
@@ -52,21 +53,21 @@ val Notice.isPersistent: Boolean
 
 // Lives in a State field, is shown through ConsumeNotice and then reset by the ViewModel.
 // key dedupes: a notice with the same key is ignored while one is current or queued.
-// id is assigned by NoticeController (or preserved if specified by client).
+// id defaults to a positive unique ID generated automatically.
 data class Notice(
     val type: NoticeType,
     val title: NoticeText,
     val message: NoticeText? = null,
     val durationMs: Long? = NoticeDefaults.durationFor(type),
     val key: String? = null,
-    val id: Long = 0L,
+    val id: Long = Random.nextLong(1L, Long.MAX_VALUE),
 ) {
     companion object {
         fun info(
             title: StringResource,
             message: StringResource? = null,
             key: String? = null,
-            id: Long = 0L,
+            id: Long = Random.nextLong(1L, Long.MAX_VALUE),
         ) = Notice(
             type = NoticeType.Info,
             title = NoticeText.Resource(title),
@@ -79,7 +80,7 @@ data class Notice(
             title: StringResource,
             message: StringResource? = null,
             key: String? = null,
-            id: Long = 0L,
+            id: Long = Random.nextLong(1L, Long.MAX_VALUE),
         ) = Notice(
             type = NoticeType.Success,
             title = NoticeText.Resource(title),
@@ -92,7 +93,7 @@ data class Notice(
             title: StringResource,
             message: StringResource? = null,
             key: String? = null,
-            id: Long = 0L,
+            id: Long = Random.nextLong(1L, Long.MAX_VALUE),
         ) = Notice(
             type = NoticeType.Error,
             title = NoticeText.Resource(title),
@@ -105,7 +106,7 @@ data class Notice(
             title: StringResource,
             serverMessage: String,
             key: String? = null,
-            id: Long = 0L,
+            id: Long = Random.nextLong(1L, Long.MAX_VALUE),
         ) = Notice(
             type = NoticeType.Error,
             title = NoticeText.Resource(title),
@@ -118,7 +119,7 @@ data class Notice(
             title: StringResource,
             message: StringResource? = null,
             key: String? = null,
-            id: Long = 0L,
+            id: Long = Random.nextLong(1L, Long.MAX_VALUE),
         ) = Notice(
             type = NoticeType.Offline,
             title = NoticeText.Resource(title),
@@ -130,7 +131,7 @@ data class Notice(
     }
 }
 
-// Single instance per app (Koin single). Call from the main thread only.
+// Single instance per app (Koin single). Thread-safe.
 class NoticeController {
     private val _notices = MutableStateFlow<List<Notice>>(emptyList())
     val notices: StateFlow<List<Notice>> = _notices.asStateFlow()
@@ -139,17 +140,25 @@ class NoticeController {
     private val _hosts = MutableStateFlow<List<Any>>(emptyList())
     val hosts: StateFlow<List<Any>> = _hosts.asStateFlow()
 
-    private var nextId = 1L
-
-    fun show(notice: Notice) {
+    fun show(notice: Notice): Long {
         val key = notice.key
-        if (key != null && _notices.value.any { it.key == key }) return
-        val noticeId = if (notice.id != 0L) notice.id else nextId++
-        val queued = notice.copy(id = noticeId)
+        val candidateId = if (notice.id != 0L) notice.id else Random.nextLong(1L, Long.MAX_VALUE)
+        val entry = if (notice.id == candidateId) notice else notice.copy(id = candidateId)
+        var actualId = candidateId
+
         _notices.update { currentList ->
+            if (key != null) {
+                val existing = currentList.firstOrNull { it.key == key }
+                if (existing != null) {
+                    actualId = existing.id
+                    return@update currentList
+                }
+            }
+            actualId = entry.id
             val trimmed = trimForNewNotice(currentList, NoticeDefaults.MaxVisibleNotices)
-            trimmed + queued
+            trimmed + entry
         }
+        return actualId
     }
 
     fun dismiss(id: Long) {

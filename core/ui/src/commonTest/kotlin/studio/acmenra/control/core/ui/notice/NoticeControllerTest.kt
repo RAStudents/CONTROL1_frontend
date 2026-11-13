@@ -154,4 +154,34 @@ class NoticeControllerTest {
         controller.detachHost(token1)
         assertEquals(listOf(token2), controller.hosts.value)
     }
+
+    @Test
+    fun testShowReturnsIdAndPreservesDeduplicatedId() {
+        val controller = NoticeController()
+        val notice1 = Notice(type = NoticeType.Info, title = NoticeText.Raw("N1"), key = "key1")
+        val notice2 = Notice(type = NoticeType.Info, title = NoticeText.Raw("N2"), key = "key1")
+
+        val id1 = controller.show(notice1)
+        assertEquals(notice1.id, id1)
+
+        val id2 = controller.show(notice2)
+        assertEquals(id1, id2)
+        assertEquals(1, controller.notices.value.size)
+        assertEquals(
+            id1,
+            controller.notices.value
+                .first()
+                .id,
+        )
+    }
+
+    @Test
+    fun testDefaultIdIsPositiveAndUnique() {
+        val n1 = Notice(type = NoticeType.Info, title = NoticeText.Raw("1"))
+        val n2 = Notice(type = NoticeType.Info, title = NoticeText.Raw("2"))
+
+        assertTrue(n1.id > 0L)
+        assertTrue(n2.id > 0L)
+        assertTrue(n1.id != n2.id)
+    }
 }

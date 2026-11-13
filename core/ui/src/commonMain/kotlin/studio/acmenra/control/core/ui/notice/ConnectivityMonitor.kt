@@ -28,9 +28,8 @@ fun ConnectivityNotices(
             if (!online) {
                 wasOffline = true
                 controller.show(
-                    Notice(
-                        type = NoticeType.Offline,
-                        title = NoticeText.Resource(Res.string.notice_offline_title),
+                    Notice.offline(
+                        title = Res.string.notice_offline_title,
                         key = OFFLINE_KEY,
                     ),
                 )

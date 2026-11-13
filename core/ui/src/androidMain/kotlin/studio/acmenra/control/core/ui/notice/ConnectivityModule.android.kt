@@ -26,6 +26,13 @@ class AndroidConnectivityMonitor(
 
     override val isOnline: Flow<Boolean> =
         callbackFlow {
+            val cm = manager
+            if (cm == null) {
+                trySend(true)
+                awaitClose { }
+                return@callbackFlow
+            }
+
             val callback =
                 object : ConnectivityManager.NetworkCallback() {
                     override fun onCapabilitiesChanged(
@@ -36,17 +43,28 @@ class AndroidConnectivityMonitor(
                     }
 
                     override fun onLost(network: Network) {
-                        trySend(false)
+                        trySend(currentState())
                     }
                 }
-            manager.registerDefaultNetworkCallback(callback)
+
+            val registered =
+                runCatching {
+                    cm.registerDefaultNetworkCallback(callback)
+                }.isSuccess
+
             trySend(currentState())
-            awaitClose { manager.unregisterNetworkCallback(callback) }
+
+            awaitClose {
+                if (registered) {
+                    runCatching { cm.unregisterNetworkCallback(callback) }
+                }
+            }
         }.distinctUntilChanged()
 
     private fun currentState(): Boolean {
-        val network = manager.activeNetwork ?: return false
-        return manager.getNetworkCapabilities(network)?.isValidated() ?: false
+        val cm = manager ?: return true
+        val network = cm.activeNetwork ?: return false
+        return cm.getNetworkCapabilities(network)?.isValidated() ?: false
     }
 
     private fun NetworkCapabilities.isValidated(): Boolean = hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)

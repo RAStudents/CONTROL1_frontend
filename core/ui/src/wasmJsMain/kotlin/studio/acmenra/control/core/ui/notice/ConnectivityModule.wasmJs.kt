@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import org.koin.core.module.Module
 import org.koin.dsl.module
+import org.w3c.dom.events.Event
 
 actual val connectivityModule: Module =
     module {
@@ -17,13 +18,20 @@ actual val connectivityModule: Module =
 private fun navigatorOnLine(): Boolean = js("navigator.onLine")
 
 // navigator.onLine reports the device network link, not backend availability.
-// Listeners are never removed: the monitor lives as long as the tab does.
 class WebConnectivityMonitor : ConnectivityMonitor {
     override val isOnline: Flow<Boolean> =
         callbackFlow {
+            val onlineListener: (Event) -> Unit = { trySend(true) }
+            val offlineListener: (Event) -> Unit = { trySend(false) }
+
+            window.addEventListener("online", onlineListener)
+            window.addEventListener("offline", offlineListener)
+
             trySend(navigatorOnLine())
-            window.addEventListener("online") { trySend(true) }
-            window.addEventListener("offline") { trySend(false) }
-            awaitClose { }
+
+            awaitClose {
+                window.removeEventListener("online", onlineListener)
+                window.removeEventListener("offline", offlineListener)
+            }
         }.distinctUntilChanged()
 }

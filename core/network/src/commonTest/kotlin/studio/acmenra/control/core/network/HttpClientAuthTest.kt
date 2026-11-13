@@ -20,6 +20,8 @@ import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.core.network.client.HttpClientFactory
 import studio.acmenra.control.core.network.client.safeRequest
+import studio.acmenra.control.core.network.model.NetworkError
+import studio.acmenra.control.core.network.model.NetworkResult
 import studio.acmenra.control.core.network.model.TokenPair
 import studio.acmenra.control.core.network.model.getOrNull
 import kotlin.test.Test
@@ -708,6 +710,64 @@ class HttpClientAuthTest {
                         get("https://api.example.com/api/data")
                     }
                 }
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun testSafeRequestCatchesFailToFetchErrorAsConnectivityError() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    enableLogs = false,
+                    debugMode = true,
+                    engine =
+                        MockEngine {
+                            throw Error("Fail to fetch")
+                        },
+                )
+
+            try {
+                val result =
+                    client.safeRequest<TestData> {
+                        get("https://api.example.com/api/data")
+                    }
+                assertTrue(result is NetworkResult.Failure)
+                assertTrue(result.error is NetworkError.Connectivity)
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun testSafeRequestCatchesUnknownThrowableAsUnknownError() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    enableLogs = false,
+                    debugMode = true,
+                    engine =
+                        MockEngine {
+                            throw Error("Unexpected native crash")
+                        },
+                )
+
+            try {
+                val result =
+                    client.safeRequest<TestData> {
+                        get("https://api.example.com/api/data")
+                    }
+                assertTrue(result is NetworkResult.Failure)
+                assertTrue(result.error is NetworkError.Unknown)
             } finally {
                 client.close()
             }

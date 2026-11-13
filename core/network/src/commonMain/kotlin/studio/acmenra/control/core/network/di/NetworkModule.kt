@@ -26,9 +26,18 @@ val networkModule =
 
         single(named("api")) {
             val config = get<ApiConfig>()
+            val rawUrl = config.apiBaseUrl.trim()
+            val safeUrl =
+                if (rawUrl.startsWith("https://", ignoreCase = true) ||
+                    rawUrl.startsWith("http://", ignoreCase = true)
+                ) {
+                    rawUrl
+                } else {
+                    "https://api.example.com"
+                }
             HttpClientFactory.createApiClient(
                 sessionManager = get(),
-                apiBaseUrl = config.apiBaseUrl,
+                apiBaseUrl = safeUrl,
                 enableLogs = config.enableLogs,
                 debugMode = config.debugMode,
                 allowInsecureTransport = config.allowInsecureTransport,

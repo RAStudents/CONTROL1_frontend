@@ -52,7 +52,7 @@ suspend inline fun <reified T> HttpClient.safeRequest(
                         cause = e,
                     ),
                 )
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 if (e is CancellationException) throw e
                 NetworkResult.Failure(
                     NetworkError.Unknown(
@@ -106,15 +106,46 @@ suspend inline fun <reified T> HttpClient.safeRequest(
                 cause = e,
             ),
         )
-    } catch (e: Exception) {
+    } catch (e: Throwable) {
         if (e is CancellationException) throw e
-        NetworkResult.Failure(
-            NetworkError.Unknown(
-                message = e.message ?: "Unknown error occurred",
-                cause = e,
-            ),
-        )
+        if (isConnectivityError(e)) {
+            NetworkResult.Failure(
+                NetworkError.Connectivity(
+                    message = "Network connection failed: ${e.message}",
+                    cause = e,
+                ),
+            )
+        } else {
+            NetworkResult.Failure(
+                NetworkError.Unknown(
+                    message = e.message ?: "Unknown error occurred",
+                    cause = e,
+                ),
+            )
+        }
     }
+
+fun isConnectivityError(e: Throwable): Boolean {
+    if (e is HttpRequestTimeoutException ||
+        e is ConnectTimeoutException ||
+        e is SocketTimeoutException ||
+        e is IOException
+    ) {
+        return true
+    }
+    val message = e.message?.lowercase() ?: ""
+    val causeMessage = e.cause?.message?.lowercase() ?: ""
+    return message.contains("failed to fetch") ||
+        message.contains("fail to fetch") ||
+        message.contains("networkerror") ||
+        message.contains("network error") ||
+        message.contains("load failed") ||
+        causeMessage.contains("failed to fetch") ||
+        causeMessage.contains("fail to fetch") ||
+        causeMessage.contains("networkerror") ||
+        causeMessage.contains("network error") ||
+        causeMessage.contains("load failed")
+}
 
 @PublishedApi
 internal suspend fun HttpResponse.readErrorBodySafely(): String? =
@@ -122,6 +153,6 @@ internal suspend fun HttpResponse.readErrorBodySafely(): String? =
         bodyAsText()
     } catch (e: CancellationException) {
         throw e
-    } catch (_: Exception) {
+    } catch (_: Throwable) {
         null
     }

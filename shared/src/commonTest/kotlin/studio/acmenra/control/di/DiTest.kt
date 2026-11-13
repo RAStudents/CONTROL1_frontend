@@ -7,7 +7,6 @@ import org.koin.dsl.koinApplication
 import org.koin.dsl.module
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.TokenStorage
-import studio.acmenra.control.core.network.client.ApiConfig
 import studio.acmenra.control.core.network.model.TokenPair
 import studio.acmenra.control.feature.auth.presentation.LoginViewModel
 import studio.acmenra.control.feature.events.presentation.EventsViewModel
@@ -43,11 +42,6 @@ class DiTest {
                     appModule,
                     module {
                         single<TokenStorage> { FakeTokenStorage() }
-                        single {
-                            ApiConfig(
-                                apiBaseUrl = "https://api.example.com",
-                            )
-                        }
                     },
                 )
             }

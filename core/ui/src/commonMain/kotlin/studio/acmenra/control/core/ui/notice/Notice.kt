@@ -47,9 +47,12 @@ internal fun NoticeText.resolve(): String =
         is NoticeText.Raw -> value
     }
 
+val Notice.isPersistent: Boolean
+    get() = durationMs == null
+
 // Lives in a State field, is shown through ConsumeNotice and then reset by the ViewModel.
 // key dedupes: a notice with the same key is ignored while one is current or queued.
-// id is assigned by NoticeController.
+// id is assigned by NoticeController (or preserved if specified by client).
 data class Notice(
     val type: NoticeType,
     val title: NoticeText,
@@ -63,25 +66,67 @@ data class Notice(
             title: StringResource,
             message: StringResource? = null,
             key: String? = null,
-        ) = Notice(NoticeType.Info, NoticeText.Resource(title), message?.let { NoticeText.Resource(it) }, key = key)
+            id: Long = 0L,
+        ) = Notice(
+            type = NoticeType.Info,
+            title = NoticeText.Resource(title),
+            message = message?.let { NoticeText.Resource(it) },
+            key = key,
+            id = id,
+        )
 
         fun success(
             title: StringResource,
             message: StringResource? = null,
             key: String? = null,
-        ) = Notice(NoticeType.Success, NoticeText.Resource(title), message?.let { NoticeText.Resource(it) }, key = key)
+            id: Long = 0L,
+        ) = Notice(
+            type = NoticeType.Success,
+            title = NoticeText.Resource(title),
+            message = message?.let { NoticeText.Resource(it) },
+            key = key,
+            id = id,
+        )
 
         fun error(
             title: StringResource,
             message: StringResource? = null,
             key: String? = null,
-        ) = Notice(NoticeType.Error, NoticeText.Resource(title), message?.let { NoticeText.Resource(it) }, key = key)
+            id: Long = 0L,
+        ) = Notice(
+            type = NoticeType.Error,
+            title = NoticeText.Resource(title),
+            message = message?.let { NoticeText.Resource(it) },
+            key = key,
+            id = id,
+        )
 
         fun error(
             title: StringResource,
             serverMessage: String,
             key: String? = null,
-        ) = Notice(NoticeType.Error, NoticeText.Resource(title), NoticeText.Raw(serverMessage), key = key)
+            id: Long = 0L,
+        ) = Notice(
+            type = NoticeType.Error,
+            title = NoticeText.Resource(title),
+            message = NoticeText.Raw(serverMessage),
+            key = key,
+            id = id,
+        )
+
+        fun offline(
+            title: StringResource,
+            message: StringResource? = null,
+            key: String? = null,
+            id: Long = 0L,
+        ) = Notice(
+            type = NoticeType.Offline,
+            title = NoticeText.Resource(title),
+            message = message?.let { NoticeText.Resource(it) },
+            durationMs = null,
+            key = key,
+            id = id,
+        )
     }
 }
 
@@ -89,9 +134,6 @@ data class Notice(
 class NoticeController {
     private val _notices = MutableStateFlow<List<Notice>>(emptyList())
     val notices: StateFlow<List<Notice>> = _notices.asStateFlow()
-
-    private val _current = MutableStateFlow<Notice?>(null)
-    val current: StateFlow<Notice?> = _current.asStateFlow()
 
     // All live NoticeHost instances. Only the last one (topmost layer) renders the notice.
     private val _hosts = MutableStateFlow<List<Any>>(emptyList())
@@ -102,27 +144,20 @@ class NoticeController {
     fun show(notice: Notice) {
         val key = notice.key
         if (key != null && _notices.value.any { it.key == key }) return
-        val queued = notice.copy(id = nextId++)
+        val noticeId = if (notice.id != 0L) notice.id else nextId++
+        val queued = notice.copy(id = noticeId)
         _notices.update { currentList ->
-            val trimmed =
-                if (currentList.size >= NoticeDefaults.MaxVisibleNotices) {
-                    currentList.drop(currentList.size - NoticeDefaults.MaxVisibleNotices + 1)
-                } else {
-                    currentList
-                }
+            val trimmed = trimForNewNotice(currentList, NoticeDefaults.MaxVisibleNotices)
             trimmed + queued
         }
-        _current.value = _notices.value.lastOrNull()
     }
 
     fun dismiss(id: Long) {
         _notices.update { list -> list.filterNot { it.id == id } }
-        _current.value = _notices.value.lastOrNull()
     }
 
     fun dismissKey(key: String) {
         _notices.update { list -> list.filterNot { it.key == key } }
-        _current.value = _notices.value.lastOrNull()
     }
 
     internal fun attachHost(token: Any) {
@@ -131,5 +166,33 @@ class NoticeController {
 
     internal fun detachHost(token: Any) {
         _hosts.update { it - token }
+    }
+
+    internal fun trimForNewNotice(
+        currentList: List<Notice>,
+        maxVisible: Int,
+    ): List<Notice> {
+        if (currentList.size < maxVisible) return currentList
+        val neededRemovals = currentList.size - maxVisible + 1
+        var remainingToRemove = neededRemovals
+        val mutable = currentList.toMutableList()
+
+        // Phase 1: drop oldest non-persistent notices
+        val iterator = mutable.iterator()
+        while (iterator.hasNext() && remainingToRemove > 0) {
+            val item = iterator.next()
+            if (!item.isPersistent) {
+                iterator.remove()
+                remainingToRemove--
+            }
+        }
+
+        // Phase 2: if still over limit (all visible are persistent), drop oldest persistent
+        while (remainingToRemove > 0 && mutable.isNotEmpty()) {
+            mutable.removeAt(0)
+            remainingToRemove--
+        }
+
+        return mutable
     }
 }

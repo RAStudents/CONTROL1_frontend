@@ -200,7 +200,8 @@ private fun BoxScope.TimerBar(
 ) {
     val progress = remember(id) { Animatable(1f) }
     LaunchedEffect(id) {
-        progress.animateTo(0f, tween(durationMillis = durationMs.toInt(), easing = LinearEasing))
+        val safeDuration = durationMs.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+        progress.animateTo(0f, tween(durationMillis = safeDuration, easing = LinearEasing))
     }
     Box(
         Modifier

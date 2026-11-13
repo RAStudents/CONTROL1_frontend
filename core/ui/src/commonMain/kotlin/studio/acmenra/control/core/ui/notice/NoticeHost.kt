@@ -38,6 +38,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -332,10 +333,28 @@ fun ConsumeNotice(
     onConsumed: () -> Unit,
     controller: NoticeController = koinInject(),
 ) {
+    val currentOnConsumed by rememberUpdatedState(onConsumed)
     LaunchedEffect(notice) {
         if (notice != null) {
             controller.show(notice)
-            onConsumed()
+            currentOnConsumed()
         }
+    }
+}
+
+// Queue bridge: the ViewModel keeps a list of pending notices in State.
+// The screen calls ConsumeNotices(state.notices, viewModel::onNoticeConsumed).
+// Notices are delivered to NoticeController one-by-one without conflation.
+@Composable
+fun ConsumeNotices(
+    notices: List<Notice>,
+    onConsumed: (Long) -> Unit,
+    controller: NoticeController = koinInject(),
+) {
+    val currentOnConsumed by rememberUpdatedState(onConsumed)
+    LaunchedEffect(notices) {
+        val pending = notices.firstOrNull() ?: return@LaunchedEffect
+        controller.show(pending)
+        currentOnConsumed(pending.id)
     }
 }

@@ -716,7 +716,7 @@ class HttpClientAuthTest {
         }
 
     @Test
-    fun testSafeRequestCatchesFailToFetchErrorAsConnectivityError() =
+    fun testSafeRequestRecognizesDeeplyNestedCauseChainConnectivityError() =
         runTest {
             val storage = FakeTokenStorage()
             val sessionManager = SessionManager(storage)
@@ -728,7 +728,10 @@ class HttpClientAuthTest {
                     debugMode = true,
                     engine =
                         MockEngine {
-                            throw Error("Fail to fetch")
+                            throw RuntimeException(
+                                "KtorException",
+                                IllegalStateException("WrapperException", Exception("Failed to fetch")),
+                            )
                         },
                 )
 
@@ -745,7 +748,7 @@ class HttpClientAuthTest {
         }
 
     @Test
-    fun testSafeRequestCatchesUnknownThrowableAsUnknownError() =
+    fun testSafeRequestRethrowsFatalErrorsWithoutMaskingThem() =
         runTest {
             val storage = FakeTokenStorage()
             val sessionManager = SessionManager(storage)
@@ -757,7 +760,63 @@ class HttpClientAuthTest {
                     debugMode = true,
                     engine =
                         MockEngine {
-                            throw Error("Unexpected native crash")
+                            throw OutOfMemoryError("Fake OutOfMemoryError")
+                        },
+                )
+
+            try {
+                assertFailsWith<OutOfMemoryError> {
+                    client.safeRequest<TestData> {
+                        get("https://api.example.com/api/data")
+                    }
+                }
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun testSafeRequestRethrowsNonConnectivityErrorsWithoutConvertingToUnknown() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    enableLogs = false,
+                    debugMode = true,
+                    engine =
+                        MockEngine {
+                            throw Error("Fatal linkage failure")
+                        },
+                )
+
+            try {
+                assertFailsWith<Error> {
+                    client.safeRequest<TestData> {
+                        get("https://api.example.com/api/data")
+                    }
+                }
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun testSafeRequestCatchesUnknownExceptionAsUnknownError() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    enableLogs = false,
+                    debugMode = true,
+                    engine =
+                        MockEngine {
+                            throw RuntimeException("Unexpected runtime failure")
                         },
                 )
 

@@ -53,13 +53,24 @@ suspend inline fun <reified T> HttpClient.safeRequest(
                     ),
                 )
             } catch (e: Throwable) {
-                if (e is CancellationException) throw e
-                NetworkResult.Failure(
-                    NetworkError.Unknown(
-                        message = e.message ?: "Failed to read response body",
-                        cause = e,
-                    ),
-                )
+                if (isFatalError(e)) throw e
+                if (isConnectivityError(e)) {
+                    NetworkResult.Failure(
+                        NetworkError.Connectivity(
+                            message = "Connection lost while reading response: ${e.message}",
+                            cause = e,
+                        ),
+                    )
+                } else if (e is Exception) {
+                    NetworkResult.Failure(
+                        NetworkError.Unknown(
+                            message = e.message ?: "Failed to read response body",
+                            cause = e,
+                        ),
+                    )
+                } else {
+                    throw e
+                }
             }
         } else {
             val errorBody = response.readErrorBodySafely()
@@ -107,7 +118,7 @@ suspend inline fun <reified T> HttpClient.safeRequest(
             ),
         )
     } catch (e: Throwable) {
-        if (e is CancellationException) throw e
+        if (isFatalError(e)) throw e
         if (isConnectivityError(e)) {
             NetworkResult.Failure(
                 NetworkError.Connectivity(
@@ -115,37 +126,65 @@ suspend inline fun <reified T> HttpClient.safeRequest(
                     cause = e,
                 ),
             )
-        } else {
+        } else if (e is Exception) {
             NetworkResult.Failure(
                 NetworkError.Unknown(
                     message = e.message ?: "Unknown error occurred",
                     cause = e,
                 ),
             )
+        } else {
+            throw e
         }
     }
 
-fun isConnectivityError(e: Throwable): Boolean {
-    if (e is HttpRequestTimeoutException ||
-        e is ConnectTimeoutException ||
-        e is SocketTimeoutException ||
-        e is IOException
-    ) {
-        return true
+fun isFatalError(throwable: Throwable): Boolean {
+    if (throwable is CancellationException) return true
+    if (throwable is AssertionError) return true
+
+    val simpleName = throwable::class.simpleName ?: ""
+    return simpleName == "OutOfMemoryError" ||
+        simpleName == "StackOverflowError" ||
+        simpleName == "VirtualMachineError" ||
+        simpleName == "LinkageError" ||
+        simpleName == "ThreadDeath"
+}
+
+fun isConnectivityError(throwable: Throwable): Boolean {
+    val seen = mutableSetOf<Throwable>()
+    var current: Throwable? = throwable
+
+    while (current != null && seen.add(current)) {
+        if (isConnectivityThrowableType(current)) {
+            return true
+        }
+        val message = current.message?.lowercase()
+        if (message != null && isConnectivityMessage(message)) {
+            return true
+        }
+        current = current.cause
     }
-    val message = e.message?.lowercase() ?: ""
-    val causeMessage = e.cause?.message?.lowercase() ?: ""
-    return message.contains("failed to fetch") ||
+    return false
+}
+
+private fun isConnectivityThrowableType(t: Throwable): Boolean =
+    t is HttpRequestTimeoutException ||
+        t is ConnectTimeoutException ||
+        t is SocketTimeoutException ||
+        t is IOException
+
+private fun isConnectivityMessage(message: String): Boolean =
+    message.contains("failed to fetch") ||
         message.contains("fail to fetch") ||
         message.contains("networkerror") ||
         message.contains("network error") ||
         message.contains("load failed") ||
-        causeMessage.contains("failed to fetch") ||
-        causeMessage.contains("fail to fetch") ||
-        causeMessage.contains("networkerror") ||
-        causeMessage.contains("network error") ||
-        causeMessage.contains("load failed")
-}
+        message.contains("connection refused") ||
+        message.contains("connection reset") ||
+        message.contains("timed out") ||
+        message.contains("timeout") ||
+        message.contains("unknown host") ||
+        message.contains("dns")
 
 @PublishedApi
 internal suspend fun HttpResponse.readErrorBodySafely(): String? =
@@ -153,6 +192,11 @@ internal suspend fun HttpResponse.readErrorBodySafely(): String? =
         bodyAsText()
     } catch (e: CancellationException) {
         throw e
-    } catch (_: Throwable) {
-        null
+    } catch (e: Throwable) {
+        if (isFatalError(e)) throw e
+        if (e is Exception || isConnectivityError(e)) {
+            null
+        } else {
+            throw e
+        }
     }

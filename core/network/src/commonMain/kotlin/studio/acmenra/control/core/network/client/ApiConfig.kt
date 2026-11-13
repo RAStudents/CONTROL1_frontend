@@ -1,23 +1,43 @@
 package studio.acmenra.control.core.network.client
 
+import io.ktor.http.URLProtocol
+import io.ktor.http.Url
+import studio.acmenra.control.NetworkConfig
+
 data class ApiConfig(
-    val apiBaseUrl: String = defaultBaseUrl(),
-    val enableLogs: Boolean = studio.acmenra.control.NetworkConfig.ENABLE_LOGS,
-    val debugMode: Boolean = studio.acmenra.control.NetworkConfig.DEBUG_MODE,
-    val allowInsecureTransport: Boolean = studio.acmenra.control.NetworkConfig.ALLOW_INSECURE_TRANSPORT,
+    val apiBaseUrl: String =
+        validateBaseUrl(
+            raw = NetworkConfig.BASE_URL,
+            allowInsecureTransport = NetworkConfig.ALLOW_INSECURE_TRANSPORT,
+        ),
+    val enableLogs: Boolean = NetworkConfig.ENABLE_LOGS,
+    val debugMode: Boolean = NetworkConfig.DEBUG_MODE,
+    val allowInsecureTransport: Boolean = NetworkConfig.ALLOW_INSECURE_TRANSPORT,
 ) {
     companion object {
-        private fun defaultBaseUrl(): String {
-            val configured =
-                studio.acmenra.control.NetworkConfig.BASE_URL
-                    .trim()
-            val isValid =
-                configured.isNotEmpty() &&
-                    (
-                        configured.startsWith("https://", ignoreCase = true) ||
-                            configured.startsWith("http://", ignoreCase = true)
-                    )
-            return if (isValid) configured else "https://api.example.com"
+        fun validateBaseUrl(
+            raw: String,
+            allowInsecureTransport: Boolean,
+        ): String {
+            require(raw.isNotBlank()) {
+                "API base URL must not be blank. Check BASE_URL in local.properties or NetworkConfig."
+            }
+            val trimmed = raw.trim()
+            val url =
+                requireNotNull(runCatching { Url(trimmed) }.getOrNull()) {
+                    "Invalid API base URL: '$raw'"
+                }
+            require(url.protocol == URLProtocol.HTTPS || (allowInsecureTransport && url.protocol == URLProtocol.HTTP)) {
+                if (url.protocol == URLProtocol.HTTP) {
+                    "HTTP is only permitted when allowInsecureTransport=true. Got: $raw"
+                } else {
+                    "Unsupported API URL protocol '${url.protocol.name}'. Only HTTPS is supported in production."
+                }
+            }
+            require(url.host.isNotBlank()) {
+                "API host must not be empty. Got: $raw"
+            }
+            return url.toString().trimEnd('/') + "/"
         }
     }
 }

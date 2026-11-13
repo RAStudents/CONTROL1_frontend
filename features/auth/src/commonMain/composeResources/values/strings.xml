@@ -1,15 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="login_title">Авторизация</string>
-    <string name="login_btn_test_info">Уведомление Info</string>
-    <string name="login_btn_test_success">Уведомление Success</string>
-    <string name="login_btn_test_error">Уведомление Error</string>
-    <string name="login_btn_test_offline">Уведомление Offline</string>
-    <string name="login_notice_info_title">Информация</string>
-    <string name="login_notice_info_message">Проверка очереди и отображения баннера</string>
-    <string name="login_notice_success_title">Успешно</string>
-    <string name="login_notice_success_message">Операция выполнена без ошибок</string>
-    <string name="login_notice_error_title">Ошибка</string>
-    <string name="login_notice_error_message">Не удалось выполнить операцию</string>
-    <string name="login_notice_offline_title">Нет подключения</string>
+    <string name="login_title">Вход</string>
+    <string name="login_email_label">Почта</string>
+    <string name="login_password_label">Пароль</string>
+    <string name="login_button_submit">Войти</string>
+    <string name="login_forgot_password">Забыли пароль?</string>
+    <string name="login_error_invalid_email">Введите корректный адрес почты</string>
+    <string name="login_error_invalid_credentials">Неверный логин или пароль</string>
+    <string name="login_error_network_title">Ошибка подключения</string>
+    <string name="login_error_server_title">Ошибка сервера</string>
+    <string name="login_error_with_code">Код ошибки: %1$s</string>
 </resources>

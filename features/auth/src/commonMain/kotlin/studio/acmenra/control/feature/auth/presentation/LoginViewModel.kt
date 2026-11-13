@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.client.isConnectivityError
+import studio.acmenra.control.core.network.client.isFatalError
 import studio.acmenra.control.core.network.model.NetworkError
 import studio.acmenra.control.core.network.model.NetworkResult
 import studio.acmenra.control.core.ui.notice.Notice
@@ -98,6 +99,7 @@ class LoginViewModel(
                             sessionManager.saveSession(result.data.toTokenPair())
                             _state.update {
                                 it.copy(
+                                    password = "",
                                     isLoading = false,
                                     isSuccess = true,
                                 )
@@ -111,17 +113,20 @@ class LoginViewModel(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (t: Throwable) {
+                    if (isFatalError(t)) throw t
                     val error =
                         if (isConnectivityError(t)) {
                             NetworkError.Connectivity(
-                                message = t.message ?: "Ошибка подключения к сети",
+                                message = t.message?.take(120) ?: "Ошибка подключения к сети",
+                                cause = t,
+                            )
+                        } else if (t is Exception) {
+                            NetworkError.Unknown(
+                                message = t.message?.take(120) ?: "Неизвестная ошибка",
                                 cause = t,
                             )
                         } else {
-                            NetworkError.Unknown(
-                                message = t.message ?: "Неизвестная ошибка",
-                                cause = t,
-                            )
+                            throw t
                         }
                     handleFailure(error)
                 }
@@ -148,13 +153,16 @@ class LoginViewModel(
                         )
                     }
                 } else {
-                    val detailMessage = error.message?.takeIf { it.isNotBlank() }
-                    val formattedMessage =
-                        if (detailMessage != null) {
-                            "$detailMessage (код ${error.statusCode})"
-                        } else {
-                            "Код ошибки: ${error.statusCode}"
+                    val safeUserMessage =
+                        when (error.statusCode) {
+                            400 -> "Неверный запрос"
+                            403 -> "Доступ запрещен"
+                            404 -> "Сервис авторизации недоступен"
+                            429 -> "Слишком много запросов. Попробуйте позже"
+                            in 500..599 -> "Внутренняя ошибка сервера"
+                            else -> "Ошибка сервера"
                         }
+                    val formattedMessage = "$safeUserMessage (код ${error.statusCode})"
                     val notice =
                         Notice.error(
                             title = Res.string.login_error_server_title,
@@ -172,7 +180,7 @@ class LoginViewModel(
             }
 
             is NetworkError.Connectivity -> {
-                val message = error.message?.takeIf { it.isNotBlank() } ?: "Нет подключения к сети"
+                val message = error.message?.takeIf { it.isNotBlank() }?.take(120) ?: "Нет подключения к сети"
                 val notice =
                     Notice.error(
                         title = Res.string.login_error_network_title,
@@ -189,7 +197,7 @@ class LoginViewModel(
             }
 
             is NetworkError.Serialization -> {
-                val message = error.message?.takeIf { it.isNotBlank() } ?: "Ошибка обработки данных"
+                val message = error.message?.takeIf { it.isNotBlank() }?.take(120) ?: "Ошибка обработки данных"
                 val notice =
                     Notice.error(
                         title = Res.string.login_error_server_title,
@@ -206,7 +214,7 @@ class LoginViewModel(
             }
 
             is NetworkError.Unknown -> {
-                val message = error.message?.takeIf { it.isNotBlank() } ?: "Неизвестная ошибка"
+                val message = error.message?.takeIf { it.isNotBlank() }?.take(120) ?: "Неизвестная ошибка"
                 val notice =
                     Notice.error(
                         title = Res.string.login_error_server_title,

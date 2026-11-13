@@ -9,10 +9,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -51,6 +54,7 @@ import studio.acmenra.control.feature.auth.generated.resources.login_title
 fun LoginRouteContent(
     modifier: Modifier = Modifier,
     viewModel: LoginViewModel = koinViewModel(),
+    onForgotPassword: (() -> Unit)? = null,
 ) {
     val state by viewModel.state.collectAsState()
     val autofillManager = LocalAutofillManager.current
@@ -72,6 +76,7 @@ fun LoginRouteContent(
         onEmailFocusLost = viewModel::onEmailFocusLost,
         onPasswordChanged = viewModel::onPasswordChanged,
         onSubmit = viewModel::onSubmit,
+        onForgotPassword = onForgotPassword,
         modifier = modifier,
     )
 }
@@ -84,7 +89,7 @@ fun LoginScreen(
     onPasswordChanged: (String) -> Unit,
     onSubmit: () -> Unit,
     modifier: Modifier = Modifier,
-    onForgotPassword: () -> Unit = {},
+    onForgotPassword: (() -> Unit)? = null,
 ) {
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val isDesktop = maxWidth >= AmberDimens.TabletBreakpoint
@@ -155,13 +160,16 @@ private fun LoginForm(
     onEmailFocusLost: () -> Unit,
     onPasswordChanged: (String) -> Unit,
     onSubmit: () -> Unit,
-    onForgotPassword: () -> Unit,
+    onForgotPassword: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     val passwordFocusRequester = remember { FocusRequester() }
 
     Column(
-        modifier = modifier,
+        modifier =
+            modifier
+                .verticalScroll(rememberScrollState())
+                .imePadding(),
         verticalArrangement = Arrangement.spacedBy(AmberDimens.GapMedium),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -214,14 +222,16 @@ private fun LoginForm(
             isLoading = state.isLoading,
         )
 
-        TextButton(
-            onClick = onForgotPassword,
-        ) {
-            Text(
-                text = stringResource(Res.string.login_forgot_password),
-                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 16.sp),
-                color = MaterialTheme.colorScheme.primary,
-            )
+        if (onForgotPassword != null) {
+            TextButton(
+                onClick = onForgotPassword,
+            ) {
+                Text(
+                    text = stringResource(Res.string.login_forgot_password),
+                    style = MaterialTheme.typography.bodyLarge.copy(fontSize = 16.sp),
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
     }
 }

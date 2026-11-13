@@ -278,6 +278,8 @@ class LoginViewModelTest {
 
             assertTrue(viewModel.state.value.isSuccess)
             assertFalse(viewModel.state.value.isLoading)
+            // Password must be cleared from memory upon success
+            assertEquals("", viewModel.state.value.password)
 
             // Tokens saved in session manager
             val stored = tokenStorage.getTokens()
@@ -288,11 +290,11 @@ class LoginViewModelTest {
         }
 
     @Test
-    fun testUnexpectedThrowableDoesNotCrashViewModelAndEmitsNotice() =
+    fun testUnexpectedNetworkExceptionDoesNotCrashViewModelAndEmitsNotice() =
         runTest {
             val customLoginUseCase =
                 FakeLoginUseCase().apply {
-                    throwableToThrow = Error("Fail to fetch")
+                    throwableToThrow = RuntimeException("Network connection failed: Failed to fetch")
                 }
             val customViewModel = LoginViewModel(customLoginUseCase, sessionManager)
 
@@ -306,4 +308,46 @@ class LoginViewModelTest {
             assertFalse(customViewModel.state.value.isSuccess)
             assertEquals(1, customViewModel.state.value.notices.size)
         }
+
+    @Test
+    fun testHttp400BadRequestWithoutAuthErrorShowsSafeServerNotice() =
+        runTest {
+            loginUseCase.result =
+                NetworkResult.Failure(
+                    NetworkError.Http(
+                        statusCode = 400,
+                        message = "Bad Request",
+                        errorBody = """{"error":"syntax_error"}""",
+                    ),
+                )
+
+            viewModel.onEmailChanged("user@example.com")
+            viewModel.onPasswordChanged("wrongPassword")
+            viewModel.onSubmit()
+
+            advanceUntilIdle()
+
+            assertFalse(viewModel.state.value.isLoading)
+            assertFalse(viewModel.state.value.isInvalidCredentialsError)
+            assertEquals(1, viewModel.state.value.notices.size)
+            val notice =
+                viewModel.state.value.notices
+                    .first()
+            val rawMessage = notice.message as? NoticeText.Raw
+            assertEquals("Неверный запрос (код 400)", rawMessage?.value)
+        }
+
+    @Test
+    fun testLenientEmailValidationHandlesInternationalAndSubdomains() {
+        assertTrue(isValidEmail("user@domain.com"))
+        assertTrue(isValidEmail("u.ser+tag@sub.domain.co"))
+        assertTrue(isValidEmail("иван@почта.рф"))
+
+        assertFalse(isValidEmail("user@domain"))
+        assertFalse(isValidEmail("@domain.com"))
+        assertFalse(isValidEmail("user@"))
+        assertFalse(isValidEmail("user..name@domain.com"))
+        assertFalse(isValidEmail("user@domain..com"))
+        assertFalse(isValidEmail("user name@domain.com"))
+    }
 }

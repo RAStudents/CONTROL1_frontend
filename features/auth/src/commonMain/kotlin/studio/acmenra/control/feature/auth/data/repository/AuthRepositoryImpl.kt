@@ -1,7 +1,7 @@
 package studio.acmenra.control.feature.auth.data.repository
 
+import studio.acmenra.control.core.network.model.NetworkError
 import studio.acmenra.control.core.network.model.NetworkResult
-import studio.acmenra.control.core.network.model.map
 import studio.acmenra.control.feature.auth.data.datasource.AuthRemoteDataSource
 import studio.acmenra.control.feature.auth.data.mapper.toDomain
 import studio.acmenra.control.feature.auth.data.mapper.toDto
@@ -13,5 +13,20 @@ class AuthRepositoryImpl(
     private val remoteDataSource: AuthRemoteDataSource,
 ) : AuthRepository {
     override suspend fun login(credentials: LoginCredentials): NetworkResult<AuthTokens> =
-        remoteDataSource.login(credentials.toDto()).map { it.toDomain() }
+        when (val result = remoteDataSource.login(credentials.toDto())) {
+            is NetworkResult.Success -> {
+                val dto = result.data
+                if (dto.accessToken.isBlank() || dto.refreshToken.isBlank()) {
+                    NetworkResult.Failure(
+                        NetworkError.Serialization(
+                            message = "Сервер вернул пустые токены авторизации",
+                        ),
+                    )
+                } else {
+                    NetworkResult.Success(dto.toDomain(), result.statusCode)
+                }
+            }
+
+            is NetworkResult.Failure -> result
+        }
 }

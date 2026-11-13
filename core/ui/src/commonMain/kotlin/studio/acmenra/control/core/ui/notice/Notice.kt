@@ -104,6 +104,20 @@ data class Notice(
 
         fun error(
             title: StringResource,
+            message: StringResource,
+            args: List<Any>,
+            key: String? = null,
+            id: Long = Random.nextLong(1L, Long.MAX_VALUE),
+        ) = Notice(
+            type = NoticeType.Error,
+            title = NoticeText.Resource(title),
+            message = NoticeText.Resource(message, args),
+            key = key,
+            id = id,
+        )
+
+        fun error(
+            title: StringResource,
             serverMessage: String,
             key: String? = null,
             id: Long = Random.nextLong(1L, Long.MAX_VALUE),

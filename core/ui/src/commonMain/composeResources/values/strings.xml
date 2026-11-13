@@ -3,4 +3,6 @@
     <string name="notice_offline_title">Нет подключения к сети</string>
     <string name="notice_online_restored">Подключение восстановлено</string>
     <string name="notice_close">Закрыть</string>
+    <string name="password_show">Показать пароль</string>
+    <string name="password_hide">Скрыть пароль</string>
 </resources>

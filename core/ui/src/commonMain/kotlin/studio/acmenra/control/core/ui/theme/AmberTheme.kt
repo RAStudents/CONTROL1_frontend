@@ -188,6 +188,12 @@ object AmberDimens {
     // Width at which the layout switches from phone to tablet/desktop
     val TabletBreakpoint = 840.dp
 
+    val LoginDesktopCardMaxWidth = 616.dp
+    val LoginDesktopCardMaxHeight = 800.dp
+    val LoginFormDesktopWidth = 384.dp
+    val LoginFormMobileWidth = 365.dp
+    val ButtonLoadingIndicatorSize = 24.dp
+
     val NoticeMaxWidth = 560.dp
     val NoticeElevation = 6.dp
     val NoticeTimerHeight = 3.dp

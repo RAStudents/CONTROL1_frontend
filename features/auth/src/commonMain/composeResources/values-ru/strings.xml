@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="login_title">Вход</string>
+    <string name="login_email_label">Почта</string>
+    <string name="login_password_label">Пароль</string>
+    <string name="login_button_submit">Войти</string>
+    <string name="login_forgot_password">Забыли пароль?</string>
+    <string name="login_error_invalid_email">Введите корректный адрес почты</string>
+    <string name="login_error_invalid_credentials">Неверный логин или пароль</string>
+    <string name="login_error_network_title">Ошибка подключения</string>
+    <string name="login_error_server_title">Ошибка сервера</string>
+    <string name="login_error_network_no_connection">Нет подключения к сети</string>
+    <string name="login_error_serialization">Ошибка обработки данных</string>
+    <string name="login_error_unknown">Неизвестная ошибка</string>
+    <string name="login_error_bad_request">Неверный запрос (код %1$d)</string>
+    <string name="login_error_forbidden">Доступ запрещен (код %1$d)</string>
+    <string name="login_error_service_unavailable">Сервис авторизации недоступен (код %1$d)</string>
+    <string name="login_error_too_many_requests">Слишком много запросов. Попробуйте позже (код %1$d)</string>
+    <string name="login_error_internal_server">Внутренняя ошибка сервера (код %1$d)</string>
+    <string name="login_error_general_server">Ошибка сервера (код %1$d)</string>
+</resources>

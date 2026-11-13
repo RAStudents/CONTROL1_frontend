@@ -20,6 +20,9 @@ import studio.acmenra.control.feature.auth.domain.model.AuthTokens
 import studio.acmenra.control.feature.auth.domain.model.LoginCredentials
 import studio.acmenra.control.feature.auth.domain.usecase.LoginUseCase
 import studio.acmenra.control.feature.auth.domain.validation.isValidEmail
+import studio.acmenra.control.feature.auth.generated.resources.Res
+import studio.acmenra.control.feature.auth.generated.resources.login_error_bad_request
+import studio.acmenra.control.feature.auth.generated.resources.login_error_internal_server
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -243,12 +246,10 @@ class LoginViewModelTest {
             val notice =
                 viewModel.state.value.notices
                     .first()
-            val rawMessage = (notice.message as? NoticeText.Raw)?.value
-            assertNotNull(rawMessage)
-            assertTrue(
-                rawMessage.contains("500"),
-                "Notice message should contain status code 500: $rawMessage",
-            )
+            val resourceMessage = notice.message as? NoticeText.Resource
+            assertNotNull(resourceMessage)
+            assertEquals(Res.string.login_error_internal_server, resourceMessage.resource)
+            assertEquals(listOf(500), resourceMessage.args)
 
             // Consuming notice
             viewModel.onNoticeConsumed(notice.id)
@@ -333,8 +334,10 @@ class LoginViewModelTest {
             val notice =
                 viewModel.state.value.notices
                     .first()
-            val rawMessage = notice.message as? NoticeText.Raw
-            assertEquals("Неверный запрос (код 400)", rawMessage?.value)
+            val resourceMessage = notice.message as? NoticeText.Resource
+            assertNotNull(resourceMessage)
+            assertEquals(Res.string.login_error_bad_request, resourceMessage.resource)
+            assertEquals(listOf(400), resourceMessage.args)
         }
 
     @Test

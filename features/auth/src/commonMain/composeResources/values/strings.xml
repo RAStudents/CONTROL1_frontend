@@ -1,13 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="login_title">Вход</string>
-    <string name="login_email_label">Почта</string>
-    <string name="login_password_label">Пароль</string>
-    <string name="login_button_submit">Войти</string>
-    <string name="login_forgot_password">Забыли пароль?</string>
-    <string name="login_error_invalid_email">Введите корректный адрес почты</string>
-    <string name="login_error_invalid_credentials">Неверный логин или пароль</string>
-    <string name="login_error_network_title">Ошибка подключения</string>
-    <string name="login_error_server_title">Ошибка сервера</string>
-    <string name="login_error_with_code">Код ошибки: %1$s</string>
+    <string name="login_title">Sign In</string>
+    <string name="login_email_label">Email</string>
+    <string name="login_password_label">Password</string>
+    <string name="login_button_submit">Sign In</string>
+    <string name="login_forgot_password">Forgot password?</string>
+    <string name="login_error_invalid_email">Please enter a valid email address</string>
+    <string name="login_error_invalid_credentials">Invalid email or password</string>
+    <string name="login_error_network_title">Connection error</string>
+    <string name="login_error_server_title">Server error</string>
+    <string name="login_error_network_no_connection">No internet connection</string>
+    <string name="login_error_serialization">Data processing error</string>
+    <string name="login_error_unknown">Unknown error occurred</string>
+    <string name="login_error_bad_request">Bad request (code %1$d)</string>
+    <string name="login_error_forbidden">Access forbidden (code %1$d)</string>
+    <string name="login_error_service_unavailable">Authorization service unavailable (code %1$d)</string>
+    <string name="login_error_too_many_requests">Too many requests. Please try again later (code %1$d)</string>
+    <string name="login_error_internal_server">Internal server error (code %1$d)</string>
+    <string name="login_error_general_server">Server error (code %1$d)</string>
 </resources>

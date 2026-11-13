@@ -12,10 +12,11 @@ import studio.acmenra.control.feature.auth.data.model.LoginResponseDto
 
 class KtorAuthRemoteDataSource(
     private val httpClient: HttpClient,
+    private val loginPath: String = "api/auth/login",
 ) : AuthRemoteDataSource {
     override suspend fun login(request: LoginRequestDto): NetworkResult<LoginResponseDto> =
         httpClient.safeRequest {
-            post("api/auth/login") {
+            post(loginPath.trimStart('/')) {
                 contentType(ContentType.Application.Json)
                 setBody(request)
             }

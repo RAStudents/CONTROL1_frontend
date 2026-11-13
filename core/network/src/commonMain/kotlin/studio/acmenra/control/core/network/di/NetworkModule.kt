@@ -32,6 +32,7 @@ val networkModule =
                 enableLogs = config.enableLogs,
                 debugMode = config.debugMode,
                 allowInsecureTransport = config.allowInsecureTransport,
+                refreshPath = config.refreshPath,
             )
         }
 

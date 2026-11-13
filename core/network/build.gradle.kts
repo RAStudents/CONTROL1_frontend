@@ -1,4 +1,5 @@
 import com.codingfeline.buildkonfig.compiler.FieldSpec.Type.BOOLEAN
+import com.codingfeline.buildkonfig.compiler.FieldSpec.Type.LONG
 import com.codingfeline.buildkonfig.compiler.FieldSpec.Type.STRING
 import java.util.Properties
 
@@ -52,6 +53,11 @@ val localProperties =
         if (file.exists()) file.inputStream().use { load(it) }
     }
 
+fun findConfigProperty(key: String): String? =
+    providers.gradleProperty(key).orNull
+        ?: localProperties.getProperty(key)
+        ?: System.getenv(key)
+
 buildkonfig {
     packageName = "studio.acmenra.control"
     objectName = "NetworkConfig"
@@ -60,24 +66,47 @@ buildkonfig {
         buildConfigField(
             STRING,
             "BASE_URL",
-            localProperties.getProperty("BASE_URL") ?: System.getenv("BASE_URL") ?: "",
+            findConfigProperty("BASE_URL") ?: "",
         )
         buildConfigField(
             BOOLEAN,
             "ENABLE_LOGS",
-            localProperties.getProperty("ENABLE_LOGS") ?: System.getenv("ENABLE_LOGS") ?: "false",
+            findConfigProperty("ENABLE_LOGS") ?: "false",
         )
         buildConfigField(
             BOOLEAN,
             "DEBUG_MODE",
-            localProperties.getProperty("DEBUG_MODE") ?: System.getenv("DEBUG_MODE") ?: "false",
+            findConfigProperty("DEBUG_MODE") ?: "false",
         )
         buildConfigField(
             BOOLEAN,
             "ALLOW_INSECURE_TRANSPORT",
-            localProperties.getProperty("ALLOW_INSECURE_TRANSPORT")
-                ?: System.getenv("ALLOW_INSECURE_TRANSPORT")
-                ?: "false",
+            findConfigProperty("ALLOW_INSECURE_TRANSPORT") ?: "false",
+        )
+        buildConfigField(
+            LONG,
+            "CONNECT_TIMEOUT_MILLIS",
+            findConfigProperty("CONNECT_TIMEOUT_MILLIS") ?: "15000L",
+        )
+        buildConfigField(
+            LONG,
+            "REQUEST_TIMEOUT_MILLIS",
+            findConfigProperty("REQUEST_TIMEOUT_MILLIS") ?: "30000L",
+        )
+        buildConfigField(
+            LONG,
+            "SOCKET_TIMEOUT_MILLIS",
+            findConfigProperty("SOCKET_TIMEOUT_MILLIS") ?: "30000L",
+        )
+        buildConfigField(
+            STRING,
+            "REFRESH_PATH",
+            findConfigProperty("REFRESH_PATH") ?: "api/auth/refresh",
+        )
+        buildConfigField(
+            STRING,
+            "LOGIN_PATH",
+            findConfigProperty("LOGIN_PATH") ?: "api/auth/login",
         )
     }
 }

@@ -9,6 +9,11 @@ class ApiConfig(
     val enableLogs: Boolean = NetworkConfig.ENABLE_LOGS,
     val debugMode: Boolean = NetworkConfig.DEBUG_MODE,
     val allowInsecureTransport: Boolean = NetworkConfig.ALLOW_INSECURE_TRANSPORT,
+    val connectTimeoutMillis: Long = NetworkConfig.CONNECT_TIMEOUT_MILLIS,
+    val requestTimeoutMillis: Long = NetworkConfig.REQUEST_TIMEOUT_MILLIS,
+    val socketTimeoutMillis: Long = NetworkConfig.SOCKET_TIMEOUT_MILLIS,
+    val refreshPath: String = NetworkConfig.REFRESH_PATH,
+    val loginPath: String = NetworkConfig.LOGIN_PATH,
 ) {
     val apiBaseUrl: String =
         validateBaseUrl(
@@ -21,25 +26,51 @@ class ApiConfig(
         enableLogs: Boolean = this.enableLogs,
         debugMode: Boolean = this.debugMode,
         allowInsecureTransport: Boolean = this.allowInsecureTransport,
-    ): ApiConfig = ApiConfig(apiBaseUrl, enableLogs, debugMode, allowInsecureTransport)
+        connectTimeoutMillis: Long = this.connectTimeoutMillis,
+        requestTimeoutMillis: Long = this.requestTimeoutMillis,
+        socketTimeoutMillis: Long = this.socketTimeoutMillis,
+        refreshPath: String = this.refreshPath,
+        loginPath: String = this.loginPath,
+    ): ApiConfig =
+        ApiConfig(
+            apiBaseUrl = apiBaseUrl,
+            enableLogs = enableLogs,
+            debugMode = debugMode,
+            allowInsecureTransport = allowInsecureTransport,
+            connectTimeoutMillis = connectTimeoutMillis,
+            requestTimeoutMillis = requestTimeoutMillis,
+            socketTimeoutMillis = socketTimeoutMillis,
+            refreshPath = refreshPath,
+            loginPath = loginPath,
+        )
 
     override fun equals(other: Any?): Boolean =
         other is ApiConfig &&
             apiBaseUrl == other.apiBaseUrl &&
             enableLogs == other.enableLogs &&
             debugMode == other.debugMode &&
-            allowInsecureTransport == other.allowInsecureTransport
+            allowInsecureTransport == other.allowInsecureTransport &&
+            connectTimeoutMillis == other.connectTimeoutMillis &&
+            requestTimeoutMillis == other.requestTimeoutMillis &&
+            socketTimeoutMillis == other.socketTimeoutMillis &&
+            refreshPath == other.refreshPath &&
+            loginPath == other.loginPath
 
     override fun hashCode(): Int {
         var result = apiBaseUrl.hashCode()
         result = 31 * result + enableLogs.hashCode()
         result = 31 * result + debugMode.hashCode()
         result = 31 * result + allowInsecureTransport.hashCode()
+        result = 31 * result + connectTimeoutMillis.hashCode()
+        result = 31 * result + requestTimeoutMillis.hashCode()
+        result = 31 * result + socketTimeoutMillis.hashCode()
+        result = 31 * result + refreshPath.hashCode()
+        result = 31 * result + loginPath.hashCode()
         return result
     }
 
     override fun toString(): String =
-        "ApiConfig(apiBaseUrl=$apiBaseUrl, enableLogs=$enableLogs, debugMode=$debugMode, allowInsecureTransport=$allowInsecureTransport)"
+        "ApiConfig(apiBaseUrl=$apiBaseUrl, enableLogs=$enableLogs, debugMode=$debugMode, allowInsecureTransport=$allowInsecureTransport, connectTimeoutMillis=$connectTimeoutMillis, requestTimeoutMillis=$requestTimeoutMillis, socketTimeoutMillis=$socketTimeoutMillis, refreshPath=$refreshPath, loginPath=$loginPath)"
 
     companion object {
         fun validateBaseUrl(

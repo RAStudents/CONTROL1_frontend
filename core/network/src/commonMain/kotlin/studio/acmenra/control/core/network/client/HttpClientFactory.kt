@@ -46,7 +46,7 @@ object HttpClientFactory {
         enableLogs: Boolean = NetworkConfig.ENABLE_LOGS,
         debugMode: Boolean = NetworkConfig.DEBUG_MODE,
         allowInsecureTransport: Boolean = NetworkConfig.ALLOW_INSECURE_TRANSPORT,
-        refreshPath: String = "api/auth/refresh",
+        refreshPath: String = NetworkConfig.REFRESH_PATH,
         customLogger: Logger? = null,
         engine: HttpClientEngine? = null,
     ): HttpClient {

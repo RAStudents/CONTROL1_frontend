@@ -2,11 +2,12 @@ package studio.acmenra.control.core.network.client
 
 import io.ktor.client.HttpClientConfig
 import io.ktor.client.plugins.HttpTimeout
+import studio.acmenra.control.NetworkConfig
 
 object NetworkTimeouts {
-    const val CONNECT_TIMEOUT_MILLIS = 15_000L
-    const val REQUEST_TIMEOUT_MILLIS = 30_000L
-    const val SOCKET_TIMEOUT_MILLIS = 30_000L
+    val CONNECT_TIMEOUT_MILLIS: Long = NetworkConfig.CONNECT_TIMEOUT_MILLIS
+    val REQUEST_TIMEOUT_MILLIS: Long = NetworkConfig.REQUEST_TIMEOUT_MILLIS
+    val SOCKET_TIMEOUT_MILLIS: Long = NetworkConfig.SOCKET_TIMEOUT_MILLIS
 }
 
 fun HttpClientConfig<*>.installNetworkTimeouts(

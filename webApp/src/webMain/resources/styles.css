@@ -6,3 +6,9 @@ html, body {
     overflow: hidden;
     background-color: #17130F;
 }
+
+@media (prefers-color-scheme: light) {
+    html, body {
+        background-color: #FFF8F5;
+    }
+}

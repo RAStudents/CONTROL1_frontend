@@ -11,8 +11,11 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.isSuccess
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerializationException
+import studio.acmenra.control.core.access.data.model.AccessErrorResponseDto
 import studio.acmenra.control.core.access.data.model.CompanyAccessResponseDto
 import studio.acmenra.control.core.access.data.model.GlobalContextResponseDto
+import studio.acmenra.control.core.network.auth.AccessInvalidationListener
+import studio.acmenra.control.core.network.client.AccessInvalidationAttributeKey
 import studio.acmenra.control.core.network.client.isConnectivityError
 import studio.acmenra.control.core.network.client.safeRequest
 import studio.acmenra.control.core.network.model.NetworkError
@@ -29,6 +32,7 @@ interface AccessRemoteDataSource {
 
 class KtorAccessRemoteDataSource(
     private val httpClient: HttpClient,
+    private val invalidationListener: AccessInvalidationListener? = null,
 ) : AccessRemoteDataSource {
     override suspend fun getGlobalContext(): NetworkResult<GlobalContextResponseDto> =
         httpClient.safeRequest {
@@ -90,6 +94,16 @@ class KtorAccessRemoteDataSource(
 
                 else -> {
                     val errorBody = response.readBodyTextSafely()
+                    if (response.status == HttpStatusCode.Forbidden) {
+                        val listener =
+                            invalidationListener ?: httpClient.attributes.getOrNull(AccessInvalidationAttributeKey)
+                        if (listener != null) {
+                            val errorDto = AccessErrorResponseDto.parse(errorBody)
+                            val resolvedCode = errorDto?.resolvedCode
+                            val resolvedCompanyId = errorDto?.companyId ?: companyId
+                            listener.onAccessInvalidated(resolvedCode, resolvedCompanyId)
+                        }
+                    }
                     NetworkResult.Failure(
                         NetworkError.Http(
                             statusCode = response.status.value,

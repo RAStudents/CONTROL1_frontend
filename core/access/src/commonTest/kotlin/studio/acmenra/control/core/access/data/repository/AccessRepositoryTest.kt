@@ -93,8 +93,8 @@ class AccessRepositoryTest {
 
             val cached = repository.getCachedCompanyAccess("u1", "c1")
             assertNotNull(cached)
-            assertEquals("W/\"rev_1\"", cached.etag)
-            assertEquals("c1", cached.domain.companyId)
+            assertEquals("c1", cached.companyId)
+            assertEquals("W/\"rev_1\"", local.get("u1", "c1")?.etag)
             assertEquals(listOf<String?>(null), remote.requestedIfNoneMatch)
         }
 

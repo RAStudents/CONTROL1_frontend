@@ -76,7 +76,7 @@ class AccessRepositoryImpl(
     override suspend fun getCachedCompanyAccess(
         userId: String,
         companyId: String,
-    ): CachedCompanyAccess? = localDataSource.get(userId, companyId)
+    ): CompanyAccessDomain? = localDataSource.get(userId, companyId)?.domain
 
     override suspend fun clearCache() {
         localDataSource.clear()

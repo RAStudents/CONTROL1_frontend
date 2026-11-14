@@ -75,7 +75,7 @@ class AccessMapper(
             status = dto.status,
         )
 
-    private fun mapRestriction(dto: AccessRestrictionDto): AccessRestriction =
+    fun mapRestriction(dto: AccessRestrictionDto): AccessRestriction =
         AccessRestriction(
             type = dto.type,
             reason = dto.reason,

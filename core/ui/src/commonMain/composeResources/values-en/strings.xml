@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="notice_offline_title">No internet connection</string>
+    <string name="notice_online_restored">Connection restored</string>
+    <string name="notice_close">Close</string>
+    <string name="password_show">Show password</string>
+    <string name="password_hide">Hide password</string>
+</resources>

@@ -3,6 +3,7 @@ package studio.acmenra.control.core.network
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.client.engine.mock.toByteArray
+import io.ktor.client.network.sockets.SocketTimeoutException
 import io.ktor.client.request.get
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -15,11 +16,14 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.io.IOException
 import kotlinx.serialization.Serializable
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.core.network.client.HttpClientFactory
 import studio.acmenra.control.core.network.client.safeRequest
+import studio.acmenra.control.core.network.model.NetworkError
+import studio.acmenra.control.core.network.model.NetworkResult
 import studio.acmenra.control.core.network.model.TokenPair
 import studio.acmenra.control.core.network.model.getOrNull
 import kotlin.test.Test
@@ -708,6 +712,181 @@ class HttpClientAuthTest {
                         get("https://api.example.com/api/data")
                     }
                 }
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun testSafeRequestCatchesIOExceptionAsConnectivityError() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    enableLogs = false,
+                    debugMode = true,
+                    engine =
+                        MockEngine {
+                            throw IOException("Connection reset by peer")
+                        },
+                )
+
+            try {
+                val result =
+                    client.safeRequest<TestData> {
+                        get("https://api.example.com/api/data")
+                    }
+                assertTrue(result is NetworkResult.Failure)
+                assertTrue(result.error is NetworkError.Connectivity)
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun testSafeRequestCatchesSocketTimeoutExceptionAsConnectivityError() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    enableLogs = false,
+                    debugMode = true,
+                    engine =
+                        MockEngine {
+                            throw SocketTimeoutException("Read timed out")
+                        },
+                )
+
+            try {
+                val result =
+                    client.safeRequest<TestData> {
+                        get("https://api.example.com/api/data")
+                    }
+                assertTrue(result is NetworkResult.Failure)
+                assertTrue(result.error is NetworkError.Connectivity)
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun testSafeRequestRecognizesDeeplyNestedCauseChainConnectivityError() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    enableLogs = false,
+                    debugMode = true,
+                    engine =
+                        MockEngine {
+                            throw RuntimeException(
+                                "KtorException",
+                                IllegalStateException("WrapperException", Exception("Failed to fetch")),
+                            )
+                        },
+                )
+
+            try {
+                val result =
+                    client.safeRequest<TestData> {
+                        get("https://api.example.com/api/data")
+                    }
+                assertTrue(result is NetworkResult.Failure)
+                assertTrue(result.error is NetworkError.Connectivity)
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun testSafeRequestRethrowsFatalErrorsWithoutMaskingThem() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    enableLogs = false,
+                    debugMode = true,
+                    engine =
+                        MockEngine {
+                            throw OutOfMemoryError("Fake OutOfMemoryError")
+                        },
+                )
+
+            try {
+                assertFailsWith<OutOfMemoryError> {
+                    client.safeRequest<TestData> {
+                        get("https://api.example.com/api/data")
+                    }
+                }
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun testSafeRequestRethrowsNonConnectivityErrorsWithoutConvertingToUnknown() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    enableLogs = false,
+                    debugMode = true,
+                    engine =
+                        MockEngine {
+                            throw Error("Fatal linkage failure")
+                        },
+                )
+
+            try {
+                assertFailsWith<Error> {
+                    client.safeRequest<TestData> {
+                        get("https://api.example.com/api/data")
+                    }
+                }
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun testSafeRequestCatchesUnknownExceptionAsUnknownError() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    enableLogs = false,
+                    debugMode = true,
+                    engine =
+                        MockEngine {
+                            throw RuntimeException("Unexpected runtime failure")
+                        },
+                )
+
+            try {
+                val result =
+                    client.safeRequest<TestData> {
+                        get("https://api.example.com/api/data")
+                    }
+                assertTrue(result is NetworkResult.Failure)
+                assertTrue(result.error is NetworkError.Unknown)
             } finally {
                 client.close()
             }

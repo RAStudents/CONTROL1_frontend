@@ -19,6 +19,7 @@ import studio.acmenra.control.core.access.domain.concurrent.TenantRequestKey
 import studio.acmenra.control.core.access.domain.concurrent.TenantSingleFlight
 import studio.acmenra.control.core.access.domain.model.AccessStatus
 import studio.acmenra.control.core.access.domain.model.AuthorizedTenantContext
+import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
 import studio.acmenra.control.core.access.domain.model.CompanyStatus
 import studio.acmenra.control.core.access.domain.model.SupportGrantStatus
 import studio.acmenra.control.core.access.domain.model.TenantContextState
@@ -171,40 +172,12 @@ class TenantContextCoordinator(
                             tenantRevision = generation,
                         )
 
-                    when {
-                        domain.companyStatus == CompanyStatus.RESTRICTED -> {
-                            val isOverrideActive =
-                                domain.accessStatus == AccessStatus.ACTIVE_SUPPORT_OVERRIDE &&
-                                    context.supportGrant != null &&
-                                    !context.isSupportGrantLocallyExpired
-
-                            if (isOverrideActive) {
-                                applyAuthorizedContextLocked(context)
-                            } else {
-                                _tenantState.value =
-                                    TenantContextState.Restricted.CompanyFrozen(
-                                        companyId = companyId,
-                                        companyName = domain.companyName,
-                                        restriction = domain.restriction,
-                                        canSwitchCompany = canSwitch,
-                                    )
-                            }
-                        }
-
-                        context.effectiveTenantPermissions.isEmpty() &&
-                            context.effectiveSupportPermissions.isEmpty() -> {
-                            _tenantState.value =
-                                TenantContextState.Restricted.NoPermissions(
-                                    companyId = companyId,
-                                    companyName = domain.companyName,
-                                    canSwitchCompany = canSwitch,
-                                )
-                        }
-
-                        else -> {
-                            applyAuthorizedContextLocked(context)
-                        }
-                    }
+                    applyDomainResultLocked(
+                        domain = domain,
+                        companyId = companyId,
+                        canSwitch = canSwitch,
+                        context = context,
+                    )
                 }
 
                 is NetworkResult.Failure -> {
@@ -278,9 +251,13 @@ class TenantContextCoordinator(
 
         val sessionRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
 
-        if (current is TenantContextState.Authorized) {
-            _tenantState.value = current.copy(isRefreshing = true)
-        }
+        val generation =
+            mutex.withLock {
+                if (current is TenantContextState.Authorized) {
+                    _tenantState.value = current.copy(isRefreshing = true)
+                }
+                ++currentRequestGeneration
+            }
 
         val key =
             TenantRequestKey(
@@ -300,7 +277,7 @@ class TenantContextCoordinator(
             val latestRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
             val isAuthenticated = sessionManager.sessionState.value is SessionState.Authenticated
 
-            if (latestRevision != sessionRevision || !isAuthenticated) {
+            if (generation != currentRequestGeneration || latestRevision != sessionRevision || !isAuthenticated) {
                 return@withLock
             }
 
@@ -309,7 +286,8 @@ class TenantContextCoordinator(
                     is TenantContextState.Authorized -> latest.context.companyId == companyId
                     is TenantContextState.Restricted -> latest.companyId == companyId
                     is TenantContextState.Error -> latest.companyId == companyId
-                    else -> false
+                    is TenantContextState.Loading -> latest.requestedCompanyId == companyId
+                    is TenantContextState.NotSelected -> false
                 }
 
             if (!isSameCompany) return@withLock
@@ -324,47 +302,15 @@ class TenantContextCoordinator(
                         mapper.mapAuthorizedTenantContext(
                             userId = userId,
                             domain = domain,
-                            tenantRevision = currentRequestGeneration,
+                            tenantRevision = generation,
                         )
 
-                    when {
-                        domain.companyStatus == CompanyStatus.RESTRICTED -> {
-                            val isOverrideActive =
-                                domain.accessStatus == AccessStatus.ACTIVE_SUPPORT_OVERRIDE &&
-                                    context.supportGrant != null &&
-                                    !context.isSupportGrantLocallyExpired
-
-                            if (isOverrideActive) {
-                                applyAuthorizedContextLocked(context)
-                            } else {
-                                expirationJob?.cancel()
-                                expirationJob = null
-                                _tenantState.value =
-                                    TenantContextState.Restricted.CompanyFrozen(
-                                        companyId = companyId,
-                                        companyName = domain.companyName,
-                                        restriction = domain.restriction,
-                                        canSwitchCompany = canSwitch,
-                                    )
-                            }
-                        }
-
-                        context.effectiveTenantPermissions.isEmpty() &&
-                            context.effectiveSupportPermissions.isEmpty() -> {
-                            expirationJob?.cancel()
-                            expirationJob = null
-                            _tenantState.value =
-                                TenantContextState.Restricted.NoPermissions(
-                                    companyId = companyId,
-                                    companyName = domain.companyName,
-                                    canSwitchCompany = canSwitch,
-                                )
-                        }
-
-                        else -> {
-                            applyAuthorizedContextLocked(context)
-                        }
-                    }
+                    applyDomainResultLocked(
+                        domain = domain,
+                        companyId = companyId,
+                        canSwitch = canSwitch,
+                        context = context,
+                    )
                 }
 
                 is NetworkResult.Failure -> {
@@ -428,6 +374,78 @@ class TenantContextCoordinator(
             activeSelectionJob = null
             currentRequestGeneration++
             _tenantState.value = TenantContextState.NotSelected
+        }
+    }
+
+    private fun applyDomainResultLocked(
+        domain: CompanyAccessDomain,
+        companyId: String,
+        canSwitch: Boolean,
+        context: AuthorizedTenantContext,
+    ) {
+        val isAuthorized =
+            when {
+                domain.companyStatus == CompanyStatus.RESTRICTED -> {
+                    domain.accessStatus == AccessStatus.ACTIVE_SUPPORT_OVERRIDE &&
+                        context.supportGrant != null &&
+                        !context.isSupportGrantLocallyExpired
+                }
+
+                domain.companyStatus == CompanyStatus.ACTIVE -> {
+                    when (domain.accessStatus) {
+                        AccessStatus.ACTIVE -> true
+                        AccessStatus.ACTIVE_SUPPORT_OVERRIDE -> {
+                            context.supportGrant != null && !context.isSupportGrantLocallyExpired
+                        }
+
+                        AccessStatus.RESTRICTED, AccessStatus.UNKNOWN -> false
+                    }
+                }
+
+                else -> false
+            }
+
+        when {
+            isAuthorized -> {
+                if (context.effectiveTenantPermissions.isEmpty() &&
+                    context.effectiveSupportPermissions.isEmpty()
+                ) {
+                    expirationJob?.cancel()
+                    expirationJob = null
+                    _tenantState.value =
+                        TenantContextState.Restricted.NoPermissions(
+                            companyId = companyId,
+                            companyName = domain.companyName,
+                            canSwitchCompany = canSwitch,
+                        )
+                } else {
+                    applyAuthorizedContextLocked(context)
+                }
+            }
+
+            domain.companyStatus == CompanyStatus.RESTRICTED ||
+                domain.accessStatus == AccessStatus.RESTRICTED -> {
+                expirationJob?.cancel()
+                expirationJob = null
+                _tenantState.value =
+                    TenantContextState.Restricted.CompanyFrozen(
+                        companyId = companyId,
+                        companyName = domain.companyName,
+                        restriction = domain.restriction,
+                        canSwitchCompany = canSwitch,
+                    )
+            }
+
+            else -> {
+                expirationJob?.cancel()
+                expirationJob = null
+                _tenantState.value =
+                    TenantContextState.Restricted.AccessDenied(
+                        companyId = companyId,
+                        companyName = domain.companyName,
+                        canSwitchCompany = canSwitch,
+                    )
+            }
         }
     }
 

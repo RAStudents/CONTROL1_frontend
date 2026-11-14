@@ -392,4 +392,206 @@ class TenantContextCoordinatorTest {
             assertEquals(RestrictionType.ADMIN_BLOCKED, restriction.type)
             assertEquals("Security audit pending", restriction.reason)
         }
+
+    @Test
+    fun restrictedAccessStatusWithNonEmptyPermissionsRejectsAuthorization() =
+        runTest {
+            repository.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Restricted Access Co",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_1",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.RESTRICTED,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            coordinator.selectTenant("c_restricted_access")
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Restricted.CompanyFrozen)
+            assertEquals("c_restricted_access", state.companyId)
+            assertFalse(coordinator.tenantState.value is TenantContextState.Authorized)
+        }
+
+    @Test
+    fun unknownCompanyStatusWithNonEmptyPermissionsFailsClosedToAccessDenied() =
+        runTest {
+            repository.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Unknown Status Co",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_1",
+                        companyStatus = CompanyStatus.UNKNOWN,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            coordinator.selectTenant("c_unknown_company")
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Restricted.AccessDenied)
+            assertEquals("c_unknown_company", state.companyId)
+        }
+
+    @Test
+    fun unknownAccessStatusWithNonEmptyPermissionsFailsClosedToAccessDenied() =
+        runTest {
+            repository.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Unknown Access Co",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_1",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.UNKNOWN,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            coordinator.selectTenant("c_unknown_access")
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Restricted.AccessDenied)
+            assertEquals("c_unknown_access", state.companyId)
+        }
+
+    @Test
+    fun staleNormalRefreshDoesNotOverwriteNewerForceRefresh() =
+        runTest {
+            val slowRefreshBarrier = CompletableDeferred<Unit>()
+            val slowRefreshEntered = CompletableDeferred<Unit>()
+            var slowRefreshEnabled = false
+
+            // Next calls to repository:
+            // 1. Initial selection: normal fast response
+            // 2. Slow normal refresh (slowRefreshEnabled=true, force=false): pauses at slowRefreshBarrier
+            // 3. Fast force refresh (force=true): returns restricted company
+            val customRepo =
+                object : AccessRepository {
+                    override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> =
+                        repository.getGlobalContext()
+
+                    override suspend fun getCompanyAccess(
+                        userId: String,
+                        companyId: String,
+                        forceRefresh: Boolean,
+                    ): NetworkResult<CompanyAccessDomain> =
+                        if (slowRefreshEnabled && !forceRefresh) {
+                            slowRefreshEntered.complete(Unit)
+                            slowRefreshBarrier.await()
+                            NetworkResult.Success(
+                                CompanyAccessDomain(
+                                    companyId = companyId,
+                                    companyName = "Old Co",
+                                    serverTime = Instant.fromEpochMilliseconds(0),
+                                    revision = "rev_old",
+                                    companyStatus = CompanyStatus.ACTIVE,
+                                    accessStatus = AccessStatus.ACTIVE,
+                                    activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                                    restriction = null,
+                                    tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                                    supportPermissions = emptySet(),
+                                    permissionSources = emptyMap(),
+                                    supportGrant = null,
+                                ),
+                            )
+                        } else if (forceRefresh) {
+                            NetworkResult.Success(
+                                CompanyAccessDomain(
+                                    companyId = companyId,
+                                    companyName = "Frozen Co",
+                                    serverTime = Instant.fromEpochMilliseconds(0),
+                                    revision = "rev_frozen",
+                                    companyStatus = CompanyStatus.RESTRICTED,
+                                    accessStatus = AccessStatus.RESTRICTED,
+                                    activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                                    restriction = null,
+                                    tenantPermissions = emptySet(),
+                                    supportPermissions = emptySet(),
+                                    permissionSources = emptyMap(),
+                                    supportGrant = null,
+                                ),
+                            )
+                        } else {
+                            NetworkResult.Success(
+                                CompanyAccessDomain(
+                                    companyId = companyId,
+                                    companyName = "Initial Co",
+                                    serverTime = Instant.fromEpochMilliseconds(0),
+                                    revision = "rev_init",
+                                    companyStatus = CompanyStatus.ACTIVE,
+                                    accessStatus = AccessStatus.ACTIVE,
+                                    activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                                    restriction = null,
+                                    tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                                    supportPermissions = emptySet(),
+                                    permissionSources = emptyMap(),
+                                    supportGrant = null,
+                                ),
+                            )
+                        }
+
+                    override suspend fun getCachedCompanyAccess(
+                        userId: String,
+                        companyId: String,
+                    ): CompanyAccessDomain? = null
+
+                    override suspend fun clearCache() {}
+                }
+
+            val testCoordinator =
+                TenantContextCoordinator(
+                    accessRepository = customRepo,
+                    accessManager = accessManager,
+                    sessionManager = sessionManager,
+                    mapper = mapper,
+                )
+
+            try {
+                // Select tenant first to be in Authorized
+                testCoordinator.selectTenant("c1")
+                assertTrue(testCoordinator.tenantState.value is TenantContextState.Authorized)
+
+                // Now enable slow refresh and start slow normal refresh
+                slowRefreshEnabled = true
+                val slowJob = launch { testCoordinator.refreshCurrentTenant(force = false) }
+                slowRefreshEntered.await()
+
+                // Fast force refresh runs and completes
+                testCoordinator.refreshCurrentTenant(force = true)
+                assertTrue(testCoordinator.tenantState.value is TenantContextState.Restricted.CompanyFrozen)
+
+                // Complete the slow refresh
+                slowRefreshBarrier.complete(Unit)
+                slowJob.join()
+
+                // State MUST remain CompanyFrozen (stale normal refresh result was discarded by generation check)
+                assertTrue(testCoordinator.tenantState.value is TenantContextState.Restricted.CompanyFrozen)
+            } finally {
+                testCoordinator.reset()
+            }
+        }
 }

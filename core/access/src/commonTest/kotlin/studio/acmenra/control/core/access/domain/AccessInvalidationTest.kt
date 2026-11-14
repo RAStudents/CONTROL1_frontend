@@ -6,7 +6,9 @@ import io.ktor.client.request.get
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
@@ -213,16 +215,14 @@ class AccessInvalidationTest {
         }
 
     @Test
-    fun http403FromKtorAccessRemoteDataSourceAutomaticallyTriggersAccessInvalidation() =
+    fun http403FromKtorAccessRemoteDataSourceDoesNotTriggerInvalidationToPreventCycle() =
         runTest {
-            var invalidatedCode: String? = null
-            var invalidatedCompany: String? = null
+            var invalidatedCount = 0
 
             val customDispatcher =
                 AccessInvalidationDispatcher().apply {
-                    addListener { code, company ->
-                        invalidatedCode = code
-                        invalidatedCompany = company
+                    addListener { _, _ ->
+                        invalidatedCount++
                     }
                 }
 
@@ -247,12 +247,87 @@ class AccessInvalidationTest {
             val remoteDataSource =
                 KtorAccessRemoteDataSource(
                     httpClient = client,
-                    invalidationListener = customDispatcher,
                 )
 
             val result = remoteDataSource.getCompanyAccess("comp_99", ifNoneMatch = null)
             assertTrue(result is NetworkResult.Failure)
-            assertEquals("SUPPORT_GRANT_EXPIRED", invalidatedCode)
-            assertEquals("comp_99", invalidatedCompany)
+            assertEquals(403, (result.error as NetworkError.Http).statusCode)
+            // Access datasource must NOT trigger invalidation listener to prevent infinite recursion
+            assertEquals(0, invalidatedCount)
+        }
+
+    @Test
+    fun reentrantInvalidationCallsAreDroppedByCoordinator() =
+        runTest {
+            val localJob = Job()
+            val localScope = CoroutineScope(localJob + testDispatcher)
+            try {
+                var globalCallCount = 0
+                val emptyStorage = FakeTokenStorage().apply { clear() }
+                val localSessionManager = SessionManager(emptyStorage)
+                var coordinatorInstance: AccessInvalidationCoordinator? = null
+
+                val recursiveRepository =
+                    object : AccessRepository {
+                        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> {
+                            globalCallCount++
+                            if (globalCallCount == 1) {
+                                // Simulate re-entrant call during invalidation
+                                coordinatorInstance?.onAccessInvalidated("ACCOUNT_FROZEN", null)
+                            }
+                            return NetworkResult.Failure(
+                                NetworkError.Http(
+                                    statusCode = 403,
+                                    errorBody = """{"error":"ACCOUNT_FROZEN"}""",
+                                ),
+                            )
+                        }
+
+                        override suspend fun getCompanyAccess(
+                            userId: String,
+                            companyId: String,
+                            forceRefresh: Boolean,
+                        ): NetworkResult<CompanyAccessDomain> = throw UnsupportedOperationException()
+
+                        override suspend fun getCachedCompanyAccess(
+                            userId: String,
+                            companyId: String,
+                        ): CompanyAccessDomain? = null
+
+                        override suspend fun clearCache() {}
+                    }
+
+                val mgr =
+                    AccessManager(
+                        accessRepository = recursiveRepository,
+                        sessionManager = localSessionManager,
+                        mapper = mapper,
+                        scope = localScope,
+                    )
+
+                val tenantCoord =
+                    TenantContextCoordinator(
+                        accessRepository = recursiveRepository,
+                        accessManager = mgr,
+                        sessionManager = localSessionManager,
+                        mapper = mapper,
+                        scope = localScope,
+                    )
+
+                val coordinator =
+                    AccessInvalidationCoordinator(
+                        accessManager = mgr,
+                        tenantCoordinator = tenantCoord,
+                    )
+                coordinatorInstance = coordinator
+
+                coordinator.onAccessInvalidated("ACCOUNT_FROZEN", null)
+
+                // Re-entrant call was dropped, exactly 1 call executed
+                assertEquals(1, globalCallCount)
+                assertTrue(mgr.globalState.value is GlobalAccessState.Restricted.AccountFrozen)
+            } finally {
+                localJob.cancel()
+            }
         }
 }

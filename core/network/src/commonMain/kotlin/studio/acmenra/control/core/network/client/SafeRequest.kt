@@ -117,10 +117,14 @@ suspend inline fun <reified T> HttpClient.safeRequest(
         } else {
             val errorBody = response.readErrorBodySafely()
             if (response.status == HttpStatusCode.Forbidden) {
-                val listener = attributes.getOrNull(AccessInvalidationAttributeKey)
-                if (listener != null) {
-                    val (errorCode, companyId) = parseErrorDetails(errorBody, response.request)
-                    listener.onAccessInvalidated(errorCode, companyId)
+                val path = response.request.url.encodedPath
+                val isAccessEndpoint = path.contains("auth/context") || path.endsWith("/access")
+                if (!isAccessEndpoint) {
+                    val listener = attributes.getOrNull(AccessInvalidationAttributeKey)
+                    if (listener != null) {
+                        val (errorCode, companyId) = parseErrorDetails(errorBody, response.request)
+                        listener.onAccessInvalidated(errorCode, companyId)
+                    }
                 }
             }
             NetworkResult.Failure(

@@ -39,7 +39,8 @@ class TenantContextCoordinator(
     private val singleFlight: TenantSingleFlight = TenantSingleFlight(scope),
 ) {
     private val mutex = Mutex()
-    private var currentRequestGeneration: Long = 0L
+    private var globalTenantEpoch: Long = 0L
+    private val companyGenerations = mutableMapOf<String, Long>()
     private var expirationJob: Job? = null
     private var activeSelectionJob: Deferred<Unit>? = null
 
@@ -90,7 +91,9 @@ class TenantContextCoordinator(
                 expirationJob = null
                 activeSelectionJob?.cancel()
 
-                val generation = ++currentRequestGeneration
+                val requestEpoch = globalTenantEpoch
+                val generation = (companyGenerations[companyId] ?: 0L) + 1L
+                companyGenerations[companyId] = generation
                 val requestSessionRevision =
                     sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
 
@@ -98,7 +101,7 @@ class TenantContextCoordinator(
 
                 val newDeferred =
                     scope.async {
-                        doSelectTenant(companyId, generation, requestSessionRevision)
+                        doSelectTenant(companyId, generation, requestEpoch, requestSessionRevision)
                     }
                 activeSelectionJob = newDeferred
                 newDeferred
@@ -110,13 +113,20 @@ class TenantContextCoordinator(
     private suspend fun doSelectTenant(
         companyId: String,
         generation: Long,
+        requestEpoch: Long,
         requestSessionRevision: Long,
     ) {
         val snapshot = sessionManager.getSessionSnapshot()
         if (snapshot == null) {
             mutex.withLock {
+                val latest = _tenantState.value
                 val latestRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
-                if (generation == currentRequestGeneration && latestRevision == requestSessionRevision) {
+                val currentGen = companyGenerations[companyId] ?: 0L
+                if (requestEpoch == globalTenantEpoch &&
+                    generation == currentGen &&
+                    latestRevision == requestSessionRevision &&
+                    isSameCompanyAsLatest(latest, companyId)
+                ) {
                     _tenantState.value =
                         TenantContextState.Restricted.AccessDenied(
                             companyId = companyId,
@@ -152,12 +162,16 @@ class TenantContextCoordinator(
             }
 
         mutex.withLock {
+            val latest = _tenantState.value
             val latestRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
             val isAuthenticated = sessionManager.sessionState.value is SessionState.Authenticated
+            val currentGen = companyGenerations[companyId] ?: 0L
 
-            if (generation != currentRequestGeneration ||
+            if (requestEpoch != globalTenantEpoch ||
+                generation != currentGen ||
                 latestRevision != requestSessionRevision ||
-                !isAuthenticated
+                !isAuthenticated ||
+                !isSameCompanyAsLatest(latest, companyId)
             ) {
                 return@withLock
             }
@@ -261,12 +275,14 @@ class TenantContextCoordinator(
 
         val sessionRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
 
-        val generation =
+        val (requestEpoch, generation) =
             mutex.withLock {
                 if (isTargetActiveTenant && current is TenantContextState.Authorized) {
                     _tenantState.value = current.copy(isRefreshing = true)
                 }
-                ++currentRequestGeneration
+                val nextGen = (companyGenerations[companyId] ?: 0L) + 1L
+                companyGenerations[companyId] = nextGen
+                globalTenantEpoch to nextGen
             }
 
         val key =
@@ -286,21 +302,16 @@ class TenantContextCoordinator(
             val latest = _tenantState.value
             val latestRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
             val isAuthenticated = sessionManager.sessionState.value is SessionState.Authenticated
+            val currentGen = companyGenerations[companyId] ?: 0L
 
-            if (generation != currentRequestGeneration || latestRevision != sessionRevision || !isAuthenticated) {
+            if (requestEpoch != globalTenantEpoch ||
+                generation != currentGen ||
+                latestRevision != sessionRevision ||
+                !isAuthenticated ||
+                !isSameCompanyAsLatest(latest, companyId)
+            ) {
                 return@withLock
             }
-
-            val isSameCompany =
-                when (latest) {
-                    is TenantContextState.Authorized -> latest.context.companyId == companyId
-                    is TenantContextState.Restricted -> latest.companyId == companyId
-                    is TenantContextState.Error -> latest.companyId == companyId
-                    is TenantContextState.Loading -> latest.requestedCompanyId == companyId
-                    is TenantContextState.NotSelected -> false
-                }
-
-            if (!isSameCompany) return@withLock
 
             val userContext = accessManager.currentUserContext()
             val canSwitch = userContext?.hasMultipleCompanies ?: false
@@ -382,7 +393,8 @@ class TenantContextCoordinator(
             expirationJob = null
             activeSelectionJob?.cancel()
             activeSelectionJob = null
-            currentRequestGeneration++
+            globalTenantEpoch++
+            companyGenerations.clear()
             _tenantState.value = TenantContextState.NotSelected
         }
     }
@@ -521,4 +533,16 @@ class TenantContextCoordinator(
                 refreshCurrentTenant(force = true)
             }
     }
+
+    private fun isSameCompanyAsLatest(
+        latest: TenantContextState,
+        companyId: String,
+    ): Boolean =
+        when (latest) {
+            is TenantContextState.Authorized -> latest.context.companyId == companyId
+            is TenantContextState.Restricted -> latest.companyId == companyId
+            is TenantContextState.Error -> latest.companyId == companyId
+            is TenantContextState.Loading -> latest.requestedCompanyId == companyId
+            is TenantContextState.NotSelected -> false
+        }
 }

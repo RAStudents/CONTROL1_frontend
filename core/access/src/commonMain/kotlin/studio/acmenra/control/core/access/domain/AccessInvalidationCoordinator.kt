@@ -17,6 +17,7 @@ class AccessInvalidationCoordinator(
     private val tenantCoordinator: TenantContextCoordinator,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) : AccessInvalidationListener {
+    internal var onBeforeFinallyHook: (suspend () -> Unit)? = null
     private val targetMutex = Mutex()
     private val inProgressTargets = mutableMapOf<String, Any>()
     private val pendingRetryTargets = mutableMapOf<String, Pair<String?, String?>>()
@@ -83,6 +84,7 @@ class AccessInvalidationCoordinator(
                     break
                 }
             }
+            onBeforeFinallyHook?.invoke()
         } finally {
             withContext(NonCancellable) {
                 val pendingToRecover =

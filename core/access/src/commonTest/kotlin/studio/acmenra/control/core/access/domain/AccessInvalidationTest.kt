@@ -712,4 +712,151 @@ class AccessInvalidationTest {
                 localJob.cancel()
             }
         }
+
+    @Test
+    fun staleFinallyDoesNotDeleteLockBelongingToNewOperation() =
+        runTest {
+            val localJob = Job()
+            val localScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + localJob)
+            val localSessionManager = SessionManager(FakeTokenStorage())
+            try {
+                var activeRuns = 0
+                var maxConcurrentRuns = 0
+                val op2Barrier = CompletableDeferred<Unit>()
+                val op2Entered = CompletableDeferred<Unit>()
+                val op1BeforeFinallyReached = CompletableDeferred<Unit>()
+                val op1AllowFinally = CompletableDeferred<Unit>()
+
+                var refreshCount = 0
+
+                val testRepo =
+                    object : AccessRepository {
+                        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> =
+                            NetworkResult.Success(
+                                GlobalUserContext(
+                                    userId = "u1",
+                                    serverTime = Instant.fromEpochMilliseconds(0),
+                                    globalPermissions = emptySet(),
+                                    defaultCompanyId = "comp_A",
+                                    canBrowseAllCompanies = false,
+                                    memberCompanies = listOf(CompanyBrief("comp_A", "Company A", CompanyStatus.ACTIVE)),
+                                ),
+                            )
+
+                        override suspend fun getCompanyAccess(
+                            userId: String,
+                            companyId: String,
+                            forceRefresh: Boolean,
+                        ): NetworkResult<CompanyAccessDomain> {
+                            refreshCount++
+                            activeRuns++
+                            maxConcurrentRuns = maxOf(maxConcurrentRuns, activeRuns)
+
+                            if (refreshCount == 3) {
+                                op2Entered.complete(Unit)
+                                op2Barrier.await()
+                            }
+
+                            activeRuns--
+                            return NetworkResult.Success(
+                                CompanyAccessDomain(
+                                    companyId = companyId,
+                                    companyName = "Company $companyId",
+                                    serverTime = Instant.fromEpochMilliseconds(0),
+                                    revision = "rev_$refreshCount",
+                                    companyStatus = CompanyStatus.ACTIVE,
+                                    accessStatus = AccessStatus.ACTIVE,
+                                    activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                                    restriction = null,
+                                    tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                                    supportPermissions = emptySet(),
+                                    permissionSources = emptyMap(),
+                                    supportGrant = null,
+                                ),
+                            )
+                        }
+
+                        override suspend fun getCachedCompanyAccess(
+                            userId: String,
+                            companyId: String,
+                        ): CompanyAccessDomain? = null
+
+                        override suspend fun clearCache() {}
+                    }
+
+                val mgr =
+                    AccessManager(
+                        accessRepository = testRepo,
+                        sessionManager = localSessionManager,
+                        mapper = mapper,
+                        scope = localScope,
+                    )
+
+                val tenantCoord =
+                    TenantContextCoordinator(
+                        accessRepository = testRepo,
+                        accessManager = mgr,
+                        sessionManager = localSessionManager,
+                        mapper = mapper,
+                        scope = localScope,
+                    )
+
+                val coord =
+                    AccessInvalidationCoordinator(
+                        accessManager = mgr,
+                        tenantCoordinator = tenantCoord,
+                        scope = localScope,
+                    )
+
+                // 1. Initial selection (refreshCount == 1)
+                tenantCoord.selectTenant("comp_A")
+                assertEquals(1, refreshCount)
+
+                // Configure hook to intercept Op 1 right between while loop exit and finally block
+                coord.onBeforeFinallyHook = {
+                    op1BeforeFinallyReached.complete(Unit)
+                    op1AllowFinally.await()
+                }
+
+                // 2. Launch Op 1: completes while loop (refreshCount == 2), hits hook before finally
+                val job1 = coord.onAccessInvalidatedAsync("PERMISSION_DENIED", "comp_A")
+                op1BeforeFinallyReached.await()
+                assertEquals(2, refreshCount)
+
+                // Clear hook so subsequent operations don't block
+                coord.onBeforeFinallyHook = null
+
+                // 3. Launch Op 2 while Op 1 is paused before finally.
+                // Op 2 sees lock was released by loop, acquires it with ownerToken2, and starts getCompanyAccess (refreshCount == 3)
+                val job2 = coord.onAccessInvalidatedAsync("PERMISSION_DENIED", "comp_A")
+                op2Entered.await()
+                assertEquals(3, refreshCount)
+                assertEquals(1, activeRuns)
+
+                // 4. Now allow Op 1 to proceed into its finally block!
+                // Op 1's finally must NOT delete the lock belonging to Op 2!
+                op1AllowFinally.complete(Unit)
+                job1.join()
+
+                // 5. While Op 2 is still suspended in getCompanyAccess, launch Op 3
+                val job3 = coord.onAccessInvalidatedAsync("SUPPORT_GRANT_EXPIRED", "comp_A")
+
+                // If Op 1's finally had cleared the lock, Op 3 would run concurrently (activeRuns would be 2).
+                // With ownerToken protection, Op 3 is queued as pending, so activeRuns remains 1.
+                assertEquals(1, activeRuns)
+                assertEquals(1, maxConcurrentRuns)
+
+                // 6. Release Op 2 barrier
+                op2Barrier.complete(Unit)
+                job2.join()
+                job3.join()
+
+                // Op 3 executed sequentially after Op 2
+                assertEquals(4, refreshCount)
+                assertEquals(0, activeRuns)
+                assertEquals(1, maxConcurrentRuns)
+            } finally {
+                localJob.cancel()
+            }
+        }
 }

@@ -353,8 +353,17 @@ class TenantContextCoordinator(
                     if (force && existing != null && existing.job.isActive) {
                         existing.job.cancel()
                     }
-                    if (isTargetActiveTenant && current is TenantContextState.Authorized) {
-                        _tenantState.value = current.copy(isRefreshing = true)
+                    val currentState = _tenantState.value
+                    val isCurrentActiveTenant =
+                        when (currentState) {
+                            is TenantContextState.Authorized -> currentState.context.companyId == companyId
+                            is TenantContextState.Restricted -> currentState.companyId == companyId
+                            is TenantContextState.Error -> currentState.companyId == companyId
+                            is TenantContextState.Loading -> currentState.requestedCompanyId == companyId
+                            is TenantContextState.NotSelected -> false
+                        }
+                    if (isCurrentActiveTenant && currentState is TenantContextState.Authorized) {
+                        _tenantState.value = currentState.copy(isRefreshing = true)
                     }
                     val requestEpoch = globalTenantEpoch
                     val generation = (companyGenerations[companyId] ?: 0L) + 1L

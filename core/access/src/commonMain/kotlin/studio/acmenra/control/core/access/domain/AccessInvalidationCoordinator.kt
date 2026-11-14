@@ -18,7 +18,7 @@ class AccessInvalidationCoordinator(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) : AccessInvalidationListener {
     private val targetMutex = Mutex()
-    private val inProgressTargets = mutableSetOf<String>()
+    private val inProgressTargets = mutableMapOf<String, Any>()
     private val pendingRetryTargets = mutableMapOf<String, Pair<String?, String?>>()
 
     override suspend fun onAccessInvalidated(
@@ -41,15 +41,16 @@ class AccessInvalidationCoordinator(
         companyId: String?,
     ) {
         val targetKey = targetKey(errorCode, companyId)
+        val ownerToken = Any()
         val acquired =
             targetMutex.withLock {
-                if (targetKey in inProgressTargets) {
+                if (inProgressTargets.containsKey(targetKey)) {
                     if (targetKey.startsWith("company:")) {
                         pendingRetryTargets[targetKey] = errorCode to companyId
                     }
                     false
                 } else {
-                    inProgressTargets.add(targetKey)
+                    inProgressTargets[targetKey] = ownerToken
                     true
                 }
             }
@@ -68,7 +69,9 @@ class AccessInvalidationCoordinator(
                     targetMutex.withLock {
                         val pending = pendingRetryTargets.remove(targetKey)
                         if (pending == null) {
-                            inProgressTargets.remove(targetKey)
+                            if (inProgressTargets[targetKey] === ownerToken) {
+                                inProgressTargets.remove(targetKey)
+                            }
                         }
                         pending
                     }
@@ -82,9 +85,19 @@ class AccessInvalidationCoordinator(
             }
         } finally {
             withContext(NonCancellable) {
-                targetMutex.withLock {
-                    inProgressTargets.remove(targetKey)
-                    pendingRetryTargets.remove(targetKey)
+                val pendingToRecover =
+                    targetMutex.withLock {
+                        if (inProgressTargets[targetKey] === ownerToken) {
+                            inProgressTargets.remove(targetKey)
+                            pendingRetryTargets.remove(targetKey)
+                        } else {
+                            null
+                        }
+                    }
+                if (pendingToRecover != null) {
+                    scope.launch {
+                        processInvalidation(pendingToRecover.first, pendingToRecover.second)
+                    }
                 }
             }
         }

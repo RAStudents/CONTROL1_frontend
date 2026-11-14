@@ -901,6 +901,7 @@ class HttpClientAuthTest {
                 sessionManager = sessionManager,
                 apiBaseUrl = "http://api.example.com",
                 debugMode = true,
+                allowInsecureTransport = false,
                 engine =
                     MockEngine {
                         respond(

@@ -13,6 +13,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.movableContentOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
@@ -39,10 +41,11 @@ fun AppScaffold(
 
     val isLoginDestination = destination?.hasRoute<LoginRoute>() == true
     val showNavigation = sessionState == SessionState.Authenticated && !isLoginDestination
+    val movableContent = remember(content) { movableContentOf { content() } }
 
     if (!showNavigation) {
         Box(modifier = modifier.fillMaxSize()) {
-            content()
+            movableContent()
         }
         return
     }
@@ -84,7 +87,7 @@ fun AppScaffold(
                             .weight(1f)
                             .fillMaxHeight(),
                 ) {
-                    content()
+                    movableContent()
                 }
             }
         } else {
@@ -126,7 +129,7 @@ fun AppScaffold(
                             .fillMaxSize()
                             .padding(innerPadding),
                 ) {
-                    content()
+                    movableContent()
                 }
             }
         }

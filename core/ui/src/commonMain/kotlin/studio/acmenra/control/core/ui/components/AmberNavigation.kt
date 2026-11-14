@@ -69,10 +69,15 @@ fun AmberNavigationRail(
         modifier = modifier.width(AmberDimens.RailCollapsed).fillMaxHeight(),
         containerColor = MaterialTheme.colorScheme.surfaceContainer,
         contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-        header = {
-            Spacer(modifier = Modifier.height(AmberDimens.RailTopPadding))
-            header?.invoke(this)
-        },
+        header =
+            if (header != null) {
+                {
+                    Spacer(modifier = Modifier.height(AmberDimens.RailTopPadding))
+                    header()
+                }
+            } else {
+                null
+            },
         content = content,
     )
 }

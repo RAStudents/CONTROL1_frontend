@@ -8,6 +8,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
@@ -212,5 +213,86 @@ class TenantSingleFlightTest {
             assertEquals(2, count)
             assertEquals("c1_cached", (resRegular as NetworkResult.Success).data.companyId)
             assertEquals("c1_fresh", (resForce as NetworkResult.Success).data.companyId)
+        }
+
+    @Test
+    fun executionWithUnconfinedDispatcherCleansUpWithoutLateinitError() =
+        runTest {
+            val unconfinedFlight = TenantSingleFlight(CoroutineScope(UnconfinedTestDispatcher()))
+            val key = TenantRequestKey(sessionRevision = 1L, userId = "u1", companyId = "c1")
+
+            val result =
+                unconfinedFlight.execute(key) {
+                    NetworkResult.Success(dummyDomain("c1"))
+                }
+
+            assertTrue(result is NetworkResult.Success)
+            assertEquals(0, unconfinedFlight.activeCount())
+        }
+
+    @Test
+    fun failureWithExceptionCleansUpInFlight() =
+        runTest {
+            val key = TenantRequestKey(sessionRevision = 1L, userId = "u1", companyId = "c1")
+            assertFailsWith<IllegalStateException> {
+                singleFlight.execute(key) {
+                    throw IllegalStateException("Failure in execution")
+                }
+            }
+            assertEquals(0, singleFlight.activeCount())
+        }
+
+    @Test
+    fun repeatedSequentialRequestsCleanUpAndExecuteEachTime() =
+        runTest {
+            val key = TenantRequestKey(sessionRevision = 1L, userId = "u1", companyId = "c1")
+            var count = 0
+
+            val res1 =
+                singleFlight.execute(key) {
+                    count++
+                    NetworkResult.Success(dummyDomain("c1"))
+                }
+            assertTrue(res1 is NetworkResult.Success)
+            assertEquals(1, count)
+            assertEquals(0, singleFlight.activeCount())
+
+            val res2 =
+                singleFlight.execute(key) {
+                    count++
+                    NetworkResult.Success(dummyDomain("c1"))
+                }
+            assertTrue(res2 is NetworkResult.Success)
+            assertEquals(2, count)
+            assertEquals(0, singleFlight.activeCount())
+        }
+
+    @Test
+    fun concurrentRequestsWithDifferentKeysCleanUpIndependently() =
+        runTest {
+            val key1 = TenantRequestKey(sessionRevision = 1L, userId = "u1", companyId = "c1")
+            val key2 = TenantRequestKey(sessionRevision = 1L, userId = "u1", companyId = "c2")
+
+            val barrier = CompletableDeferred<Unit>()
+            val job1 =
+                async {
+                    singleFlight.execute(key1) {
+                        barrier.await()
+                        NetworkResult.Success(dummyDomain("c1"))
+                    }
+                }
+            val job2 =
+                async {
+                    singleFlight.execute(key2) {
+                        barrier.await()
+                        NetworkResult.Success(dummyDomain("c2"))
+                    }
+                }
+
+            barrier.complete(Unit)
+            job1.await()
+            job2.await()
+
+            assertEquals(0, singleFlight.activeCount())
         }
 }

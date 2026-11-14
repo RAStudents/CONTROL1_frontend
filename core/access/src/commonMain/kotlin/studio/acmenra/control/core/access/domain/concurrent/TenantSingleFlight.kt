@@ -19,11 +19,16 @@ data class TenantRequestKey(
     val forceRefresh: Boolean = false,
 )
 
+private class FlightEntry(
+    val token: Any,
+    val deferred: Deferred<NetworkResult<CompanyAccessDomain>>,
+)
+
 class TenantSingleFlight(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
     private val mutex = Mutex()
-    private val inFlight = mutableMapOf<TenantRequestKey, Deferred<NetworkResult<CompanyAccessDomain>>>()
+    private val inFlight = mutableMapOf<TenantRequestKey, FlightEntry>()
 
     suspend fun execute(
         key: TenantRequestKey,
@@ -32,25 +37,25 @@ class TenantSingleFlight(
         val deferred =
             mutex.withLock {
                 val existing = inFlight[key]
-                if (existing != null && existing.isActive) {
-                    existing
+                if (existing != null && existing.deferred.isActive) {
+                    existing.deferred
                 } else {
-                    lateinit var newDeferred: Deferred<NetworkResult<CompanyAccessDomain>>
-                    newDeferred =
+                    val token = Any()
+                    val newDeferred =
                         scope.async {
                             try {
                                 block()
                             } finally {
                                 withContext(NonCancellable) {
                                     mutex.withLock {
-                                        if (inFlight[key] === newDeferred) {
+                                        if (inFlight[key]?.token === token) {
                                             inFlight.remove(key)
                                         }
                                     }
                                 }
                             }
                         }
-                    inFlight[key] = newDeferred
+                    inFlight[key] = FlightEntry(token, newDeferred)
                     newDeferred
                 }
             }

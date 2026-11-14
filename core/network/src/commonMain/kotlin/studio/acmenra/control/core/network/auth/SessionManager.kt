@@ -34,6 +34,10 @@ class SessionManager(
             SessionSnapshot(tokens = tokens, revision = currentRevision)
         }
 
+    suspend fun getSessionSnapshot(): SessionSnapshot? = getSnapshot()
+
+    suspend fun currentRevision(): Long = mutex.withLock { currentRevision }
+
     suspend fun saveSession(tokens: TokenPair): SessionSnapshot =
         mutex.withLock {
             require(tokens.isValid()) { "Tokens must not be blank" }

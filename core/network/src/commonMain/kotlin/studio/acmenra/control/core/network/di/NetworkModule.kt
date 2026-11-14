@@ -2,6 +2,7 @@ package studio.acmenra.control.core.network.di
 
 import org.koin.core.qualifier.named
 import org.koin.dsl.module
+import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.SettingsTokenStorage
 import studio.acmenra.control.core.network.auth.TokenStorage
@@ -16,6 +17,10 @@ val networkModule =
 
         single {
             ApiConfig()
+        }
+
+        single<AccessInvalidationListener> {
+            AccessInvalidationListener { _, _ -> }
         }
 
         single {

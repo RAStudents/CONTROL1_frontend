@@ -66,6 +66,7 @@ class AccessMapper(
             rawSupportPermissions = domain.supportPermissions,
             permissionSources = domain.permissionSources,
             supportGrant = domain.supportGrant,
+            restriction = domain.restriction,
         )
 
     private fun mapCompanyBrief(dto: CompanyBriefDto): CompanyBrief =

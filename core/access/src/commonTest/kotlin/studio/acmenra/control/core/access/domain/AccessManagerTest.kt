@@ -248,4 +248,77 @@ class AccessManagerTest {
             assertEquals(1, callCount)
             assertTrue(mgr.globalState.value is GlobalAccessState.Ready)
         }
+
+    @Test
+    fun forceRefreshGlobalContextDoesNotCoalesceIntoStaleNonForceRefresh() =
+        runTest {
+            val barrier1 = CompletableDeferred<Unit>()
+            val barrier2 = CompletableDeferred<Unit>()
+            var callCount = 0
+            val customRepository =
+                object : AccessRepository {
+                    override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> {
+                        callCount++
+                        if (callCount == 1) {
+                            barrier1.await()
+                            return NetworkResult.Success(
+                                GlobalUserContext(
+                                    userId = "user_stale",
+                                    serverTime = Instant.fromEpochMilliseconds(0),
+                                    globalPermissions = emptySet(),
+                                    defaultCompanyId = "c1",
+                                    canBrowseAllCompanies = false,
+                                    memberCompanies = listOf(CompanyBrief("c1", "Company 1", CompanyStatus.ACTIVE)),
+                                ),
+                            )
+                        } else {
+                            barrier2.await()
+                            return NetworkResult.Failure(
+                                NetworkError.Http(
+                                    statusCode = 403,
+                                    errorBody = """{"error":"ACCOUNT_FROZEN"}""",
+                                ),
+                            )
+                        }
+                    }
+
+                    override suspend fun getCompanyAccess(
+                        userId: String,
+                        companyId: String,
+                        forceRefresh: Boolean,
+                    ): NetworkResult<CompanyAccessDomain> = throw UnsupportedOperationException()
+
+                    override suspend fun getCachedCompanyAccess(
+                        userId: String,
+                        companyId: String,
+                    ): CompanyAccessDomain? = null
+
+                    override suspend fun clearCache() {}
+                }
+
+            val mgr =
+                AccessManager(
+                    accessRepository = customRepository,
+                    sessionManager = sessionManager,
+                    mapper = AccessMapper(),
+                    scope = testScope,
+                )
+
+            // Start non-force refresh (call 1)
+            val job1 = async { mgr.refreshGlobalContext(force = false) }
+            runCurrent()
+            assertEquals(1, callCount)
+
+            // Force refresh arrives while non-force is in-flight (call 2)
+            val job2 = async { mgr.refreshGlobalContext(force = true) }
+            runCurrent()
+            assertEquals(2, callCount)
+
+            barrier1.complete(Unit)
+            barrier2.complete(Unit)
+
+            val res2 = job2.await()
+            assertTrue(res2 is NetworkResult.Failure)
+            assertTrue(mgr.globalState.value is GlobalAccessState.Restricted.AccountFrozen)
+        }
 }

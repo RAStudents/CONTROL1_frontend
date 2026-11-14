@@ -10,6 +10,7 @@ import kotlinx.coroutines.test.runTest
 import studio.acmenra.control.core.access.data.mapper.AccessMapper
 import studio.acmenra.control.core.access.domain.concurrent.TenantSingleFlight
 import studio.acmenra.control.core.access.domain.model.AccessOrigin
+import studio.acmenra.control.core.access.domain.model.AccessRestriction
 import studio.acmenra.control.core.access.domain.model.AccessStatus
 import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
 import studio.acmenra.control.core.access.domain.model.CompanyBrief
@@ -301,7 +302,14 @@ class TenantContextCoordinatorTest {
                         companyStatus = CompanyStatus.RESTRICTED,
                         accessStatus = AccessStatus.ACTIVE_SUPPORT_OVERRIDE,
                         activeOrigins = setOf(AccessOrigin.SUPPORT_GRANT),
-                        restriction = null,
+                        restriction =
+                            AccessRestriction(
+                                type = RestrictionType.MAINTENANCE,
+                                reason = "Scheduled maintenance",
+                                restrictedAt = null,
+                                untilAt = null,
+                                supportContact = null,
+                            ),
                         tenantPermissions = setOf(TenantPermission.EVENTS_READ),
                         supportPermissions = setOf(SupportPermission.DEVICE_DIAGNOSTICS),
                         permissionSources =
@@ -324,6 +332,8 @@ class TenantContextCoordinatorTest {
             val postExpireState = coordinator.tenantState.value
             assertTrue(postExpireState is TenantContextState.Restricted.CompanyFrozen)
             assertEquals("c_frozen", postExpireState.companyId)
+            assertEquals(RestrictionType.MAINTENANCE, postExpireState.restriction?.type)
+            assertEquals("Scheduled maintenance", postExpireState.restriction?.reason)
         }
 
     @Test
@@ -911,5 +921,245 @@ class TenantContextCoordinatorTest {
             assertEquals("c1", stateAfterBRefresh.context.companyId)
             assertEquals("Active Company 1", stateAfterBRefresh.context.companyName)
             assertFalse(stateAfterBRefresh.isRefreshing)
+        }
+
+    @Test
+    fun retryOnScreenErrorRecoversTenantContextWhenNetworkRestored() =
+        runTest {
+            var failNetwork = true
+            val testRepo =
+                object : AccessRepository {
+                    override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> =
+                        if (failNetwork) {
+                            NetworkResult.Failure(NetworkError.Connectivity("No internet"))
+                        } else {
+                            NetworkResult.Success(
+                                GlobalUserContext(
+                                    userId = "user_retry",
+                                    serverTime = Instant.fromEpochMilliseconds(0),
+                                    globalPermissions = emptySet(),
+                                    defaultCompanyId = "c1",
+                                    canBrowseAllCompanies = false,
+                                    memberCompanies = listOf(CompanyBrief("c1", "Company 1", CompanyStatus.ACTIVE)),
+                                ),
+                            )
+                        }
+
+                    override suspend fun getCompanyAccess(
+                        userId: String,
+                        companyId: String,
+                        forceRefresh: Boolean,
+                    ): NetworkResult<CompanyAccessDomain> =
+                        if (failNetwork) {
+                            NetworkResult.Failure(NetworkError.Connectivity("No internet"))
+                        } else {
+                            NetworkResult.Success(
+                                CompanyAccessDomain(
+                                    companyId = companyId,
+                                    companyName = "Company $companyId",
+                                    serverTime = Instant.fromEpochMilliseconds(0),
+                                    revision = "rev_ok",
+                                    companyStatus = CompanyStatus.ACTIVE,
+                                    accessStatus = AccessStatus.ACTIVE,
+                                    activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                                    restriction = null,
+                                    tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                                    supportPermissions = emptySet(),
+                                    permissionSources = emptyMap(),
+                                    supportGrant = null,
+                                ),
+                            )
+                        }
+
+                    override suspend fun getCachedCompanyAccess(
+                        userId: String,
+                        companyId: String,
+                    ): CompanyAccessDomain? = null
+
+                    override suspend fun clearCache() {}
+                }
+
+            val testMgr = AccessManager(testRepo, sessionManager, mapper, scope = testScope)
+            val testCoord = TenantContextCoordinator(testRepo, testMgr, sessionManager, mapper, scope = testScope)
+
+            // Step 1: Initial selectTenant fails because network is down
+            testCoord.selectTenant("c1")
+            assertTrue(testCoord.tenantState.value is TenantContextState.Error)
+
+            // Step 2: Network is restored
+            failNetwork = false
+
+            // Step 3: User taps "Retry" button on error screen (calls refreshCurrentTenant)
+            testCoord.refreshCurrentTenant(force = true)
+
+            // Step 4: Successfully recovers into Authorized state!
+            val recoveredState = testCoord.tenantState.value
+            assertTrue(recoveredState is TenantContextState.Authorized)
+            assertEquals("c1", recoveredState.context.companyId)
+            assertEquals("user_retry", recoveredState.context.userId)
+        }
+
+    @Test
+    fun staleNormalRefreshFinallyDoesNotClearIsRefreshingOfNewerForceRefresh() =
+        runTest {
+            val barrierNormal = CompletableDeferred<Unit>()
+            val enteredNormal = CompletableDeferred<Unit>()
+            val barrierForce = CompletableDeferred<Unit>()
+            val enteredForce = CompletableDeferred<Unit>()
+            var refreshCount = 0
+
+            coordinator.selectTenant("c1")
+            assertTrue(coordinator.tenantState.value is TenantContextState.Authorized)
+
+            repository.handler = { companyId ->
+                refreshCount++
+                if (refreshCount == 1) {
+                    enteredNormal.complete(Unit)
+                    barrierNormal.await()
+                } else {
+                    enteredForce.complete(Unit)
+                    barrierForce.await()
+                }
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Company $companyId v$refreshCount",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_$refreshCount",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            // Launch normal refresh (force = false)
+            val jobNormal = testScope.launch { coordinator.refreshTenant("c1", force = false) }
+            enteredNormal.await()
+
+            // Launch force refresh (force = true)
+            val jobForce = testScope.launch { coordinator.refreshTenant("c1", force = true) }
+            enteredForce.await()
+
+            // isRefreshing must be true due to force refresh
+            val refreshingState = coordinator.tenantState.value
+            assertTrue(refreshingState is TenantContextState.Authorized)
+            assertTrue(refreshingState.isRefreshing)
+
+            // Release normal refresh: its finally must NOT clear isRefreshing because jobForce is active!
+            barrierNormal.complete(Unit)
+            jobNormal.join()
+
+            val stateAfterNormalFinished = coordinator.tenantState.value
+            assertTrue(stateAfterNormalFinished is TenantContextState.Authorized)
+            assertTrue(stateAfterNormalFinished.isRefreshing)
+
+            // Release force refresh
+            barrierForce.complete(Unit)
+            jobForce.join()
+
+            val finalState = coordinator.tenantState.value
+            assertTrue(finalState is TenantContextState.Authorized)
+            assertFalse(finalState.isRefreshing)
+            assertEquals("Company c1 v2", finalState.context.companyName)
+        }
+
+    @Test
+    fun grantExpirationTimerWithNewTenantRevisionDoesNotAlterNewContext() =
+        runTest {
+            val mark = timeMark
+            val grant1 =
+                SupportGrantInfo(
+                    grantId = "grant_1",
+                    status = SupportGrantStatus.ACTIVE,
+                    mode = SupportMode.ENGINEERING_SUPPORT,
+                    ticketReference = "T-1",
+                    allowBillingOverride = false,
+                    grantedByUserId = "u1",
+                    grantedAt = null,
+                    expiresAt = null,
+                    remainingTtlSec = 5L,
+                    revokedAt = null,
+                    fetchedAtMark = mark,
+                )
+
+            repository.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Grant Co",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_1",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE_SUPPORT_OVERRIDE,
+                        activeOrigins = setOf(AccessOrigin.SUPPORT_GRANT),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = setOf(SupportPermission.DEVICE_DIAGNOSTICS),
+                        permissionSources = emptyMap(),
+                        supportGrant = grant1,
+                    ),
+                )
+            }
+
+            coordinator.selectTenant("c1")
+            val initial = coordinator.tenantState.value
+            assertTrue(initial is TenantContextState.Authorized)
+            assertEquals("grant_1", initial.context.supportGrant?.grantId)
+
+            // Now before 5 seconds elapse, a new refresh arrives with grant_2 (10 seconds TTL)
+            val grant2 =
+                SupportGrantInfo(
+                    grantId = "grant_2",
+                    status = SupportGrantStatus.ACTIVE,
+                    mode = SupportMode.ENGINEERING_SUPPORT,
+                    ticketReference = "T-2",
+                    allowBillingOverride = false,
+                    grantedByUserId = "u1",
+                    grantedAt = null,
+                    expiresAt = null,
+                    remainingTtlSec = 10L,
+                    revokedAt = null,
+                    fetchedAtMark = mark,
+                )
+
+            repository.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Grant Co",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_2",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE_SUPPORT_OVERRIDE,
+                        activeOrigins = setOf(AccessOrigin.SUPPORT_GRANT),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = setOf(SupportPermission.DEVICE_DIAGNOSTICS),
+                        permissionSources = emptyMap(),
+                        supportGrant = grant2,
+                    ),
+                )
+            }
+
+            coordinator.refreshCurrentTenant(force = true)
+            val updated = coordinator.tenantState.value
+            assertTrue(updated is TenantContextState.Authorized)
+            assertEquals("grant_2", updated.context.supportGrant?.grantId)
+
+            // Advance time by 6 seconds (which would have expired grant_1, but NOT grant_2)
+            mark.elapsed = 6.seconds
+            testScope.advanceTimeBy(6_000)
+
+            // Grant 2 must NOT be expired by the old grant_1 timer!
+            val stateAfter6s = coordinator.tenantState.value
+            assertTrue(stateAfter6s is TenantContextState.Authorized)
+            assertFalse(stateAfter6s.context.isSupportGrantLocallyExpired)
+            assertEquals("grant_2", stateAfter6s.context.supportGrant?.grantId)
         }
 }

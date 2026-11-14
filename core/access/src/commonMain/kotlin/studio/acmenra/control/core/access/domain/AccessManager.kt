@@ -37,6 +37,7 @@ class AccessManager(
     private var currentGeneration: Long = 0L
     private var inFlightDeferred: Deferred<NetworkResult<GlobalUserContext>>? = null
     private var inFlightRevision: Long = -1L
+    private var inFlightForce: Boolean = false
 
     init {
         scope.launch {
@@ -82,9 +83,18 @@ class AccessManager(
                 val currentRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
 
                 val existing = inFlightDeferred
-                if (existing != null && existing.isActive && inFlightRevision == currentRevision) {
+                val canReuseExisting =
+                    existing != null &&
+                        existing.isActive &&
+                        inFlightRevision == currentRevision &&
+                        (!force || inFlightForce)
+                if (canReuseExisting) {
                     existing
                 } else {
+                    if (force && existing != null && existing.isActive) {
+                        existing.cancel()
+                    }
+                    inFlightForce = force
                     val generation = ++currentGeneration
                     inFlightRevision = currentRevision
 
@@ -133,6 +143,7 @@ class AccessManager(
             inFlightDeferred?.cancel()
             inFlightDeferred = null
             inFlightRevision = -1L
+            inFlightForce = false
             _globalState.value = GlobalAccessState.Idle
             accessRepository.clearCache()
         }

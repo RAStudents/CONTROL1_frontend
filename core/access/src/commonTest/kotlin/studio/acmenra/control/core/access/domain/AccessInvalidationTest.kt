@@ -483,7 +483,7 @@ class AccessInvalidationTest {
         }
 
     @Test
-    fun simultaneousInvalidationsForSameCompanyWithDifferentCodesAreDeduplicated() =
+    fun twoInvalidationsForSameCompanyDuringSingleRequestTriggersRepeatRevalidation() =
         runTest {
             val localJob = Job()
             val localScope = CoroutineScope(localJob + testDispatcher)
@@ -504,7 +504,7 @@ class AccessInvalidationTest {
                         ): NetworkResult<CompanyAccessDomain> {
                             if (companyId == "comp_A") {
                                 compARefreshCount++
-                                if (forceRefresh) {
+                                if (compARefreshCount == 2) {
                                     compAEntered.complete(Unit)
                                     barrierCompA.await()
                                 }
@@ -577,13 +577,13 @@ class AccessInvalidationTest {
                 job1.join()
                 job2.join()
 
-                // Exactly 2 network calls were made in total: 1 for selectTenant, 1 for the first invalidation.
-                // The concurrent second invalidation was cleanly deduplicated without duplicate execution.
-                assertEquals(2, compARefreshCount)
+                // Exactly 3 network calls were made in total: 1 for selectTenant, 1 for the first invalidation,
+                // and 1 for the pending retry invalidation that arrived while the first was in flight.
+                assertEquals(3, compARefreshCount)
 
                 // A subsequent invalidation after completion executes successfully
                 coordinator.onAccessInvalidatedAsync("PERMISSION_DENIED", "comp_A").join()
-                assertEquals(3, compARefreshCount)
+                assertEquals(4, compARefreshCount)
             } finally {
                 localJob.cancel()
             }

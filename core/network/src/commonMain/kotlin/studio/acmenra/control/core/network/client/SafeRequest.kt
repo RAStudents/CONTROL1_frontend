@@ -49,8 +49,11 @@ private val errorJson =
         isLenient = true
     }
 
+private val TENANT_ENDPOINT_REGEX =
+    Regex("^(?:/api/v\\d+)?/companies/([^/]+)(?:/.*)?$")
+
 private val RESERVED_COMPANY_SEGMENTS =
-    setOf("health", "metrics", "status", "check", "ping", "all", "me")
+    setOf("health", "metrics", "status", "check", "ping", "all", "me", "search")
 
 fun parseErrorDetails(
     errorBody: String?,
@@ -68,15 +71,13 @@ fun parseErrorDetails(
     }
 
     if (companyId.isNullOrBlank()) {
-        val segments = request.url.segments
-        val companyIndex = segments.indexOf("companies")
-        if (companyIndex != -1 && companyIndex + 1 < segments.size) {
-            val isVendorEndpoint = companyIndex > 0 && segments[companyIndex - 1] == "vendor"
-            if (!isVendorEndpoint) {
-                val candidate = segments[companyIndex + 1]
-                if (candidate.isNotBlank() && candidate !in RESERVED_COMPANY_SEGMENTS) {
-                    companyId = candidate
-                }
+        val path = request.url.encodedPath
+        val cleanPath = (if (path.startsWith("/")) path else "/$path").trimEnd('/')
+        val match = TENANT_ENDPOINT_REGEX.matchEntire(cleanPath)
+        if (match != null) {
+            val candidate = match.groupValues[1]
+            if (candidate.isNotBlank() && candidate !in RESERVED_COMPANY_SEGMENTS) {
+                companyId = candidate
             }
         }
     }

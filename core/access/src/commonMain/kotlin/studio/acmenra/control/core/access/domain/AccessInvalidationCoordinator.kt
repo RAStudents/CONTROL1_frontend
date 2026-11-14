@@ -3,10 +3,12 @@ package studio.acmenra.control.core.access.domain
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import studio.acmenra.control.core.access.domain.model.TenantContextState
 import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 
@@ -17,6 +19,7 @@ class AccessInvalidationCoordinator(
 ) : AccessInvalidationListener {
     private val targetMutex = Mutex()
     private val inProgressTargets = mutableSetOf<String>()
+    private val pendingRetryTargets = mutableMapOf<String, Pair<String?, String?>>()
 
     override suspend fun onAccessInvalidated(
         errorCode: String?,
@@ -41,6 +44,9 @@ class AccessInvalidationCoordinator(
         val acquired =
             targetMutex.withLock {
                 if (targetKey in inProgressTargets) {
+                    if (targetKey.startsWith("company:")) {
+                        pendingRetryTargets[targetKey] = errorCode to companyId
+                    }
                     false
                 } else {
                     inProgressTargets.add(targetKey)
@@ -53,18 +59,48 @@ class AccessInvalidationCoordinator(
         }
 
         try {
-            when (errorCode) {
-                "ACCOUNT_FROZEN" -> {
-                    accessManager.refreshGlobalContext(force = true)
-                }
+            var currentErrorCode = errorCode
+            var currentCompanyId = companyId
+            while (true) {
+                executeInvalidation(currentErrorCode, currentCompanyId)
 
-                else -> {
-                    tenantCoordinator.refreshTenant(targetCompanyId = companyId, force = true)
+                val next =
+                    targetMutex.withLock {
+                        val pending = pendingRetryTargets.remove(targetKey)
+                        if (pending == null) {
+                            inProgressTargets.remove(targetKey)
+                        }
+                        pending
+                    }
+
+                if (next != null) {
+                    currentErrorCode = next.first
+                    currentCompanyId = next.second
+                } else {
+                    break
                 }
             }
         } finally {
-            targetMutex.withLock {
-                inProgressTargets.remove(targetKey)
+            withContext(NonCancellable) {
+                targetMutex.withLock {
+                    inProgressTargets.remove(targetKey)
+                    pendingRetryTargets.remove(targetKey)
+                }
+            }
+        }
+    }
+
+    private suspend fun executeInvalidation(
+        errorCode: String?,
+        companyId: String?,
+    ) {
+        when (errorCode) {
+            "ACCOUNT_FROZEN" -> {
+                accessManager.refreshGlobalContext(force = true)
+            }
+
+            else -> {
+                tenantCoordinator.refreshTenant(targetCompanyId = companyId, force = true)
             }
         }
     }

@@ -105,6 +105,7 @@ data class AuthorizedTenantContext(
     private val rawSupportPermissions: Set<SupportPermission>,
     val permissionSources: Map<PermissionKey, Set<AccessOrigin>>,
     val supportGrant: SupportGrantInfo?,
+    val restriction: AccessRestriction? = null,
 ) {
     val isSupportGrantLocallyExpired: Boolean
         get() =

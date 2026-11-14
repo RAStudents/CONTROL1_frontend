@@ -5,14 +5,67 @@ import io.ktor.client.call.body
 import io.ktor.client.network.sockets.ConnectTimeoutException
 import io.ktor.client.network.sockets.SocketTimeoutException
 import io.ktor.client.plugins.HttpRequestTimeoutException
+import io.ktor.client.request.HttpRequest
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
+import io.ktor.client.statement.request
+import io.ktor.http.HttpStatusCode
 import io.ktor.http.isSuccess
+import io.ktor.util.AttributeKey
 import kotlinx.coroutines.CancellationException
 import kotlinx.io.IOException
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.Json
+import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.model.NetworkError
 import studio.acmenra.control.core.network.model.NetworkResult
+
+val AccessInvalidationAttributeKey =
+    AttributeKey<AccessInvalidationListener>("AccessInvalidationListener")
+
+@Serializable
+private data class ErrorBodyPayload(
+    @SerialName("error") val error: String? = null,
+    @SerialName("error_code") val errorCode: String? = null,
+    @SerialName("company_id") val companyId: String? = null,
+)
+
+private val errorJson =
+    Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+    }
+
+fun parseErrorDetails(
+    errorBody: String?,
+    request: HttpRequest,
+): Pair<String?, String?> {
+    var errorCode: String? = null
+    var companyId: String? = null
+
+    if (!errorBody.isNullOrBlank()) {
+        val payload = runCatching { errorJson.decodeFromString<ErrorBodyPayload>(errorBody) }.getOrNull()
+        if (payload != null) {
+            errorCode = payload.error ?: payload.errorCode
+            companyId = payload.companyId
+        }
+    }
+
+    if (companyId.isNullOrBlank()) {
+        val segments = request.url.segments
+        val companyIndex = segments.indexOf("companies")
+        if (companyIndex != -1 && companyIndex + 1 < segments.size) {
+            val segment = segments[companyIndex + 1]
+            if (segment.isNotBlank()) {
+                companyId = segment
+            }
+        }
+    }
+
+    return errorCode to companyId
+}
 
 suspend inline fun <reified T> HttpClient.safeRequest(
     crossinline block: suspend HttpClient.() -> HttpResponse,
@@ -63,6 +116,13 @@ suspend inline fun <reified T> HttpClient.safeRequest(
             }
         } else {
             val errorBody = response.readErrorBodySafely()
+            if (response.status == HttpStatusCode.Forbidden) {
+                val listener = attributes.getOrNull(AccessInvalidationAttributeKey)
+                if (listener != null) {
+                    val (errorCode, companyId) = parseErrorDetails(errorBody, response.request)
+                    listener.onAccessInvalidated(errorCode, companyId)
+                }
+            }
             NetworkResult.Failure(
                 NetworkError.Http(
                     statusCode = response.status.value,

@@ -25,6 +25,17 @@ import studio.acmenra.control.core.network.model.NetworkResult
 val AccessInvalidationAttributeKey =
     AttributeKey<AccessInvalidationListener>("AccessInvalidationListener")
 
+val SkipAccessInvalidationAttributeKey =
+    AttributeKey<Boolean>("SkipAccessInvalidation")
+
+private val ACCESS_QUERY_ENDPOINT_REGEX =
+    Regex("^(?:/api/v\\d+)?/(?:auth/context|companies/[^/]+/access)$")
+
+fun isAccessQueryEndpoint(path: String): Boolean {
+    val cleanPath = if (path.startsWith("/")) path else "/$path"
+    return cleanPath.trimEnd('/').matches(ACCESS_QUERY_ENDPOINT_REGEX)
+}
+
 @Serializable
 private data class ErrorBodyPayload(
     @SerialName("error") val error: String? = null,
@@ -117,8 +128,9 @@ suspend inline fun <reified T> HttpClient.safeRequest(
         } else {
             val errorBody = response.readErrorBodySafely()
             if (response.status == HttpStatusCode.Forbidden) {
+                val skipExplicit = response.request.attributes.getOrNull(SkipAccessInvalidationAttributeKey) == true
                 val path = response.request.url.encodedPath
-                val isAccessEndpoint = path.contains("auth/context") || path.endsWith("/access")
+                val isAccessEndpoint = skipExplicit || isAccessQueryEndpoint(path)
                 if (!isAccessEndpoint) {
                     val listener = attributes.getOrNull(AccessInvalidationAttributeKey)
                     if (listener != null) {

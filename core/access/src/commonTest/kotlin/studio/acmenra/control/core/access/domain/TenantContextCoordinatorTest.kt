@@ -1,0 +1,369 @@
+package studio.acmenra.control.core.access.domain
+
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runTest
+import studio.acmenra.control.core.access.data.datasource.CachedCompanyAccess
+import studio.acmenra.control.core.access.data.mapper.AccessMapper
+import studio.acmenra.control.core.access.domain.concurrent.TenantSingleFlight
+import studio.acmenra.control.core.access.domain.model.AccessOrigin
+import studio.acmenra.control.core.access.domain.model.AccessStatus
+import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
+import studio.acmenra.control.core.access.domain.model.CompanyBrief
+import studio.acmenra.control.core.access.domain.model.CompanyStatus
+import studio.acmenra.control.core.access.domain.model.GlobalUserContext
+import studio.acmenra.control.core.access.domain.model.PermissionKey
+import studio.acmenra.control.core.access.domain.model.SupportGrantInfo
+import studio.acmenra.control.core.access.domain.model.SupportGrantStatus
+import studio.acmenra.control.core.access.domain.model.SupportMode
+import studio.acmenra.control.core.access.domain.model.SupportPermission
+import studio.acmenra.control.core.access.domain.model.TenantContextState
+import studio.acmenra.control.core.access.domain.model.TenantPermission
+import studio.acmenra.control.core.access.domain.repository.AccessRepository
+import studio.acmenra.control.core.network.auth.SessionManager
+import studio.acmenra.control.core.network.auth.TokenStorage
+import studio.acmenra.control.core.network.model.NetworkResult
+import studio.acmenra.control.core.network.model.TokenPair
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.Instant
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class TenantContextCoordinatorTest {
+    private class FakeTokenStorage : TokenStorage {
+        private var storedTokens: TokenPair? = TokenPair("access_token", "refresh_token")
+
+        override fun getTokens(): TokenPair? = storedTokens
+
+        override fun saveTokens(tokens: TokenPair) {
+            storedTokens = tokens
+        }
+
+        override fun clear() {
+            storedTokens = null
+        }
+
+        override fun hasTokens(): Boolean = storedTokens != null
+    }
+
+    private class SettableTimeMark(
+        var elapsed: Duration = Duration.ZERO,
+    ) : TimeMark {
+        override fun elapsedNow(): Duration = elapsed
+
+        override fun plus(duration: Duration): TimeMark = SettableTimeMark(elapsed - duration)
+
+        override fun minus(duration: Duration): TimeMark = SettableTimeMark(elapsed + duration)
+    }
+
+    private class SettableTimeSource(
+        val mark: SettableTimeMark,
+    ) : TimeSource {
+        override fun markNow(): TimeMark = mark
+    }
+
+    private class FakeAccessRepository : AccessRepository {
+        var handler: suspend (companyId: String) -> NetworkResult<CompanyAccessDomain> = { companyId ->
+            NetworkResult.Success(
+                CompanyAccessDomain(
+                    companyId = companyId,
+                    companyName = "Company $companyId",
+                    serverTime = Instant.fromEpochMilliseconds(0),
+                    revision = "rev_1",
+                    companyStatus = CompanyStatus.ACTIVE,
+                    accessStatus = AccessStatus.ACTIVE,
+                    activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                    restriction = null,
+                    tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                    supportPermissions = emptySet(),
+                    permissionSources =
+                        mapOf(
+                            PermissionKey.Tenant(TenantPermission.EVENTS_READ) to setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        ),
+                    supportGrant = null,
+                ),
+            )
+        }
+
+        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> =
+            NetworkResult.Success(
+                GlobalUserContext(
+                    userId = "user_100",
+                    serverTime = Instant.fromEpochMilliseconds(0),
+                    globalPermissions = emptySet(),
+                    defaultCompanyId = "c1",
+                    canBrowseAllCompanies = false,
+                    memberCompanies =
+                        listOf(
+                            CompanyBrief("c1", "Company 1", CompanyStatus.ACTIVE),
+                            CompanyBrief("c2", "Company 2", CompanyStatus.ACTIVE),
+                        ),
+                ),
+            )
+
+        override suspend fun getCompanyAccess(
+            userId: String,
+            companyId: String,
+            forceRefresh: Boolean,
+        ): NetworkResult<CompanyAccessDomain> = handler(companyId)
+
+        override suspend fun getCachedCompanyAccess(
+            userId: String,
+            companyId: String,
+        ): CachedCompanyAccess? = null
+
+        override suspend fun clearCache() {}
+    }
+
+    private val testDispatcher = UnconfinedTestDispatcher()
+    private val testScope = TestScope(testDispatcher)
+    private val storage = FakeTokenStorage()
+    private val sessionManager = SessionManager(storage)
+    private val repository = FakeAccessRepository()
+    private val timeMark = SettableTimeMark()
+    private val timeSource = SettableTimeSource(timeMark)
+    private val mapper = AccessMapper(timeSource)
+    private val accessManager = AccessManager(repository, sessionManager, scope = testScope)
+    private val singleFlight = TenantSingleFlight()
+
+    private val coordinator =
+        TenantContextCoordinator(
+            accessRepository = repository,
+            accessManager = accessManager,
+            sessionManager = sessionManager,
+            mapper = mapper,
+            singleFlight = singleFlight,
+            scope = testScope,
+        )
+
+    @BeforeTest
+    fun setUp() =
+        runTest {
+            timeMark.elapsed = Duration.ZERO
+        }
+
+    @Test
+    fun selectTenantSetsLoadingThenAuthorized() =
+        runTest {
+            coordinator.selectTenant("c1")
+
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Authorized)
+            assertEquals("c1", state.context.companyId)
+            assertEquals(setOf(TenantPermission.EVENTS_READ), state.context.effectiveTenantPermissions)
+        }
+
+    @Test
+    fun generationProtectionPreventsSlowResponseFromOverwritingNewerTenant() =
+        runTest {
+            val slowDeferred = CompletableDeferred<Unit>()
+
+            repository.handler = { companyId ->
+                if (companyId == "slow_company") {
+                    slowDeferred.await()
+                }
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Company $companyId",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_1",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            // Start selecting slow_company
+            val jobSlow = testScope.launch { coordinator.selectTenant("slow_company") }
+
+            // Immediately switch to fast_company
+            coordinator.selectTenant("fast_company")
+            val currentFast = coordinator.tenantState.value
+            assertTrue(currentFast is TenantContextState.Authorized)
+            assertEquals("fast_company", currentFast.context.companyId)
+
+            // Now slow company finishes
+            slowDeferred.complete(Unit)
+            jobSlow.join()
+
+            // State MUST remain fast_company because slow_company's generation is obsolete!
+            val latest = coordinator.tenantState.value
+            assertTrue(latest is TenantContextState.Authorized)
+            assertEquals("fast_company", latest.context.companyId)
+        }
+
+    @Test
+    fun reactiveTimerExpiresGrantAndStripsSupportPermissions() =
+        runTest {
+            val grant =
+                SupportGrantInfo(
+                    grantId = "g1",
+                    status = SupportGrantStatus.ACTIVE,
+                    mode = SupportMode.ENGINEERING_SUPPORT,
+                    ticketReference = "T-1",
+                    allowBillingOverride = false,
+                    grantedByUserId = "u",
+                    grantedAt = null,
+                    expiresAt = null,
+                    remainingTtlSec = 10L,
+                    revokedAt = null,
+                    fetchedAtMark = timeMark,
+                )
+
+            repository.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Grant Co",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "r_grant",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP, AccessOrigin.SUPPORT_GRANT),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ, TenantPermission.AUDIT_READ),
+                        supportPermissions = setOf(SupportPermission.DEVICE_RESTART),
+                        permissionSources =
+                            mapOf(
+                                PermissionKey.Tenant(TenantPermission.EVENTS_READ) to
+                                    setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                                PermissionKey.Tenant(TenantPermission.AUDIT_READ) to setOf(AccessOrigin.SUPPORT_GRANT),
+                                PermissionKey.Support(SupportPermission.DEVICE_RESTART) to
+                                    setOf(AccessOrigin.SUPPORT_GRANT),
+                            ),
+                        supportGrant = grant,
+                    ),
+                )
+            }
+
+            coordinator.selectTenant("c_grant")
+            val authorized = coordinator.tenantState.value as TenantContextState.Authorized
+            assertEquals(setOf(SupportPermission.DEVICE_RESTART), authorized.context.effectiveSupportPermissions)
+            assertTrue(TenantPermission.AUDIT_READ in authorized.context.effectiveTenantPermissions)
+
+            // Advance time and timeMark past the 10-second TTL
+            timeMark.elapsed = 11.seconds
+            testScope.advanceTimeBy(11_000)
+
+            val expired = coordinator.tenantState.value as TenantContextState.Authorized
+            assertTrue(expired.context.isSupportGrantLocallyExpired)
+            assertTrue(expired.context.effectiveSupportPermissions.isEmpty())
+            // Non-grant permission remains, support-grant-sourced permission is stripped
+            assertTrue(TenantPermission.EVENTS_READ in expired.context.effectiveTenantPermissions)
+            assertFalse(TenantPermission.AUDIT_READ in expired.context.effectiveTenantPermissions)
+        }
+
+    @Test
+    fun restrictedCompanyWithActiveSupportOverrideAdmitsUserThenFreezesOnExpiration() =
+        runTest {
+            val grant =
+                SupportGrantInfo(
+                    grantId = "g_override",
+                    status = SupportGrantStatus.ACTIVE,
+                    mode = SupportMode.ENGINEERING_SUPPORT,
+                    ticketReference = "OVERRIDE-1",
+                    allowBillingOverride = false,
+                    grantedByUserId = "u",
+                    grantedAt = null,
+                    expiresAt = null,
+                    remainingTtlSec = 5L,
+                    revokedAt = null,
+                    fetchedAtMark = timeMark,
+                )
+
+            repository.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Frozen Co",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "r_froz",
+                        companyStatus = CompanyStatus.RESTRICTED,
+                        accessStatus = AccessStatus.ACTIVE_SUPPORT_OVERRIDE,
+                        activeOrigins = setOf(AccessOrigin.SUPPORT_GRANT),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = setOf(SupportPermission.DEVICE_DIAGNOSTICS),
+                        permissionSources =
+                            mapOf(
+                                PermissionKey.Tenant(TenantPermission.EVENTS_READ) to setOf(AccessOrigin.SUPPORT_GRANT),
+                            ),
+                        supportGrant = grant,
+                    ),
+                )
+            }
+
+            coordinator.selectTenant("c_frozen")
+            assertTrue(coordinator.tenantState.value is TenantContextState.Authorized)
+
+            // Now expire grant
+            timeMark.elapsed = 6.seconds
+            testScope.advanceTimeBy(6_000)
+
+            // When override grant expires on a restricted company, it cannot stay authorized and refreshes to frozen
+            val postExpireState = coordinator.tenantState.value
+            assertTrue(postExpireState is TenantContextState.Restricted.CompanyFrozen)
+            assertEquals("c_frozen", postExpireState.companyId)
+        }
+
+    @Test
+    fun invalidationListenerTriggersRefresh() =
+        runTest {
+            var refreshCalled = false
+            repository.handler = { companyId ->
+                refreshCalled = true
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Refreshed Co",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_ref",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            coordinator.selectTenant("c1")
+            refreshCalled = false
+
+            val invalidationCoordinator = AccessInvalidationCoordinator(accessManager, coordinator)
+            invalidationCoordinator.onAccessInvalidated("PERMISSION_DENIED", "c1")
+
+            assertTrue(refreshCalled)
+        }
+
+    @Test
+    fun resetCancelsJobsAndSetsNotSelected() =
+        runTest {
+            coordinator.selectTenant("c1")
+            assertTrue(coordinator.tenantState.value is TenantContextState.Authorized)
+
+            coordinator.reset()
+            assertEquals(TenantContextState.NotSelected, coordinator.tenantState.value)
+        }
+}

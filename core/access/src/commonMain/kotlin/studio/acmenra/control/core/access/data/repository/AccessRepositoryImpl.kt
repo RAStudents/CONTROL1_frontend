@@ -35,7 +35,7 @@ class AccessRepositoryImpl(
                 cached == null -> null
                 // Не отправляем If-None-Match, если в кэше активен SupportGrant (гарантия свежего remaining_ttl_sec)
                 cached.domain.supportGrant != null -> null
-                else -> cached.etag ?: cached.domain.revision
+                else -> cached.etag
             }
 
         return when (val remoteResult = remoteDataSource.getCompanyAccess(companyId, ifNoneMatch)) {
@@ -69,7 +69,13 @@ class AccessRepositoryImpl(
                 }
             }
 
-            is NetworkResult.Failure -> remoteResult
+            is NetworkResult.Failure -> {
+                val error = remoteResult.error
+                if (error is NetworkError.Http && error.statusCode == 403) {
+                    localDataSource.remove(userId, companyId)
+                }
+                remoteResult
+            }
         }
     }
 

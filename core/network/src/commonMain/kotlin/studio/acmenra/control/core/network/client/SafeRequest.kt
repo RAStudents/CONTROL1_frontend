@@ -49,6 +49,9 @@ private val errorJson =
         isLenient = true
     }
 
+private val RESERVED_COMPANY_SEGMENTS =
+    setOf("health", "metrics", "status", "check", "ping", "all", "me")
+
 fun parseErrorDetails(
     errorBody: String?,
     request: HttpRequest,
@@ -68,9 +71,12 @@ fun parseErrorDetails(
         val segments = request.url.segments
         val companyIndex = segments.indexOf("companies")
         if (companyIndex != -1 && companyIndex + 1 < segments.size) {
-            val segment = segments[companyIndex + 1]
-            if (segment.isNotBlank()) {
-                companyId = segment
+            val isVendorEndpoint = companyIndex > 0 && segments[companyIndex - 1] == "vendor"
+            if (!isVendorEndpoint) {
+                val candidate = segments[companyIndex + 1]
+                if (candidate.isNotBlank() && candidate !in RESERVED_COMPANY_SEGMENTS) {
+                    companyId = candidate
+                }
             }
         }
     }

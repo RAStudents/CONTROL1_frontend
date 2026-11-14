@@ -353,8 +353,8 @@ class TenantContextCoordinatorTest {
             coordinator.selectTenant("c1")
             refreshCalled = false
 
-            val invalidationCoordinator = AccessInvalidationCoordinator(accessManager, coordinator)
-            invalidationCoordinator.onAccessInvalidated("PERMISSION_DENIED", "c1")
+            val invalidationCoordinator = AccessInvalidationCoordinator(accessManager, coordinator, scope = testScope)
+            invalidationCoordinator.onAccessInvalidatedAsync("PERMISSION_DENIED", "c1").join()
 
             assertTrue(refreshCalled)
         }

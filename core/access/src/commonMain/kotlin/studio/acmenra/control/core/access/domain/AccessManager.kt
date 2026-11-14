@@ -1,10 +1,13 @@
 package studio.acmenra.control.core.access.domain
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -79,7 +82,7 @@ class AccessManager(
                 val currentRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
 
                 val existing = inFlightDeferred
-                if (!force && existing != null && existing.isActive && inFlightRevision == currentRevision) {
+                if (existing != null && existing.isActive && inFlightRevision == currentRevision) {
                     existing
                 } else {
                     val generation = ++currentGeneration
@@ -97,8 +100,9 @@ class AccessManager(
                             mutex.withLock {
                                 val latestRevision =
                                     sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
-
-                                if (generation == currentGeneration && latestRevision == currentRevision) {
+                                if (generation == currentGeneration &&
+                                    latestRevision == currentRevision
+                                ) {
                                     applyGlobalContextResultLocked(result)
                                 }
                             }
@@ -110,7 +114,17 @@ class AccessManager(
                 }
             }
 
-        return deferred.await()
+        return try {
+            deferred.await()
+        } catch (e: CancellationException) {
+            currentCoroutineContext().ensureActive()
+            NetworkResult.Failure(
+                NetworkError.Unknown(
+                    message = "Global context refresh cancelled",
+                    cause = e,
+                ),
+            )
+        }
     }
 
     suspend fun reset() {
@@ -120,8 +134,8 @@ class AccessManager(
             inFlightDeferred = null
             inFlightRevision = -1L
             _globalState.value = GlobalAccessState.Idle
+            accessRepository.clearCache()
         }
-        accessRepository.clearCache()
     }
 
     private fun applyGlobalContextResultLocked(result: NetworkResult<GlobalUserContext>) {

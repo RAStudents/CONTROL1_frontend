@@ -10,7 +10,6 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
@@ -19,6 +18,7 @@ import studio.acmenra.control.core.access.data.mapper.AccessMapper
 import studio.acmenra.control.core.access.domain.model.AccessOrigin
 import studio.acmenra.control.core.access.domain.model.AccessStatus
 import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
+import studio.acmenra.control.core.access.domain.model.CompanyBrief
 import studio.acmenra.control.core.access.domain.model.CompanyStatus
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
 import studio.acmenra.control.core.access.domain.model.GlobalUserContext
@@ -63,17 +63,26 @@ class AccessInvalidationTest {
         var companyRefreshCount = 0
         var lastRequestedCompanyId: String? = null
         var lastForceRefresh: Boolean = false
+        var globalResult: NetworkResult<GlobalUserContext> =
+            NetworkResult.Success(
+                GlobalUserContext(
+                    userId = "user_1",
+                    serverTime = Instant.fromEpochMilliseconds(0),
+                    globalPermissions = emptySet(),
+                    defaultCompanyId = "c1",
+                    canBrowseAllCompanies = true,
+                    memberCompanies =
+                        listOf(
+                            CompanyBrief("c1", "Company 1", CompanyStatus.ACTIVE),
+                            CompanyBrief("comp_A", "Company A", CompanyStatus.ACTIVE),
+                            CompanyBrief("comp_B", "Company B", CompanyStatus.ACTIVE),
+                        ),
+                ),
+            )
 
         override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> {
             globalRefreshCount++
-            return NetworkResult.Failure(
-                NetworkError.Http(
-                    statusCode = 403,
-                    errorBody =
-                        """{"error":"ACCOUNT_FROZEN",""" +
-                            """"restriction":{"type":"BILLING_DEBT","reason":"Unpaid invoice"}}""",
-                ),
-            )
+            return globalResult
         }
 
         override suspend fun getCompanyAccess(
@@ -119,14 +128,23 @@ class AccessInvalidationTest {
             scope = testScope,
         )
 
-    private val coordinator = AccessInvalidationCoordinator(accessManager, tenantCoordinator)
+    private val coordinator = AccessInvalidationCoordinator(accessManager, tenantCoordinator, scope = testScope)
     private val dispatcher = AccessInvalidationDispatcher().apply { addListener(coordinator) }
 
     @Test
     fun accountFrozenErrorCodeTriggersGlobalContextRefresh() =
         runTest {
+            repository.globalResult =
+                NetworkResult.Failure(
+                    NetworkError.Http(
+                        statusCode = 403,
+                        errorBody =
+                            """{"error":"ACCOUNT_FROZEN",""" +
+                                """"restriction":{"type":"BILLING_DEBT","reason":"Unpaid invoice"}}""",
+                    ),
+                )
             val initialCount = repository.globalRefreshCount
-            coordinator.onAccessInvalidated(errorCode = "ACCOUNT_FROZEN", companyId = null)
+            coordinator.onAccessInvalidatedAsync(errorCode = "ACCOUNT_FROZEN", companyId = null).join()
 
             assertEquals(initialCount + 1, repository.globalRefreshCount)
             val state = accessManager.globalState.value
@@ -143,7 +161,7 @@ class AccessInvalidationTest {
             tenantCoordinator.selectTenant("c1")
             val initialCount = repository.companyRefreshCount
 
-            coordinator.onAccessInvalidated(errorCode = "PERMISSION_DENIED", companyId = "c1")
+            coordinator.onAccessInvalidatedAsync(errorCode = "PERMISSION_DENIED", companyId = "c1").join()
 
             assertEquals(initialCount + 1, repository.companyRefreshCount)
             assertEquals("c1", repository.lastRequestedCompanyId)
@@ -156,7 +174,7 @@ class AccessInvalidationTest {
             tenantCoordinator.selectTenant("c1")
             val initialCount = repository.companyRefreshCount
 
-            coordinator.onAccessInvalidated(errorCode = "COMPANY_RESTRICTED", companyId = "c1")
+            coordinator.onAccessInvalidatedAsync(errorCode = "COMPANY_RESTRICTED", companyId = "c1").join()
 
             assertEquals(initialCount + 1, repository.companyRefreshCount)
             val state = tenantCoordinator.tenantState.value
@@ -173,7 +191,7 @@ class AccessInvalidationTest {
             tenantCoordinator.selectTenant("c1")
             val initialCount = repository.companyRefreshCount
 
-            coordinator.onAccessInvalidated(errorCode = "SUPPORT_GRANT_REVOKED", companyId = "c1")
+            coordinator.onAccessInvalidatedAsync(errorCode = "SUPPORT_GRANT_REVOKED", companyId = "c1").join()
 
             assertEquals(initialCount + 1, repository.companyRefreshCount)
             assertTrue(repository.lastForceRefresh)
@@ -325,10 +343,11 @@ class AccessInvalidationTest {
                     AccessInvalidationCoordinator(
                         accessManager = mgr,
                         tenantCoordinator = tenantCoord,
+                        scope = localScope,
                     )
                 coordinatorInstance = coordinator
 
-                coordinator.onAccessInvalidated("ACCOUNT_FROZEN", null)
+                coordinator.onAccessInvalidatedAsync("ACCOUNT_FROZEN", null).join()
 
                 // Re-entrant call was dropped, exactly 1 call executed
                 assertEquals(1, globalCallCount)
@@ -424,6 +443,7 @@ class AccessInvalidationTest {
                     AccessInvalidationCoordinator(
                         accessManager = mgr,
                         tenantCoordinator = tenantCoord,
+                        scope = localScope,
                     )
 
                 // Select Company A initially so it is the active authorized tenant
@@ -436,14 +456,11 @@ class AccessInvalidationTest {
                 compAFrozen = true
 
                 // Start invalidation for Company A (will pause at barrierCompA)
-                val jobA =
-                    launch {
-                        coordinator.onAccessInvalidated("COMPANY_RESTRICTED", "comp_A")
-                    }
+                val jobA = coordinator.onAccessInvalidatedAsync("COMPANY_RESTRICTED", "comp_A")
                 compAEntered.await()
 
                 // Invalidation for Company B arrives while Company A is in flight
-                coordinator.onAccessInvalidated("COMPANY_RESTRICTED", "comp_B")
+                coordinator.onAccessInvalidatedAsync("COMPANY_RESTRICTED", "comp_B").join()
 
                 // Company B should not be dropped and completes
                 assertTrue("comp_B" in refreshedCompanies)
@@ -541,6 +558,7 @@ class AccessInvalidationTest {
                     AccessInvalidationCoordinator(
                         accessManager = mgr,
                         tenantCoordinator = tenantCoord,
+                        scope = localScope,
                     )
 
                 // Select comp_A first
@@ -548,17 +566,11 @@ class AccessInvalidationTest {
                 assertEquals(1, compARefreshCount)
 
                 // First invalidation arrives for comp_A with PERMISSION_DENIED
-                val job1 =
-                    launch {
-                        coordinator.onAccessInvalidated("PERMISSION_DENIED", "comp_A")
-                    }
+                val job1 = coordinator.onAccessInvalidatedAsync("PERMISSION_DENIED", "comp_A")
                 compAEntered.await()
 
                 // Second invalidation arrives simultaneously for comp_A with SUPPORT_GRANT_EXPIRED
-                val job2 =
-                    launch {
-                        coordinator.onAccessInvalidated("SUPPORT_GRANT_EXPIRED", "comp_A")
-                    }
+                val job2 = coordinator.onAccessInvalidatedAsync("SUPPORT_GRANT_EXPIRED", "comp_A")
 
                 // Release barrier
                 barrierCompA.complete(Unit)
@@ -570,7 +582,7 @@ class AccessInvalidationTest {
                 assertEquals(2, compARefreshCount)
 
                 // A subsequent invalidation after completion executes successfully
-                coordinator.onAccessInvalidated("PERMISSION_DENIED", "comp_A")
+                coordinator.onAccessInvalidatedAsync("PERMISSION_DENIED", "comp_A").join()
                 assertEquals(3, compARefreshCount)
             } finally {
                 localJob.cancel()

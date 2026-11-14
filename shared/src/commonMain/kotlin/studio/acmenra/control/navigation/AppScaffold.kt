@@ -15,6 +15,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
@@ -41,7 +42,8 @@ fun AppScaffold(
 
     val isLoginDestination = destination?.hasRoute<LoginRoute>() == true
     val showNavigation = sessionState == SessionState.Authenticated && !isLoginDestination
-    val movableContent = remember(content) { movableContentOf { content() } }
+    val currentContent by rememberUpdatedState(content)
+    val movableContent = remember { movableContentOf { currentContent() } }
 
     if (!showNavigation) {
         Box(modifier = modifier.fillMaxSize()) {

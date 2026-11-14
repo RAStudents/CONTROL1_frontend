@@ -1,17 +1,39 @@
 package studio.acmenra.control.core.access.domain
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import studio.acmenra.control.core.access.domain.model.TenantContextState
 import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 
 class AccessInvalidationCoordinator(
     private val accessManager: AccessManager,
     private val tenantCoordinator: TenantContextCoordinator,
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) : AccessInvalidationListener {
     private val targetMutex = Mutex()
     private val inProgressTargets = mutableSetOf<String>()
 
     override suspend fun onAccessInvalidated(
+        errorCode: String?,
+        companyId: String?,
+    ) {
+        onAccessInvalidatedAsync(errorCode, companyId)
+    }
+
+    fun onAccessInvalidatedAsync(
+        errorCode: String?,
+        companyId: String?,
+    ): Job =
+        scope.launch {
+            processInvalidation(errorCode, companyId)
+        }
+
+    suspend fun processInvalidation(
         errorCode: String?,
         companyId: String?,
     ) {
@@ -36,15 +58,6 @@ class AccessInvalidationCoordinator(
                     accessManager.refreshGlobalContext(force = true)
                 }
 
-                "COMPANY_ACCESS_DENIED",
-                "COMPANY_RESTRICTED",
-                "PERMISSION_DENIED",
-                "SUPPORT_GRANT_EXPIRED",
-                "SUPPORT_GRANT_REVOKED",
-                -> {
-                    tenantCoordinator.refreshTenant(targetCompanyId = companyId, force = true)
-                }
-
                 else -> {
                     tenantCoordinator.refreshTenant(targetCompanyId = companyId, force = true)
                 }
@@ -59,5 +72,17 @@ class AccessInvalidationCoordinator(
     private fun targetKey(
         errorCode: String?,
         companyId: String?,
-    ): String = if (errorCode == "ACCOUNT_FROZEN") "global" else "company:${companyId ?: "current"}"
+    ): String {
+        if (errorCode == "ACCOUNT_FROZEN") return "global"
+        val activeCompanyId =
+            when (val s = tenantCoordinator.tenantState.value) {
+                is TenantContextState.Authorized -> s.context.companyId
+                is TenantContextState.Restricted -> s.companyId
+                is TenantContextState.Error -> s.companyId
+                is TenantContextState.Loading -> s.requestedCompanyId
+                is TenantContextState.NotSelected -> null
+            }
+        val resolvedCompany = companyId ?: activeCompanyId ?: "current"
+        return "company:$resolvedCompany"
+    }
 }

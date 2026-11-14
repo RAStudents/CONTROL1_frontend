@@ -1,12 +1,15 @@
 package studio.acmenra.control.core.access.domain
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,6 +24,7 @@ import studio.acmenra.control.core.access.domain.model.AccessStatus
 import studio.acmenra.control.core.access.domain.model.AuthorizedTenantContext
 import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
 import studio.acmenra.control.core.access.domain.model.CompanyStatus
+import studio.acmenra.control.core.access.domain.model.GlobalAccessState
 import studio.acmenra.control.core.access.domain.model.SupportGrantStatus
 import studio.acmenra.control.core.access.domain.model.TenantContextState
 import studio.acmenra.control.core.access.domain.repository.AccessRepository
@@ -28,6 +32,7 @@ import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.core.network.model.NetworkError
 import studio.acmenra.control.core.network.model.NetworkResult
+import kotlin.coroutines.coroutineContext
 import kotlin.time.Duration
 
 class TenantContextCoordinator(
@@ -42,7 +47,15 @@ class TenantContextCoordinator(
     private var globalTenantEpoch: Long = 0L
     private val companyGenerations = mutableMapOf<String, Long>()
     private var expirationJob: Job? = null
+    private var activeSelectionCompanyId: String? = null
     private var activeSelectionJob: Deferred<Unit>? = null
+
+    private data class ActiveRefresh(
+        val force: Boolean,
+        val job: Deferred<Unit>,
+    )
+
+    private val activeRefreshJobs = mutableMapOf<String, ActiveRefresh>()
 
     private val _tenantState = MutableStateFlow<TenantContextState>(TenantContextState.NotSelected)
     val tenantState: StateFlow<TenantContextState> = _tenantState.asStateFlow()
@@ -87,27 +100,45 @@ class TenantContextCoordinator(
     suspend fun selectTenant(companyId: String) {
         val deferred =
             mutex.withLock {
-                expirationJob?.cancel()
-                expirationJob = null
-                activeSelectionJob?.cancel()
+                if (activeSelectionCompanyId == companyId && activeSelectionJob?.isActive == true) {
+                    activeSelectionJob!!
+                } else {
+                    expirationJob?.cancel()
+                    expirationJob = null
+                    activeSelectionJob?.cancel()
 
-                val requestEpoch = globalTenantEpoch
-                val generation = (companyGenerations[companyId] ?: 0L) + 1L
-                companyGenerations[companyId] = generation
-                val requestSessionRevision =
-                    sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
+                    val requestEpoch = globalTenantEpoch
+                    val generation = (companyGenerations[companyId] ?: 0L) + 1L
+                    companyGenerations[companyId] = generation
+                    val requestSessionRevision =
+                        sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
 
-                _tenantState.value = TenantContextState.Loading(companyId)
+                    _tenantState.value = TenantContextState.Loading(companyId)
+                    activeSelectionCompanyId = companyId
 
-                val newDeferred =
-                    scope.async {
-                        doSelectTenant(companyId, generation, requestEpoch, requestSessionRevision)
-                    }
-                activeSelectionJob = newDeferred
-                newDeferred
+                    val newDeferred =
+                        scope.async {
+                            try {
+                                doSelectTenant(companyId, generation, requestEpoch, requestSessionRevision)
+                            } finally {
+                                mutex.withLock {
+                                    if (activeSelectionCompanyId == companyId) {
+                                        activeSelectionCompanyId = null
+                                        activeSelectionJob = null
+                                    }
+                                }
+                            }
+                        }
+                    activeSelectionJob = newDeferred
+                    newDeferred
+                }
             }
 
-        deferred.await()
+        try {
+            deferred.await()
+        } catch (e: CancellationException) {
+            currentCoroutineContext().ensureActive()
+        }
     }
 
     private suspend fun doSelectTenant(
@@ -138,11 +169,53 @@ class TenantContextCoordinator(
         }
 
         val userContext = accessManager.ensureGlobalContext()
-        val userId =
-            userContext?.userId ?: snapshot.tokens.accessToken
-                .hashCode()
-                .toString()
-        val canSwitch = userContext?.hasMultipleCompanies ?: false
+        if (userContext == null) {
+            mutex.withLock {
+                val latest = _tenantState.value
+                val latestRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
+                val currentGen = companyGenerations[companyId] ?: 0L
+                if (requestEpoch == globalTenantEpoch &&
+                    generation == currentGen &&
+                    latestRevision == requestSessionRevision &&
+                    isSameCompanyAsLatest(latest, companyId)
+                ) {
+                    val globalState = accessManager.globalState.value
+                    _tenantState.value =
+                        when (globalState) {
+                            is GlobalAccessState.Restricted.AccountFrozen -> {
+                                TenantContextState.Restricted.CompanyFrozen(
+                                    companyId = companyId,
+                                    companyName = null,
+                                    restriction = globalState.restriction,
+                                    canSwitchCompany = false,
+                                )
+                            }
+
+                            is GlobalAccessState.Restricted.NoCompaniesAvailable -> {
+                                TenantContextState.Restricted.AccessDenied(
+                                    companyId = companyId,
+                                    canSwitchCompany = false,
+                                )
+                            }
+
+                            else -> {
+                                TenantContextState.Error(
+                                    companyId = companyId,
+                                    error =
+                                        NetworkError.Unknown(
+                                            message = "Failed to load user global context",
+                                        ),
+                                    canSwitchCompany = false,
+                                )
+                            }
+                        }
+                }
+            }
+            return
+        }
+
+        val userId = userContext.userId
+        val canSwitch = userContext.hasMultipleCompanies
 
         val key =
             TenantRequestKey(
@@ -270,21 +343,70 @@ class TenantContextCoordinator(
         val userId =
             when (current) {
                 is TenantContextState.Authorized -> current.context.userId
-                else -> accessManager.currentUserContext()?.userId ?: ""
-            }
+                else -> accessManager.currentUserContext()?.userId
+            } ?: return
 
-        val sessionRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
-
-        val (requestEpoch, generation) =
+        val deferred =
             mutex.withLock {
-                if (isTargetActiveTenant && current is TenantContextState.Authorized) {
-                    _tenantState.value = current.copy(isRefreshing = true)
+                val existing = activeRefreshJobs[companyId]
+                if (existing != null && existing.job.isActive && (existing.force || !force)) {
+                    existing.job
+                } else {
+                    if (isTargetActiveTenant && current is TenantContextState.Authorized) {
+                        _tenantState.value = current.copy(isRefreshing = true)
+                    }
+                    val requestEpoch = globalTenantEpoch
+                    val generation = (companyGenerations[companyId] ?: 0L) + 1L
+                    companyGenerations[companyId] = generation
+                    val sessionRevision =
+                        sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
+
+                    val newJob =
+                        scope.async {
+                            try {
+                                doRefreshTenant(
+                                    companyId = companyId,
+                                    userId = userId,
+                                    generation = generation,
+                                    requestEpoch = requestEpoch,
+                                    sessionRevision = sessionRevision,
+                                    force = force,
+                                )
+                            } finally {
+                                mutex.withLock {
+                                    val latest = _tenantState.value
+                                    if (latest is TenantContextState.Authorized &&
+                                        latest.context.companyId == companyId &&
+                                        latest.isRefreshing
+                                    ) {
+                                        _tenantState.value = latest.copy(isRefreshing = false)
+                                    }
+                                    if (activeRefreshJobs[companyId]?.job === coroutineContext[Job]) {
+                                        activeRefreshJobs.remove(companyId)
+                                    }
+                                }
+                            }
+                        }
+                    activeRefreshJobs[companyId] = ActiveRefresh(force, newJob)
+                    newJob
                 }
-                val nextGen = (companyGenerations[companyId] ?: 0L) + 1L
-                companyGenerations[companyId] = nextGen
-                globalTenantEpoch to nextGen
             }
 
+        try {
+            deferred.await()
+        } catch (e: CancellationException) {
+            currentCoroutineContext().ensureActive()
+        }
+    }
+
+    private suspend fun doRefreshTenant(
+        companyId: String,
+        userId: String,
+        generation: Long,
+        requestEpoch: Long,
+        sessionRevision: Long,
+        force: Boolean,
+    ) {
         val key =
             TenantRequestKey(
                 sessionRevision = sessionRevision,
@@ -378,6 +500,28 @@ class TenantContextCoordinator(
                                 )
                         }
 
+                        latest is TenantContextState.Loading -> {
+                            expirationJob?.cancel()
+                            expirationJob = null
+                            _tenantState.value =
+                                TenantContextState.Error(
+                                    companyId = companyId,
+                                    error = error,
+                                    canSwitchCompany = canSwitch,
+                                )
+                        }
+
+                        latest is TenantContextState.Error -> {
+                            expirationJob?.cancel()
+                            expirationJob = null
+                            _tenantState.value =
+                                TenantContextState.Error(
+                                    companyId = companyId,
+                                    error = error,
+                                    canSwitchCompany = canSwitch,
+                                )
+                        }
+
                         latest is TenantContextState.Authorized -> {
                             _tenantState.value = latest.copy(isRefreshing = false)
                         }
@@ -393,6 +537,9 @@ class TenantContextCoordinator(
             expirationJob = null
             activeSelectionJob?.cancel()
             activeSelectionJob = null
+            activeSelectionCompanyId = null
+            activeRefreshJobs.values.forEach { it.job.cancel() }
+            activeRefreshJobs.clear()
             globalTenantEpoch++
             companyGenerations.clear()
             _tenantState.value = TenantContextState.NotSelected
@@ -473,35 +620,45 @@ class TenantContextCoordinator(
 
     private fun applyAuthorizedContextLocked(context: AuthorizedTenantContext) {
         val grant = context.supportGrant
+        val remaining = grant?.remainingDurationNow() ?: Duration.ZERO
+        val isGrantExpired =
+            grant != null &&
+                (grant.status != SupportGrantStatus.ACTIVE || remaining <= Duration.ZERO)
+
         when {
-            context.isSupportGrantLocallyExpired -> {
+            isGrantExpired -> {
                 expirationJob?.cancel()
                 expirationJob = null
-                _tenantState.value =
-                    TenantContextState.Authorized(
-                        context = context.withSupportGrantExpiredLocally(),
-                        isRefreshing = false,
-                    )
-                if (context.requiresImmediateRevalidation) {
-                    scope.launch { refreshCurrentTenant(force = true) }
+                val expiredContext = context.withSupportGrantExpiredLocally()
+                val userContext = accessManager.currentUserContext()
+                val canSwitch = userContext?.hasMultipleCompanies ?: false
+                if (context.companyStatus == CompanyStatus.RESTRICTED) {
+                    _tenantState.value =
+                        TenantContextState.Restricted.CompanyFrozen(
+                            companyId = context.companyId,
+                            companyName = context.companyName,
+                            restriction = null,
+                            canSwitchCompany = canSwitch,
+                        )
+                } else if (expiredContext.effectiveTenantPermissions.isEmpty()) {
+                    _tenantState.value =
+                        TenantContextState.Restricted.NoPermissions(
+                            companyId = context.companyId,
+                            companyName = context.companyName,
+                            canSwitchCompany = canSwitch,
+                        )
+                } else {
+                    _tenantState.value =
+                        TenantContextState.Authorized(
+                            context = expiredContext,
+                            isRefreshing = false,
+                        )
                 }
             }
 
             grant != null && grant.status == SupportGrantStatus.ACTIVE -> {
-                val remaining = grant.remainingDurationNow()
-                if (remaining <= Duration.ZERO) {
-                    expirationJob?.cancel()
-                    expirationJob = null
-                    _tenantState.value =
-                        TenantContextState.Authorized(
-                            context = context.withSupportGrantExpiredLocally(),
-                            isRefreshing = false,
-                        )
-                    scope.launch { refreshCurrentTenant(force = true) }
-                } else {
-                    _tenantState.value = TenantContextState.Authorized(context, isRefreshing = false)
-                    scheduleExpirationTimerLocked(context, remaining)
-                }
+                _tenantState.value = TenantContextState.Authorized(context, isRefreshing = false)
+                scheduleExpirationTimerLocked(context, remaining)
             }
 
             else -> {
@@ -517,17 +674,43 @@ class TenantContextCoordinator(
         remaining: Duration,
     ) {
         expirationJob?.cancel()
+        val targetGrantId = context.supportGrant?.grantId
+        val targetRevision = context.tenantRevision
         expirationJob =
             scope.launch {
                 delay(remaining)
                 mutex.withLock {
                     val current = _tenantState.value
-                    if (current is TenantContextState.Authorized && current.context.companyId == context.companyId) {
-                        _tenantState.value =
-                            TenantContextState.Authorized(
-                                context = current.context.withSupportGrantExpiredLocally(),
-                                isRefreshing = false,
-                            )
+                    if (current is TenantContextState.Authorized &&
+                        current.context.companyId == context.companyId &&
+                        current.context.tenantRevision == targetRevision &&
+                        current.context.supportGrant?.grantId == targetGrantId
+                    ) {
+                        val expiredContext = current.context.withSupportGrantExpiredLocally()
+                        val userContext = accessManager.currentUserContext()
+                        val canSwitch = userContext?.hasMultipleCompanies ?: false
+                        if (current.context.companyStatus == CompanyStatus.RESTRICTED) {
+                            _tenantState.value =
+                                TenantContextState.Restricted.CompanyFrozen(
+                                    companyId = context.companyId,
+                                    companyName = current.context.companyName,
+                                    restriction = null,
+                                    canSwitchCompany = canSwitch,
+                                )
+                        } else if (expiredContext.effectiveTenantPermissions.isEmpty()) {
+                            _tenantState.value =
+                                TenantContextState.Restricted.NoPermissions(
+                                    companyId = context.companyId,
+                                    companyName = current.context.companyName,
+                                    canSwitchCompany = canSwitch,
+                                )
+                        } else {
+                            _tenantState.value =
+                                TenantContextState.Authorized(
+                                    context = expiredContext,
+                                    isRefreshing = false,
+                                )
+                        }
                     }
                 }
                 refreshCurrentTenant(force = true)

@@ -6,15 +6,20 @@ import io.ktor.client.request.get
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import studio.acmenra.control.core.access.data.datasource.KtorAccessRemoteDataSource
 import studio.acmenra.control.core.access.data.mapper.AccessMapper
+import studio.acmenra.control.core.access.domain.model.AccessOrigin
+import studio.acmenra.control.core.access.domain.model.AccessStatus
 import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
+import studio.acmenra.control.core.access.domain.model.CompanyStatus
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
 import studio.acmenra.control.core.access.domain.model.GlobalUserContext
 import studio.acmenra.control.core.access.domain.model.RestrictionType
@@ -32,6 +37,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.time.Instant
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AccessInvalidationTest {
@@ -326,6 +332,108 @@ class AccessInvalidationTest {
                 // Re-entrant call was dropped, exactly 1 call executed
                 assertEquals(1, globalCallCount)
                 assertTrue(mgr.globalState.value is GlobalAccessState.Restricted.AccountFrozen)
+            } finally {
+                localJob.cancel()
+            }
+        }
+
+    @Test
+    fun twoIndependentInvalidationsForDifferentCompaniesAreBothProcessed() =
+        runTest {
+            val localJob = Job()
+            val localScope = CoroutineScope(localJob + testDispatcher)
+            try {
+                val barrierCompA = CompletableDeferred<Unit>()
+                val compAEntered = CompletableDeferred<Unit>()
+                val refreshedCompanies = mutableListOf<String>()
+
+                val testRepo =
+                    object : AccessRepository {
+                        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> =
+                            repository.getGlobalContext()
+
+                        override suspend fun getCompanyAccess(
+                            userId: String,
+                            companyId: String,
+                            forceRefresh: Boolean,
+                        ): NetworkResult<CompanyAccessDomain> {
+                            if (companyId == "comp_A") {
+                                compAEntered.complete(Unit)
+                                barrierCompA.await()
+                            }
+                            refreshedCompanies.add(companyId)
+                            return NetworkResult.Success(
+                                CompanyAccessDomain(
+                                    companyId = companyId,
+                                    companyName = "Company $companyId",
+                                    serverTime = Instant.fromEpochMilliseconds(0),
+                                    revision = "rev_1",
+                                    companyStatus = CompanyStatus.ACTIVE,
+                                    accessStatus = AccessStatus.ACTIVE,
+                                    activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                                    restriction = null,
+                                    tenantPermissions = emptySet(),
+                                    supportPermissions = emptySet(),
+                                    permissionSources = emptyMap(),
+                                    supportGrant = null,
+                                ),
+                            )
+                        }
+
+                        override suspend fun getCachedCompanyAccess(
+                            userId: String,
+                            companyId: String,
+                        ): CompanyAccessDomain? = null
+
+                        override suspend fun clearCache() {}
+                    }
+
+                val emptyStorage = FakeTokenStorage().apply { clear() }
+                val localSessionManager = SessionManager(emptyStorage)
+
+                val mgr =
+                    AccessManager(
+                        accessRepository = testRepo,
+                        sessionManager = localSessionManager,
+                        mapper = mapper,
+                        scope = localScope,
+                    )
+
+                val tenantCoord =
+                    TenantContextCoordinator(
+                        accessRepository = testRepo,
+                        accessManager = mgr,
+                        sessionManager = localSessionManager,
+                        mapper = mapper,
+                        scope = localScope,
+                    )
+
+                val coordinator =
+                    AccessInvalidationCoordinator(
+                        accessManager = mgr,
+                        tenantCoordinator = tenantCoord,
+                    )
+
+                // Start invalidation for Company A (will pause at barrierCompA)
+                val jobA =
+                    launch {
+                        coordinator.onAccessInvalidated("PERMISSION_DENIED", "comp_A")
+                    }
+                compAEntered.await()
+
+                // Invalidation for Company B arrives while Company A is in flight
+                coordinator.onAccessInvalidated("PERMISSION_DENIED", "comp_B")
+
+                // Company B should not be dropped and completes
+                assertTrue("comp_B" in refreshedCompanies)
+
+                // Complete Company A
+                barrierCompA.complete(Unit)
+                jobA.join()
+
+                // Both independent invalidations were processed!
+                assertTrue("comp_A" in refreshedCompanies)
+                assertTrue("comp_B" in refreshedCompanies)
             } finally {
                 localJob.cancel()
             }

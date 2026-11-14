@@ -233,27 +233,37 @@ class TenantContextCoordinator(
     }
 
     suspend fun refreshCurrentTenant(force: Boolean = true) {
+        refreshTenant(targetCompanyId = null, force = force)
+    }
+
+    suspend fun refreshTenant(
+        targetCompanyId: String? = null,
+        force: Boolean = true,
+    ) {
         val current = _tenantState.value
-        val (companyId, userId) =
+        val currentCompanyId =
             when (current) {
-                is TenantContextState.Authorized -> current.context.companyId to current.context.userId
-                is TenantContextState.Restricted ->
-                    current.companyId to
-                        (accessManager.currentUserContext()?.userId ?: "")
+                is TenantContextState.Authorized -> current.context.companyId
+                is TenantContextState.Restricted -> current.companyId
+                is TenantContextState.Error -> current.companyId
+                is TenantContextState.Loading -> current.requestedCompanyId
+                is TenantContextState.NotSelected -> null
+            }
 
-                is TenantContextState.Error -> current.companyId to (accessManager.currentUserContext()?.userId ?: "")
-                is TenantContextState.Loading ->
-                    current.requestedCompanyId to
-                        (accessManager.currentUserContext()?.userId ?: "")
+        val companyId = targetCompanyId ?: currentCompanyId ?: return
+        val isTargetActiveTenant = currentCompanyId == companyId
 
-                is TenantContextState.NotSelected -> return
+        val userId =
+            when (current) {
+                is TenantContextState.Authorized -> current.context.userId
+                else -> accessManager.currentUserContext()?.userId ?: ""
             }
 
         val sessionRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
 
         val generation =
             mutex.withLock {
-                if (current is TenantContextState.Authorized) {
+                if (isTargetActiveTenant && current is TenantContextState.Authorized) {
                     _tenantState.value = current.copy(isRefreshing = true)
                 }
                 ++currentRequestGeneration

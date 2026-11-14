@@ -1,10 +1,14 @@
 package studio.acmenra.control.core.access.domain
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import studio.acmenra.control.core.access.data.mapper.AccessMapper
 import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
 import studio.acmenra.control.core.access.domain.model.CompanyBrief
 import studio.acmenra.control.core.access.domain.model.CompanyStatus
@@ -180,5 +184,68 @@ class AccessManagerTest {
             sessionManager.logout()
             assertEquals(GlobalAccessState.Idle, accessManager.globalState.value)
             assertEquals(1, repository.clearedCount)
+        }
+
+    @Test
+    fun concurrentRefreshGlobalContextDeduplicatesAndDoesNotDeadlock() =
+        runTest {
+            val barrier = CompletableDeferred<Unit>()
+            var callCount = 0
+            val customRepository =
+                object : AccessRepository {
+                    override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> {
+                        callCount++
+                        barrier.await()
+                        return NetworkResult.Success(
+                            GlobalUserContext(
+                                userId = "user_concurrent",
+                                serverTime = Instant.fromEpochMilliseconds(0),
+                                globalPermissions = emptySet(),
+                                defaultCompanyId = "c1",
+                                canBrowseAllCompanies = false,
+                                memberCompanies = listOf(CompanyBrief("c1", "Company 1", CompanyStatus.ACTIVE)),
+                            ),
+                        )
+                    }
+
+                    override suspend fun getCompanyAccess(
+                        userId: String,
+                        companyId: String,
+                        forceRefresh: Boolean,
+                    ): NetworkResult<CompanyAccessDomain> = throw UnsupportedOperationException()
+
+                    override suspend fun getCachedCompanyAccess(
+                        userId: String,
+                        companyId: String,
+                    ): CompanyAccessDomain? = null
+
+                    override suspend fun clearCache() {}
+                }
+
+            val mgr =
+                AccessManager(
+                    accessRepository = customRepository,
+                    sessionManager = sessionManager,
+                    mapper = AccessMapper(),
+                    scope = testScope,
+                )
+
+            val job1 = async { mgr.refreshGlobalContext(force = true) }
+            runCurrent()
+
+            val job2 = async { mgr.refreshGlobalContext(force = false) }
+            runCurrent()
+
+            barrier.complete(Unit)
+
+            val res1 = job1.await()
+            val res2 = job2.await()
+
+            assertTrue(res1 is NetworkResult.Success)
+            assertTrue(res2 is NetworkResult.Success)
+            assertEquals("user_concurrent", res1.data.userId)
+            assertEquals("user_concurrent", res2.data.userId)
+            assertEquals(1, callCount)
+            assertTrue(mgr.globalState.value is GlobalAccessState.Ready)
         }
 }

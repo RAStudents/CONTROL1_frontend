@@ -80,34 +80,34 @@ class AccessManager(
 
                 val existing = inFlightDeferred
                 if (!force && existing != null && existing.isActive && inFlightRevision == currentRevision) {
-                    return existing.await()
-                }
+                    existing
+                } else {
+                    val generation = ++currentGeneration
+                    inFlightRevision = currentRevision
 
-                val generation = ++currentGeneration
-                inFlightRevision = currentRevision
-
-                _globalState.value =
-                    when (currentState) {
-                        is GlobalAccessState.Ready -> currentState.copy(isRefreshing = true)
-                        else -> GlobalAccessState.InitialLoading
-                    }
-
-                val newDeferred =
-                    scope.async {
-                        val result = accessRepository.getGlobalContext()
-                        mutex.withLock {
-                            val latestRevision =
-                                sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
-
-                            if (generation == currentGeneration && latestRevision == currentRevision) {
-                                applyGlobalContextResultLocked(result)
-                            }
+                    _globalState.value =
+                        when (currentState) {
+                            is GlobalAccessState.Ready -> currentState.copy(isRefreshing = true)
+                            else -> GlobalAccessState.InitialLoading
                         }
-                        result
-                    }
 
-                inFlightDeferred = newDeferred
-                newDeferred
+                    val newDeferred =
+                        scope.async {
+                            val result = accessRepository.getGlobalContext()
+                            mutex.withLock {
+                                val latestRevision =
+                                    sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
+
+                                if (generation == currentGeneration && latestRevision == currentRevision) {
+                                    applyGlobalContextResultLocked(result)
+                                }
+                            }
+                            result
+                        }
+
+                    inFlightDeferred = newDeferred
+                    newDeferred
+                }
             }
 
         return deferred.await()

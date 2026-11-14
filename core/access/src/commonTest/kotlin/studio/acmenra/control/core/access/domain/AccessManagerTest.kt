@@ -5,12 +5,12 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
-import studio.acmenra.control.core.access.data.datasource.CachedCompanyAccess
 import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
 import studio.acmenra.control.core.access.domain.model.CompanyBrief
 import studio.acmenra.control.core.access.domain.model.CompanyStatus
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
 import studio.acmenra.control.core.access.domain.model.GlobalUserContext
+import studio.acmenra.control.core.access.domain.model.RestrictionType
 import studio.acmenra.control.core.access.domain.repository.AccessRepository
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.TokenStorage
@@ -55,8 +55,12 @@ class AccessManagerTest {
             )
 
         var clearedCount = 0
+        var globalCallCount = 0
 
-        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> = globalResult
+        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> {
+            globalCallCount++
+            return globalResult
+        }
 
         override suspend fun getCompanyAccess(
             userId: String,
@@ -67,7 +71,7 @@ class AccessManagerTest {
         override suspend fun getCachedCompanyAccess(
             userId: String,
             companyId: String,
-        ): CachedCompanyAccess? = null
+        ): CompanyAccessDomain? = null
 
         override suspend fun clearCache() {
             clearedCount++
@@ -130,6 +134,41 @@ class AccessManagerTest {
 
             accessManager.refreshGlobalContext(force = true)
             assertTrue(accessManager.globalState.value is GlobalAccessState.Restricted.AccountFrozen)
+        }
+
+    @Test
+    fun accountFrozenParsesRestrictionBody() =
+        runTest {
+            repository.globalResult =
+                NetworkResult.Failure(
+                    NetworkError.Http(
+                        statusCode = 403,
+                        errorBody =
+                            """{"error":"ACCOUNT_FROZEN",""" +
+                                """"restriction":{"type":"TERMS_VIOLATION","reason":"Violated ToS"}}""",
+                    ),
+                )
+
+            accessManager.refreshGlobalContext(force = true)
+            val state = accessManager.globalState.value
+            assertTrue(state is GlobalAccessState.Restricted.AccountFrozen)
+            val restriction = state.restriction
+            assertNotNull(restriction)
+            assertEquals(RestrictionType.TERMS_VIOLATION, restriction.type)
+            assertEquals("Violated ToS", restriction.reason)
+        }
+
+    @Test
+    fun refreshWithoutForceDoesNotTriggerNetworkIfAlreadyReady() =
+        runTest {
+            sessionManager.saveSession(TokenPair("acc", "ref"))
+            val state = accessManager.globalState.first { it is GlobalAccessState.Ready }
+            assertTrue(state is GlobalAccessState.Ready)
+            val callCountAfterLogin = repository.globalCallCount
+
+            val result = accessManager.refreshGlobalContext(force = false)
+            assertTrue(result is NetworkResult.Success)
+            assertEquals(callCountAfterLogin, repository.globalCallCount)
         }
 
     @Test

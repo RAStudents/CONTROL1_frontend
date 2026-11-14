@@ -1,9 +1,12 @@
 package studio.acmenra.control.core.access.domain.concurrent
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -126,5 +129,87 @@ class TenantSingleFlightTest {
                     }
                 }
             }
+        }
+
+    @Test
+    fun cancellationOfCallerDoesNotAbortExecutionForWaitersAndCleansUp() =
+        runTest {
+            val key = TenantRequestKey(sessionRevision = 1L, userId = "u1", companyId = "c1")
+            val leaderEntered = CompletableDeferred<Unit>()
+            val barrier = CompletableDeferred<Unit>()
+
+            val leaderScope = CoroutineScope(Dispatchers.Unconfined)
+            val leaderJob =
+                leaderScope.launch {
+                    singleFlight.execute(key) {
+                        leaderEntered.complete(Unit)
+                        barrier.await()
+                        NetworkResult.Success(dummyDomain("c1"))
+                    }
+                }
+
+            leaderEntered.await()
+
+            val waiter =
+                async {
+                    singleFlight.execute(key) {
+                        NetworkResult.Success(dummyDomain("c1"))
+                    }
+                }
+
+            leaderJob.cancel()
+
+            barrier.complete(Unit)
+
+            val waiterResult = waiter.await()
+            assertTrue(waiterResult is NetworkResult.Success && waiterResult.data.companyId == "c1")
+            assertEquals(0, singleFlight.activeCount())
+        }
+
+    @Test
+    fun forceRefreshTrueDoesNotCoalesceWithForceRefreshFalse() =
+        runTest {
+            val keyRegular =
+                TenantRequestKey(
+                    sessionRevision = 1L,
+                    userId = "u1",
+                    companyId = "c1",
+                    forceRefresh = false,
+                )
+            val keyForce =
+                TenantRequestKey(
+                    sessionRevision = 1L,
+                    userId = "u1",
+                    companyId = "c1",
+                    forceRefresh = true,
+                )
+            var count = 0
+            val barrier = CompletableDeferred<Unit>()
+
+            val jobRegular =
+                async {
+                    singleFlight.execute(keyRegular) {
+                        barrier.await()
+                        count++
+                        NetworkResult.Success(dummyDomain("c1_cached"))
+                    }
+                }
+
+            val jobForce =
+                async {
+                    singleFlight.execute(keyForce) {
+                        barrier.await()
+                        count++
+                        NetworkResult.Success(dummyDomain("c1_fresh"))
+                    }
+                }
+
+            barrier.complete(Unit)
+            val resRegular = jobRegular.await()
+            val resForce = jobForce.await()
+
+            assertEquals(2, count)
+            assertEquals("c1_cached", (resRegular as NetworkResult.Success).data.companyId)
+            assertEquals("c1_fresh", (resForce as NetworkResult.Success).data.companyId)
         }
 }

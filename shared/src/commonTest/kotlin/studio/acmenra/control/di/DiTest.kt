@@ -5,6 +5,15 @@ import org.koin.core.KoinApplication
 import org.koin.core.qualifier.named
 import org.koin.dsl.koinApplication
 import org.koin.dsl.module
+import studio.acmenra.control.core.access.domain.AccessInvalidationCoordinator
+import studio.acmenra.control.core.access.domain.AccessManager
+import studio.acmenra.control.core.access.domain.TenantContextCoordinator
+import studio.acmenra.control.core.access.domain.usecase.CheckPermissionUseCase
+import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
+import studio.acmenra.control.core.access.domain.usecase.ObserveTenantContextUseCase
+import studio.acmenra.control.core.access.domain.usecase.RefreshTenantUseCase
+import studio.acmenra.control.core.access.domain.usecase.SelectTenantUseCase
+import studio.acmenra.control.core.network.auth.AccessInvalidationDispatcher
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.TokenStorage
 import studio.acmenra.control.core.network.model.TokenPair
@@ -74,6 +83,33 @@ class DiTest {
         val externalClient: HttpClient = koin.get(named("external"))
         assertNotNull(externalClient)
         assertNotSame(apiClient, externalClient)
+
+        val accessManager: AccessManager = koin.get()
+        assertNotNull(accessManager)
+
+        val tenantCoordinator: TenantContextCoordinator = koin.get()
+        assertNotNull(tenantCoordinator)
+
+        val dispatcher: AccessInvalidationDispatcher = koin.get()
+        assertNotNull(dispatcher)
+
+        val invalidationCoordinator: AccessInvalidationCoordinator = koin.get()
+        assertNotNull(invalidationCoordinator)
+
+        val checkPermission: CheckPermissionUseCase = koin.get()
+        assertNotNull(checkPermission)
+
+        val selectTenant: SelectTenantUseCase = koin.get()
+        assertNotNull(selectTenant)
+
+        val refreshTenant: RefreshTenantUseCase = koin.get()
+        assertNotNull(refreshTenant)
+
+        val observeGlobalAccess: ObserveGlobalAccessUseCase = koin.get()
+        assertNotNull(observeGlobalAccess)
+
+        val observeTenantContext: ObserveTenantContextUseCase = koin.get()
+        assertNotNull(observeTenantContext)
     }
 
     @Test

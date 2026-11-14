@@ -1,9 +1,14 @@
 package studio.acmenra.control.core.access.domain.concurrent
 
-import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
 import studio.acmenra.control.core.network.model.NetworkResult
 
@@ -11,9 +16,12 @@ data class TenantRequestKey(
     val sessionRevision: Long,
     val userId: String,
     val companyId: String,
+    val forceRefresh: Boolean = false,
 )
 
-class TenantSingleFlight {
+class TenantSingleFlight(
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+) {
     private val mutex = Mutex()
     private val inFlight = mutableMapOf<TenantRequestKey, Deferred<NetworkResult<CompanyAccessDomain>>>()
 
@@ -21,33 +29,36 @@ class TenantSingleFlight {
         key: TenantRequestKey,
         block: suspend () -> NetworkResult<CompanyAccessDomain>,
     ): NetworkResult<CompanyAccessDomain> {
-        val (deferred, isLeader) =
+        val deferred =
             mutex.withLock {
-                val active = inFlight[key]
-                if (active != null) {
-                    active to false
+                val existing = inFlight[key]
+                if (existing != null && existing.isActive) {
+                    existing
                 } else {
-                    val newDeferred = CompletableDeferred<NetworkResult<CompanyAccessDomain>>()
+                    val newDeferred =
+                        scope.async {
+                            try {
+                                block()
+                            } finally {
+                                withContext(NonCancellable) {
+                                    mutex.withLock {
+                                        if (inFlight[key] === this@async) {
+                                            inFlight.remove(key)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     inFlight[key] = newDeferred
-                    newDeferred to true
+                    newDeferred
                 }
             }
 
-        if (!isLeader) {
-            return deferred.await()
-        }
-
-        val result =
-            try {
-                block()
-            } catch (e: Throwable) {
-                (deferred as CompletableDeferred).completeExceptionally(e)
-                mutex.withLock { inFlight.remove(key) }
-                throw e
-            }
-
-        (deferred as CompletableDeferred).complete(result)
-        mutex.withLock { inFlight.remove(key) }
-        return result
+        return deferred.await()
     }
+
+    suspend fun activeCount(): Int =
+        mutex.withLock {
+            inFlight.size
+        }
 }

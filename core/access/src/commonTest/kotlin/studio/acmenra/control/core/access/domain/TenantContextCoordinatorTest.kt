@@ -7,7 +7,6 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
-import studio.acmenra.control.core.access.data.datasource.CachedCompanyAccess
 import studio.acmenra.control.core.access.data.mapper.AccessMapper
 import studio.acmenra.control.core.access.domain.concurrent.TenantSingleFlight
 import studio.acmenra.control.core.access.domain.model.AccessOrigin
@@ -17,6 +16,7 @@ import studio.acmenra.control.core.access.domain.model.CompanyBrief
 import studio.acmenra.control.core.access.domain.model.CompanyStatus
 import studio.acmenra.control.core.access.domain.model.GlobalUserContext
 import studio.acmenra.control.core.access.domain.model.PermissionKey
+import studio.acmenra.control.core.access.domain.model.RestrictionType
 import studio.acmenra.control.core.access.domain.model.SupportGrantInfo
 import studio.acmenra.control.core.access.domain.model.SupportGrantStatus
 import studio.acmenra.control.core.access.domain.model.SupportMode
@@ -26,12 +26,14 @@ import studio.acmenra.control.core.access.domain.model.TenantPermission
 import studio.acmenra.control.core.access.domain.repository.AccessRepository
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.TokenStorage
+import studio.acmenra.control.core.network.model.NetworkError
 import studio.acmenra.control.core.network.model.NetworkResult
 import studio.acmenra.control.core.network.model.TokenPair
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -121,7 +123,7 @@ class TenantContextCoordinatorTest {
         override suspend fun getCachedCompanyAccess(
             userId: String,
             companyId: String,
-        ): CachedCompanyAccess? = null
+        ): CompanyAccessDomain? = null
 
         override suspend fun clearCache() {}
     }
@@ -135,7 +137,7 @@ class TenantContextCoordinatorTest {
     private val timeSource = SettableTimeSource(timeMark)
     private val mapper = AccessMapper(timeSource)
     private val accessManager = AccessManager(repository, sessionManager, scope = testScope)
-    private val singleFlight = TenantSingleFlight()
+    private val singleFlight = TenantSingleFlight(testScope)
 
     private val coordinator =
         TenantContextCoordinator(
@@ -143,8 +145,8 @@ class TenantContextCoordinatorTest {
             accessManager = accessManager,
             sessionManager = sessionManager,
             mapper = mapper,
-            singleFlight = singleFlight,
             scope = testScope,
+            singleFlight = singleFlight,
         )
 
     @BeforeTest
@@ -365,5 +367,29 @@ class TenantContextCoordinatorTest {
 
             coordinator.reset()
             assertEquals(TenantContextState.NotSelected, coordinator.tenantState.value)
+        }
+
+    @Test
+    fun serverError403WithCompanyRestrictedAndRestrictionBodySetsCompanyFrozen() =
+        runTest {
+            repository.handler = { companyId ->
+                NetworkResult.Failure(
+                    NetworkError.Http(
+                        statusCode = 403,
+                        errorBody =
+                            """{"error":"COMPANY_RESTRICTED","company_id":"$companyId",""" +
+                                """"restriction":{"type":"ADMIN_BLOCKED","reason":"Security audit pending"}}""",
+                    ),
+                )
+            }
+
+            coordinator.selectTenant("c_blocked")
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Restricted.CompanyFrozen)
+            assertEquals("c_blocked", state.companyId)
+            val restriction = state.restriction
+            assertNotNull(restriction)
+            assertEquals(RestrictionType.ADMIN_BLOCKED, restriction.type)
+            assertEquals("Security audit pending", restriction.reason)
         }
 }

@@ -4,7 +4,6 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
-import studio.acmenra.control.core.access.data.datasource.CachedCompanyAccess
 import studio.acmenra.control.core.access.data.mapper.AccessMapper
 import studio.acmenra.control.core.access.domain.AccessManager
 import studio.acmenra.control.core.access.domain.TenantContextCoordinator
@@ -95,7 +94,7 @@ class AccessUseCasesTest {
         override suspend fun getCachedCompanyAccess(
             userId: String,
             companyId: String,
-        ): CachedCompanyAccess? = null
+        ): CompanyAccessDomain? = null
 
         override suspend fun clearCache() {}
     }
@@ -106,15 +105,15 @@ class AccessUseCasesTest {
     private val repo = FakeRepo()
     private val mapper = AccessMapper()
     private val accessManager = AccessManager(repo, sessionManager, scope = testScope)
-    private val singleFlight = TenantSingleFlight()
+    private val singleFlight = TenantSingleFlight(testScope)
     private val coordinator =
         TenantContextCoordinator(
-            repo,
-            accessManager,
-            sessionManager,
-            mapper,
-            singleFlight,
+            accessRepository = repo,
+            accessManager = accessManager,
+            sessionManager = sessionManager,
+            mapper = mapper,
             scope = testScope,
+            singleFlight = singleFlight,
         )
 
     private val observeGlobalAccessUseCase = ObserveGlobalAccessUseCaseImpl(accessManager)

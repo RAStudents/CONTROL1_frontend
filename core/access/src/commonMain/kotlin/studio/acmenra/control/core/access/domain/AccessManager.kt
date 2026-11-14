@@ -1,14 +1,18 @@
 package studio.acmenra.control.core.access.domain
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import studio.acmenra.control.core.access.data.mapper.AccessMapper
+import studio.acmenra.control.core.access.data.model.AccessErrorResponseDto
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
 import studio.acmenra.control.core.access.domain.model.GlobalUserContext
 import studio.acmenra.control.core.access.domain.repository.AccessRepository
@@ -20,11 +24,16 @@ import studio.acmenra.control.core.network.model.NetworkResult
 class AccessManager(
     private val accessRepository: AccessRepository,
     private val sessionManager: SessionManager,
+    private val mapper: AccessMapper = AccessMapper(),
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
     private val mutex = Mutex()
     private val _globalState = MutableStateFlow<GlobalAccessState>(GlobalAccessState.Idle)
     val globalState: StateFlow<GlobalAccessState> = _globalState.asStateFlow()
+
+    private var currentGeneration: Long = 0L
+    private var inFlightDeferred: Deferred<NetworkResult<GlobalUserContext>>? = null
+    private var inFlightRevision: Long = -1L
 
     init {
         scope.launch {
@@ -59,62 +68,108 @@ class AccessManager(
         return currentUserContext()
     }
 
-    suspend fun refreshGlobalContext(force: Boolean = false): NetworkResult<GlobalUserContext> =
-        mutex.withLock {
-            val currentState = _globalState.value
-            _globalState.value =
-                when (currentState) {
-                    is GlobalAccessState.Ready -> currentState.copy(isRefreshing = true)
-                    else -> GlobalAccessState.InitialLoading
+    suspend fun refreshGlobalContext(force: Boolean = false): NetworkResult<GlobalUserContext> {
+        val deferred =
+            mutex.withLock {
+                val currentState = _globalState.value
+                if (!force && currentState is GlobalAccessState.Ready) {
+                    return NetworkResult.Success(currentState.context)
                 }
 
-            when (val result = accessRepository.getGlobalContext()) {
-                is NetworkResult.Success -> {
-                    val context = result.data
-                    val newState =
-                        when {
-                            context.memberCompanies.isEmpty() && !context.canBrowseAllCompanies -> {
-                                GlobalAccessState.Restricted.NoCompaniesAvailable
-                            }
+                val currentRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
 
-                            else -> {
-                                GlobalAccessState.Ready(context = context, isRefreshing = false)
+                val existing = inFlightDeferred
+                if (!force && existing != null && existing.isActive && inFlightRevision == currentRevision) {
+                    return existing.await()
+                }
+
+                val generation = ++currentGeneration
+                inFlightRevision = currentRevision
+
+                _globalState.value =
+                    when (currentState) {
+                        is GlobalAccessState.Ready -> currentState.copy(isRefreshing = true)
+                        else -> GlobalAccessState.InitialLoading
+                    }
+
+                val newDeferred =
+                    scope.async {
+                        val result = accessRepository.getGlobalContext()
+                        mutex.withLock {
+                            val latestRevision =
+                                sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
+
+                            if (generation == currentGeneration && latestRevision == currentRevision) {
+                                applyGlobalContextResultLocked(result)
                             }
                         }
-                    _globalState.value = newState
-                    result
-                }
+                        result
+                    }
 
-                is NetworkResult.Failure -> {
-                    val error = result.error
-                    val isAccountFrozen =
-                        error is NetworkError.Http &&
-                            error.statusCode == 403 &&
-                            error.errorBody?.contains("ACCOUNT_FROZEN") == true
-
-                    _globalState.value =
-                        when {
-                            isAccountFrozen -> {
-                                GlobalAccessState.Restricted.AccountFrozen(null)
-                            }
-
-                            currentState is GlobalAccessState.Ready -> {
-                                currentState.copy(isRefreshing = false)
-                            }
-
-                            else -> {
-                                GlobalAccessState.Error(error)
-                            }
-                        }
-                    result
-                }
+                inFlightDeferred = newDeferred
+                newDeferred
             }
-        }
+
+        return deferred.await()
+    }
 
     suspend fun reset() {
         mutex.withLock {
+            currentGeneration++
+            inFlightDeferred?.cancel()
+            inFlightDeferred = null
+            inFlightRevision = -1L
             _globalState.value = GlobalAccessState.Idle
-            accessRepository.clearCache()
+        }
+        accessRepository.clearCache()
+    }
+
+    private fun applyGlobalContextResultLocked(result: NetworkResult<GlobalUserContext>) {
+        when (result) {
+            is NetworkResult.Success -> {
+                val context = result.data
+                val newState =
+                    when {
+                        context.memberCompanies.isEmpty() && !context.canBrowseAllCompanies -> {
+                            GlobalAccessState.Restricted.NoCompaniesAvailable
+                        }
+
+                        else -> {
+                            GlobalAccessState.Ready(context = context, isRefreshing = false)
+                        }
+                    }
+                _globalState.value = newState
+            }
+
+            is NetworkResult.Failure -> {
+                val error = result.error
+                val errorDto =
+                    if (error is NetworkError.Http) {
+                        AccessErrorResponseDto.parse(error.errorBody)
+                    } else {
+                        null
+                    }
+                val isAccountFrozen =
+                    error is NetworkError.Http &&
+                        error.statusCode == 403 &&
+                        errorDto?.resolvedCode == "ACCOUNT_FROZEN"
+
+                _globalState.value =
+                    when {
+                        isAccountFrozen -> {
+                            val restriction = errorDto.restriction?.let { mapper.mapRestriction(it) }
+                            GlobalAccessState.Restricted.AccountFrozen(restriction)
+                        }
+
+                        _globalState.value is GlobalAccessState.Ready -> {
+                            (_globalState.value as GlobalAccessState.Ready).copy(isRefreshing = false)
+                        }
+
+                        else -> {
+                            GlobalAccessState.Error(error)
+                        }
+                    }
+            }
         }
     }
 }

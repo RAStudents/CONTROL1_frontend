@@ -594,4 +594,322 @@ class TenantContextCoordinatorTest {
                 testCoordinator.reset()
             }
         }
+
+    @Test
+    fun companySelectionSequenceABAPreventsStaleFirstARequestFromOverwritingNewA() =
+        runTest {
+            val enteredA1 = CompletableDeferred<Unit>()
+            val barrierA1 = CompletableDeferred<Unit>()
+            var compACallCount = 0
+
+            repository.handler = { companyId ->
+                when (companyId) {
+                    "comp_A" -> {
+                        compACallCount++
+                        val currentCall = compACallCount
+                        if (currentCall == 1) {
+                            enteredA1.complete(Unit)
+                            barrierA1.await()
+                        }
+                        NetworkResult.Success(
+                            CompanyAccessDomain(
+                                companyId = "comp_A",
+                                companyName = "Company A v$currentCall",
+                                serverTime = Instant.fromEpochMilliseconds(0),
+                                revision = "rev_A$currentCall",
+                                companyStatus = CompanyStatus.ACTIVE,
+                                accessStatus = AccessStatus.ACTIVE,
+                                activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                                restriction = null,
+                                tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                                supportPermissions = emptySet(),
+                                permissionSources = emptyMap(),
+                                supportGrant = null,
+                            ),
+                        )
+                    }
+
+                    else -> {
+                        NetworkResult.Success(
+                            CompanyAccessDomain(
+                                companyId = companyId,
+                                companyName = "Company $companyId",
+                                serverTime = Instant.fromEpochMilliseconds(0),
+                                revision = "rev_$companyId",
+                                companyStatus = CompanyStatus.ACTIVE,
+                                accessStatus = AccessStatus.ACTIVE,
+                                activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                                restriction = null,
+                                tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                                supportPermissions = emptySet(),
+                                permissionSources = emptyMap(),
+                                supportGrant = null,
+                            ),
+                        )
+                    }
+                }
+            }
+
+            // Step 1: Start selection of A (A1), which suspends on barrierA1
+            val jobA1 = testScope.launch { coordinator.selectTenant("comp_A") }
+            enteredA1.await()
+
+            // Step 2: Switch to B while A1 is still in flight (cancels A1's activeSelectionJob)
+            coordinator.selectTenant("comp_B")
+            val stateB = coordinator.tenantState.value
+            assertTrue(stateB is TenantContextState.Authorized)
+            assertEquals("comp_B", stateB.context.companyId)
+
+            // Step 3: Switch back to A (A2 in background so we unblock A1 barrier)
+            val jobA2 = testScope.launch { coordinator.selectTenant("comp_A") }
+
+            // Step 4: Release the first slow A1 request
+            barrierA1.complete(Unit)
+            jobA1.join()
+            jobA2.join()
+
+            // Step 5: State MUST be Authorized for comp_A, and A1 generation (1) was invalidated by A2 generation (2)
+            val finalState = coordinator.tenantState.value
+            assertTrue(finalState is TenantContextState.Authorized)
+            assertEquals("comp_A", finalState.context.companyId)
+        }
+
+    @Test
+    fun logoutDuringParallelRefreshOfDifferentCompaniesDiscardsAllResponses() =
+        runTest {
+            val barrierA = CompletableDeferred<Unit>()
+            val barrierB = CompletableDeferred<Unit>()
+            val enteredA = CompletableDeferred<Unit>()
+            val enteredB = CompletableDeferred<Unit>()
+            var enableBarriers = false
+
+            repository.handler = { companyId ->
+                if (enableBarriers) {
+                    when (companyId) {
+                        "c1" -> {
+                            enteredA.complete(Unit)
+                            barrierA.await()
+                        }
+
+                        "c2" -> {
+                            enteredB.complete(Unit)
+                            barrierB.await()
+                        }
+                    }
+                }
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Company $companyId",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_1",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            // Select c1 first so it's authorized
+            coordinator.selectTenant("c1")
+            assertTrue(coordinator.tenantState.value is TenantContextState.Authorized)
+
+            // Enable barriers for the background refreshes
+            enableBarriers = true
+
+            // Start parallel refreshes for c1 and c2
+            val jobA = testScope.launch { coordinator.refreshTenant("c1", force = true) }
+            val jobB = testScope.launch { coordinator.refreshTenant("c2", force = true) }
+
+            enteredA.await()
+            enteredB.await()
+
+            // User logs out while both refreshes are in flight
+            sessionManager.logout()
+
+            // State immediately transitioned to NotSelected
+            assertEquals(TenantContextState.NotSelected, coordinator.tenantState.value)
+
+            // Release network responses
+            barrierA.complete(Unit)
+            barrierB.complete(Unit)
+            jobA.join()
+            jobB.join()
+
+            // Both in-flight responses must be discarded due to globalTenantEpoch bump and unauthenticated session
+            assertEquals(TenantContextState.NotSelected, coordinator.tenantState.value)
+        }
+
+    @Test
+    fun selectTenantDuringInFlightRefreshOfSameCompanySupercedesStaleRefresh() =
+        runTest {
+            val refreshBarrier = CompletableDeferred<Unit>()
+            val refreshEntered = CompletableDeferred<Unit>()
+            var refreshCount = 0
+
+            repository.handler = { companyId ->
+                refreshCount++
+                val count = refreshCount
+                if (count == 2) {
+                    refreshEntered.complete(Unit)
+                    refreshBarrier.await()
+                }
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Company c1 v$count",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_$count",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            // 1. Initial selection (refreshCount = 1)
+            coordinator.selectTenant("c1")
+            val initial = coordinator.tenantState.value
+            assertTrue(initial is TenantContextState.Authorized)
+            assertEquals("Company c1 v1", initial.context.companyName)
+
+            // 2. Start refreshTenant (refreshCount = 2, generation for c1 becomes 2)
+            val refreshJob = testScope.launch { coordinator.refreshCurrentTenant(force = true) }
+            refreshEntered.await()
+            assertTrue((coordinator.tenantState.value as TenantContextState.Authorized).isRefreshing)
+
+            // 3. User explicitly re-selects c1 while refresh is in flight (refreshCount = 3, generation becomes 3)
+            coordinator.selectTenant("c1")
+            val reselected = coordinator.tenantState.value
+            assertTrue(reselected is TenantContextState.Authorized)
+            assertEquals("Company c1 v3", reselected.context.companyName)
+            assertFalse(reselected.isRefreshing)
+
+            // 4. Stale refresh finishes (generation 2)
+            refreshBarrier.complete(Unit)
+            refreshJob.join()
+
+            // 5. State must remain v3, not reverted to stale refresh v2
+            val finalState = coordinator.tenantState.value
+            assertTrue(finalState is TenantContextState.Authorized)
+            assertEquals("Company c1 v3", finalState.context.companyName)
+            assertFalse(finalState.isRefreshing)
+        }
+
+    @Test
+    fun cancellingActiveSelectionAllowsSubsequentSelectionWithoutHanging() =
+        runTest {
+            val barrier = CompletableDeferred<Unit>()
+            val entered = CompletableDeferred<Unit>()
+
+            repository.handler = { companyId ->
+                if (companyId == "slow") {
+                    entered.complete(Unit)
+                    barrier.await()
+                }
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Company $companyId",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_1",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            val slowJob = testScope.launch { coordinator.selectTenant("slow") }
+            entered.await()
+            slowJob.cancel()
+            barrier.complete(Unit)
+            slowJob.join()
+
+            // Selecting another tenant works immediately
+            coordinator.selectTenant("c1")
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Authorized)
+            assertEquals("c1", state.context.companyId)
+        }
+
+    @Test
+    fun refreshOfInactiveCompanyDoesNotAlterActiveCompanyState() =
+        runTest {
+            repository.handler = { companyId ->
+                when (companyId) {
+                    "c1" -> {
+                        NetworkResult.Success(
+                            CompanyAccessDomain(
+                                companyId = "c1",
+                                companyName = "Active Company 1",
+                                serverTime = Instant.fromEpochMilliseconds(0),
+                                revision = "rev_1",
+                                companyStatus = CompanyStatus.ACTIVE,
+                                accessStatus = AccessStatus.ACTIVE,
+                                activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                                restriction = null,
+                                tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                                supportPermissions = emptySet(),
+                                permissionSources = emptyMap(),
+                                supportGrant = null,
+                            ),
+                        )
+                    }
+
+                    "c2" -> {
+                        NetworkResult.Success(
+                            CompanyAccessDomain(
+                                companyId = "c2",
+                                companyName = "Inactive Frozen Company 2",
+                                serverTime = Instant.fromEpochMilliseconds(0),
+                                revision = "rev_1",
+                                companyStatus = CompanyStatus.RESTRICTED,
+                                accessStatus = AccessStatus.RESTRICTED,
+                                activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                                restriction = null,
+                                tenantPermissions = emptySet(),
+                                supportPermissions = emptySet(),
+                                permissionSources = emptyMap(),
+                                supportGrant = null,
+                            ),
+                        )
+                    }
+
+                    else -> error("Unexpected company: $companyId")
+                }
+            }
+
+            // Select active company c1
+            coordinator.selectTenant("c1")
+            val activeState = coordinator.tenantState.value
+            assertTrue(activeState is TenantContextState.Authorized)
+            assertEquals("c1", activeState.context.companyId)
+            assertEquals("Active Company 1", activeState.context.companyName)
+
+            // Trigger background refresh for inactive company c2
+            coordinator.refreshTenant(targetCompanyId = "c2", force = true)
+
+            // Active tenant state must remain completely unchanged
+            val stateAfterBRefresh = coordinator.tenantState.value
+            assertTrue(stateAfterBRefresh is TenantContextState.Authorized)
+            assertEquals("c1", stateAfterBRefresh.context.companyId)
+            assertEquals("Active Company 1", stateAfterBRefresh.context.companyName)
+            assertFalse(stateAfterBRefresh.isRefreshing)
+        }
 }

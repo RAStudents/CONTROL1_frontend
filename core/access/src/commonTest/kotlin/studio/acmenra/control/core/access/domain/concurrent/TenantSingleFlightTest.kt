@@ -295,4 +295,36 @@ class TenantSingleFlightTest {
 
             assertEquals(0, singleFlight.activeCount())
         }
+
+    @Test
+    fun cancellationOfSingleCallerWithoutWaitersCleansUpImmediately() =
+        runTest {
+            val key = TenantRequestKey(sessionRevision = 1L, userId = "u1", companyId = "c1")
+            val entered = CompletableDeferred<Unit>()
+            val barrier = CompletableDeferred<Unit>()
+
+            val job =
+                launch {
+                    singleFlight.execute(key) {
+                        entered.complete(Unit)
+                        barrier.await()
+                        NetworkResult.Success(dummyDomain("c1"))
+                    }
+                }
+
+            entered.await()
+            assertEquals(1, singleFlight.activeCount())
+
+            job.cancel()
+            barrier.complete(Unit)
+            job.join()
+
+            assertEquals(0, singleFlight.activeCount())
+            val nextResult =
+                singleFlight.execute(key) {
+                    NetworkResult.Success(dummyDomain("c1_subsequent"))
+                }
+            assertTrue(nextResult is NetworkResult.Success && nextResult.data.companyId == "c1_subsequent")
+            assertEquals(0, singleFlight.activeCount())
+        }
 }

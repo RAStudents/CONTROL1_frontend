@@ -179,6 +179,7 @@ object AmberDimens {
     val NavBarHeight = 80.dp
     val RailCollapsed = 96.dp
     val RailExpanded = 220.dp
+    val RailTopPadding = 24.dp
     val DialogWidth = 312.dp
     val CardPadding = 20.dp
     val SliderTrack = 16.dp

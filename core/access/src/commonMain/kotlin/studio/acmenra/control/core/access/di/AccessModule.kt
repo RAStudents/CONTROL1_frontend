@@ -24,7 +24,6 @@ import studio.acmenra.control.core.access.domain.usecase.impl.ObserveTenantConte
 import studio.acmenra.control.core.access.domain.usecase.impl.RefreshTenantUseCaseImpl
 import studio.acmenra.control.core.access.domain.usecase.impl.SelectTenantUseCaseImpl
 import studio.acmenra.control.core.network.auth.AccessInvalidationDispatcher
-import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 
 val accessDataModule =
     module {
@@ -33,7 +32,6 @@ val accessDataModule =
         single<AccessRemoteDataSource> {
             KtorAccessRemoteDataSource(
                 httpClient = get(named("api")),
-                invalidationListener = get<AccessInvalidationListener>(),
             )
         }
         single<AccessRepository> {
@@ -64,7 +62,7 @@ val accessDomainModule =
                 singleFlight = get(),
             )
         }
-        single {
+        single(createdAtStart = true) {
             AccessInvalidationCoordinator(
                 accessManager = get(),
                 tenantCoordinator = get(),

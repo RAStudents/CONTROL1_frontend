@@ -25,6 +25,7 @@ import kotlin.test.Test
 import kotlin.test.assertNotNull
 import kotlin.test.assertNotSame
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 private class FakeTokenStorage : TokenStorage {
     private var tokenPair: TokenPair? = null
@@ -54,6 +55,7 @@ class DiTest {
                     },
                 )
             }
+        koinApp.koin.createEagerInstances()
     }
 
     @AfterTest
@@ -136,5 +138,15 @@ class DiTest {
         val events1: EventsViewModel = koin.get()
         val events2: EventsViewModel = koin.get()
         assertNotSame(events1, events2)
+    }
+
+    @Test
+    fun testInvalidationListenerRegisteredWithoutExplicitRequest() {
+        val koin = koinApp.koin
+        val dispatcher: AccessInvalidationDispatcher = koin.get()
+        assertTrue(
+            dispatcher.hasListeners(),
+            "AccessInvalidationCoordinator must be registered in dispatcher eagerly at startup",
+        )
     }
 }

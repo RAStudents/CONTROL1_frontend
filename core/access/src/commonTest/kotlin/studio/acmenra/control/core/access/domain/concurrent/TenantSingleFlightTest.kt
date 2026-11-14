@@ -67,6 +67,7 @@ class TenantSingleFlightTest {
             assertEquals(1, executionCount)
             assertEquals(10, results.size)
             assertTrue(results.all { it is NetworkResult.Success && it.data.companyId == "c1" })
+            assertEquals(0, singleFlight.activeCount())
         }
 
     @Test

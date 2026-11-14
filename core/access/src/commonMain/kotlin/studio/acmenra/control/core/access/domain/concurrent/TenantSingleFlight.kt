@@ -35,14 +35,15 @@ class TenantSingleFlight(
                 if (existing != null && existing.isActive) {
                     existing
                 } else {
-                    val newDeferred =
+                    lateinit var newDeferred: Deferred<NetworkResult<CompanyAccessDomain>>
+                    newDeferred =
                         scope.async {
                             try {
                                 block()
                             } finally {
                                 withContext(NonCancellable) {
                                     mutex.withLock {
-                                        if (inFlight[key] === this@async) {
+                                        if (inFlight[key] === newDeferred) {
                                             inFlight.remove(key)
                                         }
                                     }

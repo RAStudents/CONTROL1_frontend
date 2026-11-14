@@ -18,6 +18,10 @@ class AccessInvalidationDispatcher : AccessInvalidationListener {
         }
     }
 
+    val listenerCount: Int get() = listeners.value.size
+
+    fun hasListeners(): Boolean = listeners.value.isNotEmpty()
+
     override suspend fun onAccessInvalidated(
         errorCode: String?,
         companyId: String?,

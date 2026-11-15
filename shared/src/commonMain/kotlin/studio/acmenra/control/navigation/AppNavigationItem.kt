@@ -48,13 +48,17 @@ sealed interface AppNavigationItem {
             items: List<AppNavigationItem>,
             authorizedContext: AuthorizedTenantContext?,
             globalContext: GlobalUserContext? = null,
+            effectiveCompanyId: String? =
+                authorizedContext?.companyId
+                    ?: globalContext?.let(TenantAccessResolver::resolveFallbackCompanyId),
         ): List<AppNavigationItem> =
             items.filter { item ->
                 val perm = item.requiredPermission
                 when {
                     perm == null -> true
                     authorizedContext != null -> perm.isSatisfiedBy(authorizedContext)
-                    globalContext != null && TenantAccessResolver.canBrowseAll(globalContext) -> true
+                    globalContext != null && TenantAccessResolver.canBrowseAll(globalContext) ->
+                        !effectiveCompanyId.isNullOrBlank()
                     else -> false
                 }
             }

@@ -17,35 +17,48 @@ class TopBarStateTest {
     }
 
     @Test
-    fun stateTitleCanBeUpdatedAndCleared() {
+    fun titleDisposalOnlyClearsIfMatchingCurrentTitle() {
         val state = TopBarState()
-        state.title = "Events"
-        assertEquals("Events", state.title)
+        val titleA = "Screen A"
+        state.title = titleA
+        assertEquals("Screen A", state.title)
 
-        state.title = null
+        // Screen B enters before Screen A disposes
+        val titleB = "Screen B"
+        state.title = titleB
+        assertEquals("Screen B", state.title)
+
+        // Screen A disposes (matching ProvideTopBar onDispose contract)
+        if (state.title == titleA) {
+            state.title = null
+        }
+        // Must remain Screen B
+        assertEquals("Screen B", state.title)
+
+        // Screen B disposes
+        if (state.title == titleB) {
+            state.title = null
+        }
         assertNull(state.title)
     }
 
     @Test
-    fun stateLeadingActionCanBeUpdatedAndCleared() {
+    fun leadingActionDisposalOnlyClearsIfMatchingCurrentAction() {
         val state = TopBarState()
-        val dummyAction: @Composable () -> Unit = {}
-        state.leadingAction = dummyAction
-        assertNotNull(state.leadingAction)
+        val actionA: @Composable () -> Unit = {}
+        val actionB: @Composable () -> Unit = {}
 
-        state.leadingAction = null
+        state.leadingAction = actionA
+        state.leadingAction = actionB
+
+        if (state.leadingAction === actionA) {
+            state.leadingAction = null
+        }
+        assertEquals(actionB, state.leadingAction)
+
+        if (state.leadingAction === actionB) {
+            state.leadingAction = null
+        }
         assertNull(state.leadingAction)
-    }
-
-    @Test
-    fun stateActionsCanBeUpdatedAndReset() {
-        val state = TopBarState()
-        val initialActions = state.actions
-
-        state.actions = {}
-        assertNotNull(state.actions)
-
-        state.actions = initialActions
-        assertEquals(initialActions, state.actions)
     }
 }

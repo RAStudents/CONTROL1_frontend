@@ -28,14 +28,18 @@ fun calculateAppScaffoldUiState(
     items: List<AppNavigationItem>,
 ): AppScaffoldUiState {
     val authorizedContext = (tenantState as? TenantContextState.Authorized)?.context
+    val currentCompanyId = authorizedContext?.companyId
+    val effectiveCompanyId =
+        currentCompanyId?.ifBlank { null }
+            ?: globalContext?.let { TenantAccessResolver.resolveFallbackCompanyId(it) }
+
     val visibleItems =
         AppNavigationItem.filterVisibleNavigationItems(
             items = items,
             authorizedContext = authorizedContext,
             globalContext = globalContext,
+            effectiveCompanyId = effectiveCompanyId,
         )
-
-    val currentCompanyId = authorizedContext?.companyId
     val currentCompanyName =
         authorizedContext?.companyName
             ?: (tenantState as? TenantContextState.Restricted)?.companyName
@@ -57,10 +61,6 @@ fun calculateAppScaffoldUiState(
     val isOnVendorDashboard =
         destination?.hasRoute<CompaniesDashboardRoute>() == true &&
             globalContext?.let(TenantAccessResolver::canBrowseAll) == true
-
-    val effectiveCompanyId =
-        currentCompanyId?.ifBlank { null }
-            ?: globalContext?.let { TenantAccessResolver.resolveFallbackCompanyId(it) }
 
     return AppScaffoldUiState(
         visibleItems = visibleItems,

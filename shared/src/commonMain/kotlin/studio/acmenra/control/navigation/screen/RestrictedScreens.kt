@@ -18,6 +18,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
+import kotlinx.coroutines.delay
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
@@ -146,6 +148,13 @@ fun CompanyFrozenScreen(
                 @Suppress("DEPRECATION")
                 val clipboardManager = LocalClipboardManager.current
                 var isCopied by remember { mutableStateOf(false) }
+
+                LaunchedEffect(isCopied) {
+                    if (isCopied) {
+                        delay(2000)
+                        isCopied = false
+                    }
+                }
 
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Row(

@@ -1,5 +1,6 @@
 package studio.acmenra.control.navigation
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -98,12 +99,23 @@ fun TenantRouteGuard(
             requirement = requirement,
         )
 
-    LaunchedEffect(requestedCompanyId, globalState) {
+    val currentTenantCompanyId =
+        when (tenantState) {
+            is TenantContextState.Authorized -> (tenantState as TenantContextState.Authorized).context.companyId
+            is TenantContextState.Restricted -> (tenantState as TenantContextState.Restricted).companyId
+            is TenantContextState.Error -> (tenantState as TenantContextState.Error).companyId
+            is TenantContextState.Loading -> (tenantState as TenantContextState.Loading).requestedCompanyId
+            is TenantContextState.NotSelected -> null
+        }
+
+    LaunchedEffect(requestedCompanyId, globalState, currentTenantCompanyId) {
         if (!requestedCompanyId.isNullOrBlank() &&
             globalState is GlobalAccessState.Ready &&
             TenantAccessResolver.hasAccess((globalState as GlobalAccessState.Ready).context, requestedCompanyId)
         ) {
-            ensureTenantContextUseCase(requestedCompanyId)
+            if (currentTenantCompanyId != requestedCompanyId) {
+                ensureTenantContextUseCase(requestedCompanyId)
+            }
         }
     }
 
@@ -140,11 +152,7 @@ fun TenantRouteGuard(
                 canSwitchCompany = false,
                 onRetry = {
                     scope.launch {
-                        if (!requestedCompanyId.isNullOrBlank()) {
-                            ensureTenantContextUseCase(requestedCompanyId)
-                        } else {
-                            refreshGlobalAccessUseCase(force = true)
-                        }
+                        refreshGlobalAccessUseCase(force = true)
                     }
                 },
                 onLogout = onLogoutAction,
@@ -222,8 +230,10 @@ fun TenantRouteGuard(
         }
 
         is TenantGuardDecision.RenderContent -> {
-            key(decision.context.companyId) {
-                content(decision.context)
+            Box(modifier = modifier) {
+                key(decision.context.companyId) {
+                    content(decision.context)
+                }
             }
         }
     }

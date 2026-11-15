@@ -33,7 +33,6 @@ import studio.acmenra.control.core.access.domain.model.CompanyBrief
 import studio.acmenra.control.core.access.domain.model.CompanyStatus
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
 import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
-import studio.acmenra.control.core.ui.components.ProvideTopBar
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.company_search_no_results
 import studio.acmenra.control.core.ui.generated.resources.vendor_dashboard_badge
@@ -65,10 +64,6 @@ fun CompaniesDashboardScreen(
                 companies.filter { it.name.contains(searchQuery, ignoreCase = true) }
             }
         }
-
-    ProvideTopBar(
-        title = stringResource(Res.string.vendor_dashboard_title),
-    )
 
     Column(
         modifier =

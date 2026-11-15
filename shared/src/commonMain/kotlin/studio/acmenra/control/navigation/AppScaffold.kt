@@ -161,14 +161,7 @@ fun AppScaffold(
                     ) {
                         AmberTopAppBar(
                             title = title,
-                            subtitle =
-                                if (!isDesktopOrTablet &&
-                                    displayCompanyName.isNotBlank()
-                                ) {
-                                    displayCompanyName
-                                } else {
-                                    null
-                                },
+                            subtitle = null,
                             leadingAction = topBarState.leadingAction,
                             actions = topBarState.actions,
                             desktopCompanyBox =

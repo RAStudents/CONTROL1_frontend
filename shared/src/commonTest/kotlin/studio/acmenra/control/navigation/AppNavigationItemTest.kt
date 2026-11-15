@@ -42,16 +42,18 @@ class AppNavigationItemTest {
         )
 
     private fun createGlobalContext(
+        defaultCompanyId: String? = "c1",
         canBrowseAllCompanies: Boolean = false,
         globalPermissions: Set<GlobalPermission> = emptySet(),
+        memberCompanies: List<CompanyBrief> = listOf(CompanyBrief("c1", "Acme", CompanyStatus.ACTIVE)),
     ): GlobalUserContext =
         GlobalUserContext(
             userId = "u1",
             serverTime = Instant.fromEpochMilliseconds(0),
             globalPermissions = globalPermissions,
-            defaultCompanyId = "c1",
+            defaultCompanyId = defaultCompanyId,
             canBrowseAllCompanies = canBrowseAllCompanies,
-            memberCompanies = listOf(CompanyBrief("c1", "Acme", CompanyStatus.ACTIVE)),
+            memberCompanies = memberCompanies,
         )
 
     @Test
@@ -141,6 +143,26 @@ class AppNavigationItemTest {
                 items = items,
                 authorizedContext = null,
                 globalContext = support,
+            )
+
+        assertTrue(visible.isEmpty())
+    }
+
+    @Test
+    fun testVisibleItemsWhenVendorAdminAndNoCompaniesAvailable() {
+        val items = AppNavigationItem.DEFAULT_ITEMS
+        val vendorNoCompanies =
+            createGlobalContext(
+                defaultCompanyId = null,
+                canBrowseAllCompanies = true,
+                globalPermissions = setOf(GlobalPermission.COMPANIES_MANAGE),
+                memberCompanies = emptyList(),
+            )
+        val visible =
+            AppNavigationItem.filterVisibleNavigationItems(
+                items = items,
+                authorizedContext = null,
+                globalContext = vendorNoCompanies,
             )
 
         assertTrue(visible.isEmpty())

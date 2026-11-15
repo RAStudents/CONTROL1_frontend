@@ -69,16 +69,7 @@ fun SupportOverrideBanner(
             stringResource(Res.string.support_ticket_label, ticket)
         }
 
-    val totalSec = remaining.inWholeSeconds
-    val hours = totalSec / 3600
-    val minutes = (totalSec % 3600) / 60
-    val seconds = totalSec % 60
-    val timeFormatted =
-        if (hours > 0) {
-            "${hours.padZero()}:${minutes.padZero()}:${seconds.padZero()}"
-        } else {
-            "${minutes.padZero()}:${seconds.padZero()}"
-        }
+    val timeFormatted = formatRemainingDuration(remaining)
 
     val timeText =
         if (remaining > Duration.ZERO) {
@@ -163,6 +154,18 @@ fun SupportOverrideBanner(
                 )
             }
         }
+    }
+}
+
+internal fun formatRemainingDuration(remaining: Duration): String {
+    val totalSec = remaining.inWholeSeconds.coerceAtLeast(0)
+    val hours = totalSec / 3600
+    val minutes = (totalSec % 3600) / 60
+    val seconds = totalSec % 60
+    return if (hours > 0) {
+        "${hours.padZero()}:${minutes.padZero()}:${seconds.padZero()}"
+    } else {
+        "${minutes.padZero()}:${seconds.padZero()}"
     }
 }
 

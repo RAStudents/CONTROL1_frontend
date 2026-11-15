@@ -1,5 +1,7 @@
 package studio.acmenra.control.navigation
 
+import androidx.navigation.NavDestinationBuilder
+import androidx.navigation.compose.ComposeNavigator
 import studio.acmenra.control.core.access.domain.model.AccessOrigin
 import studio.acmenra.control.core.access.domain.model.AccessStatus
 import studio.acmenra.control.core.access.domain.model.AuthorizedTenantContext
@@ -114,15 +116,23 @@ class AppScaffoldUiStateTest {
             )
         val tenantState = TenantContextState.NotSelected
 
+        val destination =
+            NavDestinationBuilder(
+                navigator = ComposeNavigator(),
+                route = CompaniesDashboardRoute::class,
+                typeMap = emptyMap(),
+            ).build()
+
         val uiState =
             calculateAppScaffoldUiState(
                 globalContext = globalContext,
                 tenantState = tenantState,
-                destination = null,
+                destination = destination,
                 items = AppNavigationItem.DEFAULT_ITEMS,
             )
 
         assertTrue(uiState.canSwitch)
+        assertTrue(uiState.isOnVendorDashboard)
         assertEquals(1, uiState.visibleItems.size)
     }
 }

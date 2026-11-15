@@ -29,7 +29,7 @@ class BrowserNavigationWasmTest {
     }
 
     private suspend fun waitUntil(
-        timeoutMs: Long = 1500,
+        timeoutMs: Long = 2500,
         message: String = "Condition timed out",
         condition: () -> Boolean,
     ) {

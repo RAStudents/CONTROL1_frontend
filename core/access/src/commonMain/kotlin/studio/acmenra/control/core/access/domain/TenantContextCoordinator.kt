@@ -88,6 +88,16 @@ class TenantContextCoordinator(
                 }
             }
         }
+        scope.launch {
+            accessManager.globalState.collect { globalState ->
+                if (globalState is GlobalAccessState.Ready) {
+                    val current = _tenantState.value
+                    if (current is TenantContextState.Loading && activeSelectionJob == null) {
+                        selectTenant(current.requestedCompanyId)
+                    }
+                }
+            }
+        }
     }
 
     suspend fun ensureTenantContext(requestedCompanyId: String) {
@@ -97,16 +107,17 @@ class TenantContextCoordinator(
             reset()
         }
         val updated = _tenantState.value
-        val currentCompanyId =
+        val isAlreadySatisfied =
             when (updated) {
-                is TenantContextState.Authorized -> updated.context.companyId
-                is TenantContextState.Restricted -> updated.companyId
-                is TenantContextState.Error -> updated.companyId
-                is TenantContextState.Loading -> updated.requestedCompanyId
-                is TenantContextState.NotSelected -> null
+                is TenantContextState.Authorized -> updated.context.companyId == requestedCompanyId
+                is TenantContextState.Restricted -> updated.companyId == requestedCompanyId
+                is TenantContextState.Loading ->
+                    updated.requestedCompanyId == requestedCompanyId &&
+                        activeSelectionJob?.isActive == true
+                is TenantContextState.Error, is TenantContextState.NotSelected -> false
             }
 
-        if (currentCompanyId == requestedCompanyId) {
+        if (isAlreadySatisfied) {
             if (updated is TenantContextState.Authorized && updated.context.requiresImmediateRevalidation) {
                 refreshCurrentTenant(force = true)
             }
@@ -642,18 +653,17 @@ class TenantContextCoordinator(
             expirationJob?.cancel()
             expirationJob = null
             setTenantStateLocked(
-                TenantContextState.Error(
-                    companyId = companyId,
-                    error =
-                        NetworkError.Unknown(
-                            message = "Global user context is not available for origin validation",
-                        ),
-                    canSwitchCompany = canSwitch,
-                ),
+                TenantContextState.Loading(requestedCompanyId = companyId),
                 sessionRevision,
             )
-            scope.launch {
-                accessManager.refreshGlobalContext(force = true)
+            val global = accessManager.globalState.value
+            val isAlreadyLoading =
+                global is GlobalAccessState.InitialLoading ||
+                    (global is GlobalAccessState.Ready && global.isRefreshing)
+            if (!isAlreadyLoading) {
+                scope.launch {
+                    accessManager.refreshGlobalContext(force = true)
+                }
             }
             return
         }

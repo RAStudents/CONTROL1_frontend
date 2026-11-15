@@ -4,12 +4,16 @@ import studio.acmenra.control.core.access.domain.model.SupportGrantInfo
 import studio.acmenra.control.core.access.domain.model.SupportGrantRuntimeState
 import studio.acmenra.control.core.access.domain.model.SupportGrantStatus
 import studio.acmenra.control.core.access.domain.model.SupportMode
+import studio.acmenra.control.navigation.components.formatRemainingDuration
 import studio.acmenra.control.navigation.components.padZero
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.hours
+import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Instant
 
 class SupportOverrideBannerTest {
@@ -18,10 +22,11 @@ class SupportOverrideBannerTest {
         ticketReference: String? = "INC-1234",
         remainingTtlSec: Long = 3665L,
         runtimeState: SupportGrantRuntimeState = SupportGrantRuntimeState.Active,
+        status: SupportGrantStatus = SupportGrantStatus.ACTIVE,
     ): SupportGrantInfo =
         SupportGrantInfo(
             grantId = "g-1",
-            status = SupportGrantStatus.ACTIVE,
+            status = status,
             mode = mode,
             ticketReference = ticketReference,
             allowBillingOverride = false,
@@ -39,6 +44,19 @@ class SupportOverrideBannerTest {
         assertEquals("05", 5L.padZero())
         assertEquals("12", 12L.padZero())
         assertEquals("59", 59L.padZero())
+    }
+
+    @Test
+    fun testFormatRemainingDurationFormatting() {
+        assertEquals("00:00", formatRemainingDuration(Duration.ZERO))
+        assertEquals("00:00", formatRemainingDuration((-15).seconds))
+        assertEquals("00:09", formatRemainingDuration(9.seconds))
+        assertEquals("00:59", formatRemainingDuration(59.seconds))
+        assertEquals("01:00", formatRemainingDuration(60.seconds))
+        assertEquals("05:30", formatRemainingDuration(5.minutes + 30.seconds))
+        assertEquals("01:00:00", formatRemainingDuration(1.hours))
+        assertEquals("01:05:09", formatRemainingDuration(1.hours + 5.minutes + 9.seconds))
+        assertEquals("12:34:56", formatRemainingDuration(12.hours + 34.minutes + 56.seconds))
     }
 
     @Test
@@ -65,22 +83,16 @@ class SupportOverrideBannerTest {
     }
 
     @Test
-    fun testSupportModes() {
-        val readOnly = createGrant(mode = SupportMode.READ_ONLY_SUPPORT)
-        val engineering = createGrant(mode = SupportMode.ENGINEERING_SUPPORT)
-        val unknown = createGrant(mode = SupportMode.UNKNOWN)
-
-        assertEquals(SupportMode.READ_ONLY_SUPPORT, readOnly.mode)
-        assertEquals(SupportMode.ENGINEERING_SUPPORT, engineering.mode)
-        assertEquals(SupportMode.UNKNOWN, unknown.mode)
+    fun testRemainingDurationWhenRevoked() {
+        val grant = createGrant(status = SupportGrantStatus.REVOKED)
+        assertEquals(Duration.ZERO, grant.remainingDurationNow())
+        assertTrue(grant.isExpiredNow())
     }
 
     @Test
-    fun testTicketReference() {
-        val withTicket = createGrant(ticketReference = "SD-777")
-        val withoutTicket = createGrant(ticketReference = null)
-
-        assertEquals("SD-777", withTicket.ticketReference)
-        assertEquals(null, withoutTicket.ticketReference)
+    fun testRemainingDurationWhenStatusExpired() {
+        val grant = createGrant(status = SupportGrantStatus.EXPIRED)
+        assertEquals(Duration.ZERO, grant.remainingDurationNow())
+        assertTrue(grant.isExpiredNow())
     }
 }

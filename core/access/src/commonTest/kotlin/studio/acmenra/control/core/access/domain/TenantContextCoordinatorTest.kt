@@ -1468,4 +1468,61 @@ class TenantContextCoordinatorTest {
             assertEquals("c_fail", state.companyId)
             assertEquals(expectedError, state.error)
         }
+
+    @Test
+    fun testRogueVendorOriginRejectionSetsAccessDenied() =
+        runTest {
+            accessManager.refreshGlobalContext(force = true)
+
+            repository.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Rogue Target Co",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_rogue",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.VENDOR_GLOBAL),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            coordinator.ensureTenantContext("rogue_c")
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Restricted.AccessDenied)
+            assertEquals("rogue_c", state.companyId)
+            assertEquals("Rogue Target Co", state.companyName)
+        }
+
+    @Test
+    fun testTransientGlobalContextResolvesLoadingToAuthorizedWhenGlobalReady() =
+        runTest {
+            val uninitializedStorage = FakeTokenStorage()
+            val uninitSession = SessionManager(tokenStorage = uninitializedStorage)
+            val testRepo = FakeAccessRepository()
+            val testAccessManager =
+                AccessManager(
+                    accessRepository = testRepo,
+                    sessionManager = uninitSession,
+                    errorParser = errorParser,
+                )
+            val testCoordinator =
+                TenantContextCoordinator(
+                    accessRepository = testRepo,
+                    accessManager = testAccessManager,
+                    sessionManager = uninitSession,
+                    errorParser = errorParser,
+                    singleFlight = TenantSingleFlight(),
+                )
+
+            testCoordinator.selectTenant("c1")
+
+            assertTrue(testCoordinator.tenantState.value is TenantContextState.Authorized)
+        }
 }

@@ -14,7 +14,10 @@ class TopBarState {
     var actions by mutableStateOf<@Composable RowScope.() -> Unit>({})
 }
 
-val LocalTopBarState = compositionLocalOf { TopBarState() }
+val LocalTopBarState =
+    compositionLocalOf<TopBarState> {
+        error("LocalTopBarState not provided")
+    }
 
 @Composable
 fun ProvideTopBar(

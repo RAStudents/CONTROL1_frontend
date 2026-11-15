@@ -24,6 +24,7 @@ import studio.acmenra.control.core.access.domain.usecase.impl.CheckPermissionUse
 import studio.acmenra.control.core.access.domain.usecase.impl.EnsureTenantContextUseCaseImpl
 import studio.acmenra.control.core.access.domain.usecase.impl.ObserveGlobalAccessUseCaseImpl
 import studio.acmenra.control.core.access.domain.usecase.impl.ObserveTenantContextUseCaseImpl
+import studio.acmenra.control.core.access.domain.usecase.impl.RefreshGlobalAccessUseCaseImpl
 import studio.acmenra.control.core.access.domain.usecase.impl.RefreshTenantUseCaseImpl
 import studio.acmenra.control.core.access.domain.usecase.impl.SelectTenantUseCaseImpl
 import studio.acmenra.control.core.network.auth.SessionManager
@@ -56,9 +57,11 @@ class AccessUseCasesTest {
 
     private class FakeRepo : AccessRepository {
         var refreshCount = 0
+        var globalFetchCount = 0
 
-        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> =
-            NetworkResult.Success(
+        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> {
+            globalFetchCount++
+            return NetworkResult.Success(
                 GlobalUserContext(
                     userId = "u1",
                     serverTime = Instant.fromEpochMilliseconds(0),
@@ -68,6 +71,7 @@ class AccessUseCasesTest {
                     memberCompanies = listOf(CompanyBrief("c1", "C1", CompanyStatus.ACTIVE)),
                 ),
             )
+        }
 
         override suspend fun getCompanyAccess(
             userId: String,
@@ -124,12 +128,21 @@ class AccessUseCasesTest {
     private val selectTenantUseCase = SelectTenantUseCaseImpl(coordinator)
     private val ensureTenantContextUseCase = EnsureTenantContextUseCaseImpl(coordinator)
     private val refreshTenantUseCase = RefreshTenantUseCaseImpl(coordinator)
+    private val refreshGlobalAccessUseCase = RefreshGlobalAccessUseCaseImpl(accessManager)
     private val checkPermissionUseCase = CheckPermissionUseCaseImpl(coordinator)
 
     @Test
     fun observeGlobalAccessProvidesState() =
         runTest {
             assertEquals(accessManager.globalState.value, observeGlobalAccessUseCase().value)
+        }
+
+    @Test
+    fun refreshGlobalAccessDelegatesToAccessManager() =
+        runTest {
+            val initialCount = repo.globalFetchCount
+            refreshGlobalAccessUseCase(force = true)
+            assertEquals(initialCount + 1, repo.globalFetchCount)
         }
 
     @Test

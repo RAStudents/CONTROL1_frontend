@@ -261,4 +261,15 @@ class TenantAccessResolverTest {
         val userWithBrowseFlag = createUserContext().copy(canBrowseAllCompanies = true)
         assertTrue(TenantAccessResolver.canBrowseAll(userWithBrowseFlag))
     }
+
+    @Test
+    fun testCanBrowseAllForUserWithCompaniesManageWithoutBrowseFlag() {
+        val vendorWithoutBrowseFlag =
+            createUserContext(
+                canBrowseAllCompanies = false,
+                globalPermissions = setOf(GlobalPermission.COMPANIES_MANAGE),
+            )
+        assertTrue(TenantAccessResolver.canBrowseAll(vendorWithoutBrowseFlag))
+        assertTrue(TenantAccessResolver.isVendorAdmin(vendorWithoutBrowseFlag))
+    }
 }

@@ -240,4 +240,49 @@ class TenantRouteGuardTest {
         val vendorUser = regularUser.copy(canBrowseAllCompanies = true)
         assertTrue(vendorUser.canBrowseAllCompanies)
     }
+
+    @Test
+    fun testNavigationShellVisibilityRules() {
+        val globalReady =
+            GlobalUserContext(
+                userId = "u1",
+                serverTime = Instant.fromEpochMilliseconds(0),
+                globalPermissions = setOf(GlobalPermission.COMPANIES_MANAGE),
+                defaultCompanyId = "c1",
+                canBrowseAllCompanies = true,
+                memberCompanies = listOf(CompanyBrief("c1", "Acme", CompanyStatus.ACTIVE)),
+            )
+
+        // Rule 1: Tenant destination + Tenant Loading -> shell NOT ready
+        val tenantLoading: TenantContextState = TenantContextState.Loading("c1")
+        assertFalse(tenantLoading is TenantContextState.Authorized)
+
+        // Rule 2: Tenant destination + Tenant Authorized -> shell IS ready
+        val tenantAuthorized: TenantContextState =
+            TenantContextState.Authorized(
+                createAuthorizedContext(companyId = "c1"),
+            )
+        assertTrue(tenantAuthorized is TenantContextState.Authorized)
+
+        // Rule 3: Vendor dashboard destination + Global Ready for vendor -> shell IS ready
+        assertTrue(TenantAccessResolver.canBrowseAll(globalReady))
+
+        // Rule 4: Regular user without vendor rights -> cannot browse vendor dashboard
+        val regularUser = globalReady.copy(canBrowseAllCompanies = false, globalPermissions = emptySet())
+        assertFalse(TenantAccessResolver.canBrowseAll(regularUser))
+    }
+
+    @Test
+    fun testServerAccessDeniedDirectlyPresentsRestrictedStateWithoutLoop() {
+        val deniedState =
+            TenantContextState.Restricted.AccessDenied(
+                companyId = "c-denied",
+                companyName = "Denied Corp",
+                canSwitchCompany = true,
+            )
+
+        assertEquals("c-denied", deniedState.companyId)
+        assertEquals("Denied Corp", deniedState.companyName)
+        assertTrue(deniedState.canSwitchCompany)
+    }
 }

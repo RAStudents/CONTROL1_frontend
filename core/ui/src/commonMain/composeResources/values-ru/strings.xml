@@ -66,6 +66,7 @@
     <string name="vendor_dashboard_subtitle">Режим администратора поставщика и управление компаниями</string>
     <string name="vendor_dashboard_companies_header">Управляемые компании</string>
     <string name="vendor_dashboard_empty">В системе нет зарегистрированных компаний</string>
+    <string name="vendor_dashboard_empty_hint">В текущей учетной записи нет привязанных компаний. Полный реестр компаний будет доступен на Этапе 5.</string>
     <string name="vendor_dashboard_badge">Режим вендора</string>
     <string name="vendor_dashboard_search_placeholder">Поиск по компаниям...</string>
 </resources>

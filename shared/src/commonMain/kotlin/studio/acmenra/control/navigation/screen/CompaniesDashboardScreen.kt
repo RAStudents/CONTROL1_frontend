@@ -39,6 +39,7 @@ import studio.acmenra.control.core.ui.generated.resources.company_search_no_resu
 import studio.acmenra.control.core.ui.generated.resources.vendor_dashboard_badge
 import studio.acmenra.control.core.ui.generated.resources.vendor_dashboard_companies_header
 import studio.acmenra.control.core.ui.generated.resources.vendor_dashboard_empty
+import studio.acmenra.control.core.ui.generated.resources.vendor_dashboard_empty_hint
 import studio.acmenra.control.core.ui.generated.resources.vendor_dashboard_search_placeholder
 import studio.acmenra.control.core.ui.generated.resources.vendor_dashboard_subtitle
 import studio.acmenra.control.core.ui.generated.resources.vendor_dashboard_title
@@ -153,11 +154,22 @@ fun CompaniesDashboardScreen(
                         .weight(1f),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    text = stringResource(Res.string.vendor_dashboard_empty),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(AmberDimens.GapSmall),
+                    modifier = Modifier.padding(AmberDimens.ScreenMargin),
+                ) {
+                    Text(
+                        text = stringResource(Res.string.vendor_dashboard_empty),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = stringResource(Res.string.vendor_dashboard_empty_hint),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         } else if (filteredCompanies.isEmpty()) {
             Box(

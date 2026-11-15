@@ -68,11 +68,18 @@ fun AppScaffold(
     val tenantState by observeTenantContextUseCase().collectAsState()
 
     val isLoginDestination = destination?.hasRoute<LoginRoute>() == true
+    val isVendorDashboardDestination = destination?.hasRoute<CompaniesDashboardRoute>() == true
+    val isTenantAuthorized = tenantState is TenantContextState.Authorized
+    val isVendorAuthorized =
+        isVendorDashboardDestination &&
+            globalState is GlobalAccessState.Ready &&
+            TenantAccessResolver.canBrowseAll((globalState as GlobalAccessState.Ready).context)
+
     val showNavigation =
         sessionState == SessionState.Authenticated &&
             destination != null &&
             !isLoginDestination &&
-            globalState is GlobalAccessState.Ready
+            (isTenantAuthorized || isVendorAuthorized)
     val currentContent by rememberUpdatedState(content)
     val movableContent = remember { movableContentOf { currentContent() } }
 
@@ -118,7 +125,7 @@ fun AppScaffold(
 
     val isOnVendorDashboard =
         destination.hasRoute<CompaniesDashboardRoute>() &&
-            globalContext?.let { TenantAccessResolver.canBrowseAll(it) } == true
+            globalContext?.let(TenantAccessResolver::canBrowseAll) == true
     val currentDestinationItem = visibleItems.firstOrNull { it.isSelected(destination) }
     val defaultTitle =
         when {
@@ -197,7 +204,7 @@ fun AppScaffold(
                                             canSwitch = canSwitch,
                                             companies = globalContext.memberCompanies,
                                             selectedCompanyId = effectiveSelectedCompanyId,
-                                            canBrowseAllCompanies = globalContext.canBrowseAllCompanies,
+                                            canBrowseAllCompanies = TenantAccessResolver.canBrowseAll(globalContext),
                                             onSelectCompany = { companyId ->
                                                 navController.navigateToEvents(companyId)
                                             },
@@ -240,7 +247,7 @@ fun AppScaffold(
                             actions = topBarState.actions,
                             desktopCompanyBox = null,
                             mobileCompanyAction =
-                                if (globalContext != null) {
+                                if (globalContext != null && canSwitch) {
                                     {
                                         MobileCompanyIconButton(
                                             isRestricted = displayIsRestricted,
@@ -307,7 +314,7 @@ fun AppScaffold(
                 CompanySelectionDialog(
                     companies = globalContext.memberCompanies,
                     selectedCompanyId = effectiveSelectedCompanyId,
-                    canBrowseAllCompanies = globalContext.canBrowseAllCompanies,
+                    canBrowseAllCompanies = TenantAccessResolver.canBrowseAll(globalContext),
                     onSelectCompany = { companyId ->
                         isCompanyDialogOpen = false
                         navController.navigateToEvents(companyId)

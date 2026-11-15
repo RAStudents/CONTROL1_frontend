@@ -28,6 +28,7 @@ import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
 import studio.acmenra.control.NetworkConfig
+import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.engine.createHttpEngineFactory
 import studio.acmenra.control.core.network.model.OAuthErrorResponse
@@ -42,6 +43,7 @@ object HttpClientFactory {
      */
     fun createApiClient(
         sessionManager: SessionManager,
+        accessInvalidationListener: AccessInvalidationListener? = null,
         apiBaseUrl: String = NetworkConfig.BASE_URL,
         enableLogs: Boolean = NetworkConfig.ENABLE_LOGS,
         debugMode: Boolean = NetworkConfig.DEBUG_MODE,
@@ -164,6 +166,10 @@ object HttpClientFactory {
                             header.equals(HttpHeaders.SetCookie, ignoreCase = true)
                     }
                 }
+            }
+        }.also { client ->
+            if (accessInvalidationListener != null) {
+                client.attributes.put(AccessInvalidationAttributeKey, accessInvalidationListener)
             }
         }
     }

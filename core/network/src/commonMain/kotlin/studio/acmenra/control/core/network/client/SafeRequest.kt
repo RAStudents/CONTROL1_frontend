@@ -5,14 +5,86 @@ import io.ktor.client.call.body
 import io.ktor.client.network.sockets.ConnectTimeoutException
 import io.ktor.client.network.sockets.SocketTimeoutException
 import io.ktor.client.plugins.HttpRequestTimeoutException
+import io.ktor.client.request.HttpRequest
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
+import io.ktor.client.statement.request
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.decodeURLPart
 import io.ktor.http.isSuccess
+import io.ktor.util.AttributeKey
 import kotlinx.coroutines.CancellationException
 import kotlinx.io.IOException
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.Json
+import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.model.NetworkError
 import studio.acmenra.control.core.network.model.NetworkResult
+
+val AccessInvalidationAttributeKey =
+    AttributeKey<AccessInvalidationListener>("AccessInvalidationListener")
+
+val SkipAccessInvalidationAttributeKey =
+    AttributeKey<Boolean>("SkipAccessInvalidation")
+
+private val ACCESS_QUERY_ENDPOINT_REGEX =
+    Regex("(?:^|/)(?:api/v\\d+/)?(?:auth/context|companies/[^/]+/access)$")
+
+fun isAccessQueryEndpoint(path: String): Boolean {
+    val cleanPath = (if (path.startsWith("/")) path else "/$path").trimEnd('/')
+    return cleanPath.contains(ACCESS_QUERY_ENDPOINT_REGEX)
+}
+
+@Serializable
+private data class ErrorBodyPayload(
+    @SerialName("error") val error: String? = null,
+    @SerialName("error_code") val errorCode: String? = null,
+    @SerialName("company_id") val companyId: String? = null,
+)
+
+private val errorJson =
+    Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+    }
+
+private val TENANT_ENDPOINT_REGEX =
+    Regex("^(?:.*?/)?(?:api/v\\d+/)?companies/([^/]+)(?:/.*)?$")
+
+private val RESERVED_COMPANY_SEGMENTS =
+    setOf("health", "metrics", "status", "check", "ping", "all", "me", "search")
+
+fun parseErrorDetails(
+    errorBody: String?,
+    request: HttpRequest,
+): Pair<String?, String?> {
+    var errorCode: String? = null
+    var companyId: String? = null
+
+    if (!errorBody.isNullOrBlank()) {
+        val payload = runCatching { errorJson.decodeFromString<ErrorBodyPayload>(errorBody) }.getOrNull()
+        if (payload != null) {
+            errorCode = payload.error ?: payload.errorCode
+            companyId = payload.companyId
+        }
+    }
+
+    if (companyId.isNullOrBlank()) {
+        val path = request.url.encodedPath
+        val cleanPath = (if (path.startsWith("/")) path else "/$path").trimEnd('/')
+        val match = TENANT_ENDPOINT_REGEX.matchEntire(cleanPath)
+        if (match != null) {
+            val candidate = match.groupValues[1].decodeURLPart()
+            if (candidate.isNotBlank() && candidate !in RESERVED_COMPANY_SEGMENTS) {
+                companyId = candidate
+            }
+        }
+    }
+
+    return errorCode to companyId
+}
 
 suspend inline fun <reified T> HttpClient.safeRequest(
     crossinline block: suspend HttpClient.() -> HttpResponse,
@@ -63,6 +135,24 @@ suspend inline fun <reified T> HttpClient.safeRequest(
             }
         } else {
             val errorBody = response.readErrorBodySafely()
+            if (response.status == HttpStatusCode.Forbidden) {
+                val skipExplicit = response.request.attributes.getOrNull(SkipAccessInvalidationAttributeKey) == true
+                val path = response.request.url.encodedPath
+                val isAccessEndpoint = skipExplicit || isAccessQueryEndpoint(path)
+                if (!isAccessEndpoint) {
+                    val listener = attributes.getOrNull(AccessInvalidationAttributeKey)
+                    if (listener != null) {
+                        val (errorCode, companyId) = parseErrorDetails(errorBody, response.request)
+                        try {
+                            listener.onAccessInvalidated(errorCode, companyId)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            // Secondary access invalidation failure must not corrupt primary HTTP response
+                        }
+                    }
+                }
+            }
             NetworkResult.Failure(
                 NetworkError.Http(
                     statusCode = response.status.value,

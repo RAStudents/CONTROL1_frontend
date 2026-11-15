@@ -2,6 +2,8 @@ package studio.acmenra.control.core.network.di
 
 import org.koin.core.qualifier.named
 import org.koin.dsl.module
+import studio.acmenra.control.core.network.auth.AccessInvalidationDispatcher
+import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.SettingsTokenStorage
 import studio.acmenra.control.core.network.auth.TokenStorage
@@ -19,6 +21,14 @@ val networkModule =
         }
 
         single {
+            AccessInvalidationDispatcher()
+        }
+
+        single<AccessInvalidationListener> {
+            get<AccessInvalidationDispatcher>()
+        }
+
+        single {
             SessionManager(
                 tokenStorage = get(),
             )
@@ -28,6 +38,7 @@ val networkModule =
             val config = get<ApiConfig>()
             HttpClientFactory.createApiClient(
                 sessionManager = get(),
+                accessInvalidationListener = get<AccessInvalidationListener>(),
                 apiBaseUrl = config.apiBaseUrl,
                 enableLogs = config.enableLogs,
                 debugMode = config.debugMode,

@@ -5,8 +5,18 @@ import org.koin.core.KoinApplication
 import org.koin.core.qualifier.named
 import org.koin.dsl.koinApplication
 import org.koin.dsl.module
+import studio.acmenra.control.core.access.domain.AccessInvalidationCoordinator
+import studio.acmenra.control.core.access.domain.AccessManager
+import studio.acmenra.control.core.access.domain.TenantContextCoordinator
+import studio.acmenra.control.core.access.domain.usecase.CheckPermissionUseCase
+import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
+import studio.acmenra.control.core.access.domain.usecase.ObserveTenantContextUseCase
+import studio.acmenra.control.core.access.domain.usecase.RefreshTenantUseCase
+import studio.acmenra.control.core.access.domain.usecase.SelectTenantUseCase
+import studio.acmenra.control.core.network.auth.AccessInvalidationDispatcher
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.TokenStorage
+import studio.acmenra.control.core.network.client.ApiConfig
 import studio.acmenra.control.core.network.model.TokenPair
 import studio.acmenra.control.feature.auth.presentation.LoginViewModel
 import studio.acmenra.control.feature.events.presentation.EventsViewModel
@@ -16,6 +26,7 @@ import kotlin.test.Test
 import kotlin.test.assertNotNull
 import kotlin.test.assertNotSame
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 private class FakeTokenStorage : TokenStorage {
     private var tokenPair: TokenPair? = null
@@ -38,13 +49,20 @@ class DiTest {
     fun setUp() {
         koinApp =
             koinApplication {
+                allowOverride(true)
                 modules(
                     appModule,
                     module {
                         single<TokenStorage> { FakeTokenStorage() }
+                        single {
+                            ApiConfig(
+                                apiBaseUrl = "https://api.example.com",
+                            )
+                        }
                     },
                 )
             }
+        koinApp.koin.createEagerInstances()
     }
 
     @AfterTest
@@ -74,6 +92,33 @@ class DiTest {
         val externalClient: HttpClient = koin.get(named("external"))
         assertNotNull(externalClient)
         assertNotSame(apiClient, externalClient)
+
+        val accessManager: AccessManager = koin.get()
+        assertNotNull(accessManager)
+
+        val tenantCoordinator: TenantContextCoordinator = koin.get()
+        assertNotNull(tenantCoordinator)
+
+        val dispatcher: AccessInvalidationDispatcher = koin.get()
+        assertNotNull(dispatcher)
+
+        val invalidationCoordinator: AccessInvalidationCoordinator = koin.get()
+        assertNotNull(invalidationCoordinator)
+
+        val checkPermission: CheckPermissionUseCase = koin.get()
+        assertNotNull(checkPermission)
+
+        val selectTenant: SelectTenantUseCase = koin.get()
+        assertNotNull(selectTenant)
+
+        val refreshTenant: RefreshTenantUseCase = koin.get()
+        assertNotNull(refreshTenant)
+
+        val observeGlobalAccess: ObserveGlobalAccessUseCase = koin.get()
+        assertNotNull(observeGlobalAccess)
+
+        val observeTenantContext: ObserveTenantContextUseCase = koin.get()
+        assertNotNull(observeTenantContext)
     }
 
     @Test
@@ -100,5 +145,15 @@ class DiTest {
         val events1: EventsViewModel = koin.get()
         val events2: EventsViewModel = koin.get()
         assertNotSame(events1, events2)
+    }
+
+    @Test
+    fun testInvalidationListenerRegisteredWithoutExplicitRequest() {
+        val koin = koinApp.koin
+        val dispatcher: AccessInvalidationDispatcher = koin.get()
+        assertTrue(
+            dispatcher.hasListeners(),
+            "AccessInvalidationCoordinator must be registered in dispatcher eagerly at startup",
+        )
     }
 }

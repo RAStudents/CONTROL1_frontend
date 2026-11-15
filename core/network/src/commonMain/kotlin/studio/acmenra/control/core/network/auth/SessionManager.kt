@@ -15,7 +15,11 @@ class SessionManager(
     private val refreshMutex = Mutex()
     private var inFlightRefresh: CompletableDeferred<SessionSnapshot?>? = null
     private var inFlightRefreshToken: String? = null
+
+    @kotlin.concurrent.Volatile
     private var currentRevision: Long = 0L
+
+    fun currentRevision(): Long = currentRevision
 
     private val _sessionState =
         MutableStateFlow<SessionState>(

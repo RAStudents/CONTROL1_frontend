@@ -18,9 +18,13 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.io.IOException
 import kotlinx.serialization.Serializable
+import studio.acmenra.control.core.network.auth.AccessInvalidationDispatcher
+import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.core.network.client.HttpClientFactory
+import studio.acmenra.control.core.network.client.SkipAccessInvalidationAttributeKey
+import studio.acmenra.control.core.network.client.isAccessQueryEndpoint
 import studio.acmenra.control.core.network.client.safeRequest
 import studio.acmenra.control.core.network.model.NetworkError
 import studio.acmenra.control.core.network.model.NetworkResult
@@ -29,6 +33,7 @@ import studio.acmenra.control.core.network.model.getOrNull
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -901,6 +906,7 @@ class HttpClientAuthTest {
                 sessionManager = sessionManager,
                 apiBaseUrl = "http://api.example.com",
                 debugMode = true,
+                allowInsecureTransport = false,
                 engine =
                     MockEngine {
                         respond(
@@ -933,4 +939,164 @@ class HttpClientAuthTest {
             )
         client.close()
     }
+
+    @Test
+    fun isAccessQueryEndpointExactUrlMatching() {
+        // Valid access query endpoints
+        assertTrue(isAccessQueryEndpoint("/api/v1/auth/context"))
+        assertTrue(isAccessQueryEndpoint("api/v1/auth/context"))
+        assertTrue(isAccessQueryEndpoint("/api/v1/auth/context/"))
+        assertTrue(isAccessQueryEndpoint("/api/v2/auth/context"))
+        assertTrue(isAccessQueryEndpoint("/auth/context"))
+        assertTrue(isAccessQueryEndpoint("/api/v1/companies/comp_123/access"))
+        assertTrue(isAccessQueryEndpoint("api/v1/companies/comp_123/access"))
+        assertTrue(isAccessQueryEndpoint("/api/v1/companies/comp_123/access/"))
+        assertTrue(isAccessQueryEndpoint("/companies/comp_123/access"))
+
+        // False positives that must NOT match
+        assertFalse(isAccessQueryEndpoint("/api/v1/devices/access"))
+        assertFalse(isAccessQueryEndpoint("/api/v1/users/123/access"))
+        assertFalse(isAccessQueryEndpoint("/api/v1/companies/comp_123/events/access"))
+        assertFalse(isAccessQueryEndpoint("/api/v1/companies/comp_123/access/logs"))
+        assertFalse(isAccessQueryEndpoint("/api/v1/companies/comp_123/events"))
+        assertFalse(isAccessQueryEndpoint("/api/v1/access"))
+    }
+
+    @Test
+    fun safeRequestSkipsInvalidationOnAccessEndpoints() =
+        runTest {
+            var invalidationCalled = false
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            val engine =
+                MockEngine { _ ->
+                    respond(
+                        content = """{"error":"COMPANY_RESTRICTED"}""",
+                        status = HttpStatusCode.Forbidden,
+                        headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                    )
+                }
+
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    accessInvalidationListener = { _, _ -> invalidationCalled = true },
+                    apiBaseUrl = "https://api.example.com",
+                    engine = engine,
+                )
+
+            val resultAuth =
+                client.safeRequest<TestData> {
+                    get("https://api.example.com/api/v1/auth/context")
+                }
+            assertTrue(resultAuth is NetworkResult.Failure)
+            assertFalse(invalidationCalled)
+
+            val resultCompanyAccess =
+                client.safeRequest<TestData> {
+                    get("https://api.example.com/api/v1/companies/comp_1/access")
+                }
+            assertTrue(resultCompanyAccess is NetworkResult.Failure)
+            assertFalse(invalidationCalled)
+
+            // Business endpoint that ends in /access (e.g. /api/v1/devices/access) DOES trigger invalidation
+            val resultBusiness =
+                client.safeRequest<TestData> {
+                    get("https://api.example.com/api/v1/devices/access")
+                }
+            assertTrue(resultBusiness is NetworkResult.Failure)
+            assertTrue(invalidationCalled)
+
+            // Explicit attribute skips invalidation even on business endpoint
+            invalidationCalled = false
+            val resultExplicitSkip =
+                client.safeRequest<TestData> {
+                    get("https://api.example.com/api/v1/devices/access") {
+                        attributes.put(SkipAccessInvalidationAttributeKey, true)
+                    }
+                }
+            assertTrue(resultExplicitSkip is NetworkResult.Failure)
+            assertFalse(invalidationCalled)
+        }
+
+    @Test
+    fun listenerFailureDoesNotCorruptPrimary403Response() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            val throwingListener =
+                AccessInvalidationListener { _, _ ->
+                    throw RuntimeException("Secondary listener error")
+                }
+            val dispatcher = AccessInvalidationDispatcher().apply { addListener(throwingListener) }
+
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    debugMode = true,
+                    allowInsecureTransport = true,
+                    accessInvalidationListener = dispatcher,
+                    engine =
+                        MockEngine {
+                            respond(
+                                content = """{"error":"PERMISSION_DENIED"}""",
+                                status = HttpStatusCode.Forbidden,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        },
+                )
+
+            val result =
+                client.safeRequest<TestData> {
+                    get("https://api.example.com/api/v1/companies/c1/events")
+                }
+
+            assertTrue(result is NetworkResult.Failure)
+            val error = result.error
+            assertTrue(error is NetworkError.Http)
+            assertEquals(403, error.statusCode)
+        }
+
+    @Test
+    fun specialCharactersInCompanyIdAreCorrectlyDecodedInSafeRequest() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            var reportedCompanyId: String? = null
+            val listener =
+                AccessInvalidationListener { _, companyId ->
+                    reportedCompanyId = companyId
+                }
+            val dispatcher = AccessInvalidationDispatcher().apply { addListener(listener) }
+
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    debugMode = true,
+                    allowInsecureTransport = true,
+                    accessInvalidationListener = dispatcher,
+                    engine =
+                        MockEngine {
+                            respond(
+                                content = """{"error":"PERMISSION_DENIED"}""",
+                                status = HttpStatusCode.Forbidden,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        },
+                )
+
+            // Percent-encoded space in companyId: comp%20123
+            client.safeRequest<TestData> {
+                get("https://api.example.com/api/v1/companies/comp%20123/events")
+            }
+            assertEquals("comp 123", reportedCompanyId)
+
+            // Percent-encoded slash in companyId: comp%2Fspecial
+            client.safeRequest<TestData> {
+                get("https://api.example.com/api/v1/companies/comp%2Fspecial/events")
+            }
+            assertEquals("comp/special", reportedCompanyId)
+        }
 }

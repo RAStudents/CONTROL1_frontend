@@ -75,7 +75,7 @@ class ApiConfigTest {
 
     @Test
     fun testCopyValidatesNewArguments() {
-        val config = ApiConfig(apiBaseUrl = "https://api.example.com")
+        val config = ApiConfig(apiBaseUrl = "https://api.example.com", allowInsecureTransport = false)
         assertFailsWith<IllegalArgumentException> {
             config.copy(apiBaseUrl = "http://insecure.example.com")
         }

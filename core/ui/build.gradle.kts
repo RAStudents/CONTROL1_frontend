@@ -23,5 +23,6 @@ kotlin {
 }
 
 compose.resources {
+    publicResClass = true
     packageOfResClass = "studio.acmenra.control.core.ui.generated.resources"
 }

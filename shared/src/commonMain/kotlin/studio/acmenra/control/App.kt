@@ -20,6 +20,7 @@ import studio.acmenra.control.core.ui.notice.ConnectivityNotices
 import studio.acmenra.control.core.ui.notice.NoticeHost
 import studio.acmenra.control.core.ui.theme.AmberTheme
 import studio.acmenra.control.navigation.AppNavHost
+import studio.acmenra.control.navigation.AppScaffold
 import studio.acmenra.control.navigation.EventsRoute
 import studio.acmenra.control.navigation.LoginRoute
 
@@ -61,12 +62,17 @@ fun AppContent(
             color = MaterialTheme.colorScheme.surface,
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                AppNavHost(
+                AppScaffold(
                     navController = navController,
-                    startDestination = startDestination,
                     sessionState = sessionState,
                     modifier = modifier,
-                )
+                ) {
+                    AppNavHost(
+                        navController = navController,
+                        startDestination = startDestination,
+                        sessionState = sessionState,
+                    )
+                }
                 NoticeHost(modifier = Modifier.align(Alignment.TopCenter))
             }
         }

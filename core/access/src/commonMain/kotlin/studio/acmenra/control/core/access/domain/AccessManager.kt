@@ -44,8 +44,12 @@ class AccessManager(
             sessionManager.sessionState.collect { sessionState ->
                 when (sessionState) {
                     is SessionState.Authenticated -> {
-                        if (_globalState.value is GlobalAccessState.Idle) {
-                            refreshGlobalContext(force = false)
+                        val currentRev = sessionManager.currentSessionRevision()
+                        val current = _globalState.value
+                        if (current is GlobalAccessState.Idle ||
+                            (current is GlobalAccessState.Ready && current.sessionRevision != currentRev)
+                        ) {
+                            refreshGlobalContext(force = true)
                         }
                     }
 
@@ -59,15 +63,20 @@ class AccessManager(
         }
     }
 
-    fun currentUserContext(): GlobalUserContext? =
-        when (val current = _globalState.value) {
-            is GlobalAccessState.Ready -> current.context
+    fun currentUserContext(): GlobalUserContext? {
+        val currentRev = sessionManager.currentSessionRevision()
+        return when (val current = _globalState.value) {
+            is GlobalAccessState.Ready -> if (current.sessionRevision == currentRev) current.context else null
             else -> null
         }
+    }
 
     suspend fun ensureGlobalContext(): GlobalUserContext? {
-        val existing = currentUserContext()
-        if (existing != null) return existing
+        val currentRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
+        val current = _globalState.value
+        if (current is GlobalAccessState.Ready && current.sessionRevision == currentRevision) {
+            return current.context
+        }
         refreshGlobalContext(force = false)
         return currentUserContext()
     }
@@ -75,12 +84,14 @@ class AccessManager(
     suspend fun refreshGlobalContext(force: Boolean = false): NetworkResult<GlobalUserContext> {
         val deferred =
             mutex.withLock {
+                val currentRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
                 val currentState = _globalState.value
-                if (!force && currentState is GlobalAccessState.Ready) {
+                if (!force &&
+                    currentState is GlobalAccessState.Ready &&
+                    currentState.sessionRevision == currentRevision
+                ) {
                     return NetworkResult.Success(currentState.context)
                 }
-
-                val currentRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
 
                 val existing = inFlightDeferred
                 val canReuseExisting =
@@ -113,7 +124,7 @@ class AccessManager(
                                 if (generation == currentGeneration &&
                                     latestRevision == currentRevision
                                 ) {
-                                    applyGlobalContextResultLocked(result)
+                                    applyGlobalContextResultLocked(result, latestRevision)
                                 }
                             }
                             result
@@ -149,7 +160,10 @@ class AccessManager(
         }
     }
 
-    private fun applyGlobalContextResultLocked(result: NetworkResult<GlobalUserContext>) {
+    private fun applyGlobalContextResultLocked(
+        result: NetworkResult<GlobalUserContext>,
+        revision: Long,
+    ) {
         when (result) {
             is NetworkResult.Success -> {
                 val context = result.data
@@ -160,7 +174,11 @@ class AccessManager(
                         }
 
                         else -> {
-                            GlobalAccessState.Ready(context = context, isRefreshing = false)
+                            GlobalAccessState.Ready(
+                                context = context,
+                                sessionRevision = revision,
+                                isRefreshing = false,
+                            )
                         }
                     }
                 _globalState.value = newState

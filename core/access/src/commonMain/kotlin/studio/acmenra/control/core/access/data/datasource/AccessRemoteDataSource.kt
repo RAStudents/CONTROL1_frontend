@@ -8,6 +8,7 @@ import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.encodeURLPathPart
 import io.ktor.http.isSuccess
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerializationException
@@ -40,8 +41,9 @@ class KtorAccessRemoteDataSource(
         ifNoneMatch: String?,
     ): NetworkResult<AccessFetchResult> =
         try {
+            val encodedCompanyId = companyId.encodeURLPathPart()
             val response =
-                httpClient.get("api/v1/companies/$companyId/access") {
+                httpClient.get("api/v1/companies/$encodedCompanyId/access") {
                     if (!ifNoneMatch.isNullOrBlank()) {
                         header(HttpHeaders.IfNoneMatch, ifNoneMatch)
                     }

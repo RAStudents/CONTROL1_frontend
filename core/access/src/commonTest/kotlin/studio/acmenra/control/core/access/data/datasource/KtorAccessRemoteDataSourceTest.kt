@@ -152,4 +152,23 @@ class KtorAccessRemoteDataSourceTest {
             assertEquals(403, error.statusCode)
             assertTrue(error.errorBody?.contains("COMPANY_RESTRICTED") == true)
         }
+
+    @Test
+    fun getCompanyAccessCorrectlyEncodesSpecialCharactersInCompanyId() =
+        runTest {
+            val engine =
+                MockEngine { request ->
+                    assertEquals("/api/v1/companies/comp%20123/access", request.url.encodedPath)
+                    respond(
+                        content = "",
+                        status = HttpStatusCode.NotModified,
+                    )
+                }
+
+            val dataSource = KtorAccessRemoteDataSource(createTestClient(engine))
+            val result = dataSource.getCompanyAccess("comp 123", ifNoneMatch = null)
+
+            assertTrue(result is NetworkResult.Success)
+            assertEquals(304, result.statusCode)
+        }
 }

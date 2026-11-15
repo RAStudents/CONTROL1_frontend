@@ -588,6 +588,106 @@ class AccessInvalidationTest {
         }
 
     @Test
+    fun invalidationForOtherTenantDoesNotCorruptActiveTenant() =
+        runTest {
+            val localJob = Job()
+            val localScope = CoroutineScope(localJob + testDispatcher)
+            try {
+                val refreshedCompanies = mutableListOf<String>()
+
+                val testRepo =
+                    object : AccessRepository {
+                        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> =
+                            repository.getGlobalContext()
+
+                        override suspend fun getCompanyAccess(
+                            userId: String,
+                            companyId: String,
+                            forceRefresh: Boolean,
+                        ): NetworkResult<CompanyAccessDomain> {
+                            refreshedCompanies.add(companyId)
+                            val isRestricted = companyId == "comp_B"
+                            return NetworkResult.Success(
+                                CompanyAccessDomain(
+                                    companyId = companyId,
+                                    companyName = "Company $companyId",
+                                    serverTime = Instant.fromEpochMilliseconds(0),
+                                    revision = "rev_1",
+                                    companyStatus =
+                                        if (isRestricted) CompanyStatus.RESTRICTED else CompanyStatus.ACTIVE,
+                                    accessStatus =
+                                        if (isRestricted) AccessStatus.RESTRICTED else AccessStatus.ACTIVE,
+                                    activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                                    restriction = null,
+                                    tenantPermissions =
+                                        if (isRestricted) {
+                                            emptySet()
+                                        } else {
+                                            setOf(TenantPermission.EVENTS_READ)
+                                        },
+                                    supportPermissions = emptySet(),
+                                    permissionSources = emptyMap(),
+                                    supportGrant = null,
+                                ),
+                            )
+                        }
+
+                        override suspend fun getCachedCompanyAccess(
+                            userId: String,
+                            companyId: String,
+                        ): CompanyAccessDomain? = null
+
+                        override suspend fun clearCache() {}
+                    }
+
+                val localSessionManager = SessionManager(FakeTokenStorage())
+
+                val mgr =
+                    AccessManager(
+                        accessRepository = testRepo,
+                        sessionManager = localSessionManager,
+                        mapper = mapper,
+                        scope = localScope,
+                    )
+
+                val tenantCoord =
+                    TenantContextCoordinator(
+                        accessRepository = testRepo,
+                        accessManager = mgr,
+                        sessionManager = localSessionManager,
+                        mapper = mapper,
+                        scope = localScope,
+                    )
+
+                val coordinator =
+                    AccessInvalidationCoordinator(
+                        accessManager = mgr,
+                        tenantCoordinator = tenantCoord,
+                        scope = localScope,
+                    )
+
+                // 1. Select comp_A
+                tenantCoord.selectTenant("comp_A")
+                val activeA = tenantCoord.tenantState.value
+                assertTrue(activeA is TenantContextState.Authorized)
+                assertEquals("comp_A", activeA.context.companyId)
+
+                // 2. Receive 403 invalidation for comp_B
+                coordinator.onAccessInvalidatedAsync("COMPANY_RESTRICTED", "comp_B").join()
+
+                // comp_B was refreshed
+                assertTrue("comp_B" in refreshedCompanies)
+
+                // Active tenant state must remain comp_A and Authorized
+                val stateAfter = tenantCoord.tenantState.value
+                assertTrue(stateAfter is TenantContextState.Authorized)
+                assertEquals("comp_A", stateAfter.context.companyId)
+            } finally {
+                localJob.cancel()
+            }
+        }
+
+    @Test
     fun twoInvalidationsForSameCompanyDuringSingleRequestTriggersRepeatRevalidation() =
         runTest {
             val localJob = Job()

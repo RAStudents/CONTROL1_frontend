@@ -71,7 +71,11 @@ class TenantContextCoordinator(
                     }
 
                     is SessionState.Authenticated -> {
-                        // Keep current or wait for ensureTenantContext
+                        val currentRev = sessionManager.currentSessionRevision()
+                        val current = _tenantState.value
+                        if (current is TenantContextState.Authorized && current.sessionRevision != currentRev) {
+                            reset()
+                        }
                     }
                 }
             }
@@ -79,18 +83,23 @@ class TenantContextCoordinator(
     }
 
     suspend fun ensureTenantContext(requestedCompanyId: String) {
+        val currentRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
         val current = _tenantState.value
+        if (current is TenantContextState.Authorized && current.sessionRevision != currentRevision) {
+            reset()
+        }
+        val updated = _tenantState.value
         val currentCompanyId =
-            when (current) {
-                is TenantContextState.Authorized -> current.context.companyId
-                is TenantContextState.Restricted -> current.companyId
-                is TenantContextState.Error -> current.companyId
-                is TenantContextState.Loading -> current.requestedCompanyId
+            when (updated) {
+                is TenantContextState.Authorized -> updated.context.companyId
+                is TenantContextState.Restricted -> updated.companyId
+                is TenantContextState.Error -> updated.companyId
+                is TenantContextState.Loading -> updated.requestedCompanyId
                 is TenantContextState.NotSelected -> null
             }
 
         if (currentCompanyId == requestedCompanyId) {
-            if (current is TenantContextState.Authorized && current.context.requiresImmediateRevalidation) {
+            if (updated is TenantContextState.Authorized && updated.context.requiresImmediateRevalidation) {
                 refreshCurrentTenant(force = true)
             }
             return
@@ -268,6 +277,7 @@ class TenantContextCoordinator(
                         companyId = companyId,
                         canSwitch = canSwitch,
                         context = context,
+                        sessionRevision = latestRevision,
                     )
                 }
 
@@ -531,6 +541,7 @@ class TenantContextCoordinator(
                         companyId = companyId,
                         canSwitch = canSwitch,
                         context = context,
+                        sessionRevision = latestRevision,
                     )
                 }
 
@@ -629,6 +640,7 @@ class TenantContextCoordinator(
         companyId: String,
         canSwitch: Boolean,
         context: AuthorizedTenantContext,
+        sessionRevision: Long = -1L,
     ) {
         val isAuthorized =
             when {
@@ -666,7 +678,7 @@ class TenantContextCoordinator(
                             canSwitchCompany = canSwitch,
                         )
                 } else {
-                    applyAuthorizedContextLocked(context)
+                    applyAuthorizedContextLocked(context, sessionRevision)
                 }
             }
 
@@ -696,7 +708,10 @@ class TenantContextCoordinator(
         }
     }
 
-    private fun applyAuthorizedContextLocked(context: AuthorizedTenantContext) {
+    private fun applyAuthorizedContextLocked(
+        context: AuthorizedTenantContext,
+        sessionRevision: Long = -1L,
+    ) {
         val grant = context.supportGrant
         val remaining = grant?.remainingDurationNow() ?: Duration.ZERO
         val isGrantExpired =
@@ -729,20 +744,31 @@ class TenantContextCoordinator(
                     _tenantState.value =
                         TenantContextState.Authorized(
                             context = expiredContext,
+                            sessionRevision = sessionRevision,
                             isRefreshing = false,
                         )
                 }
             }
 
             grant != null && grant.status == SupportGrantStatus.ACTIVE -> {
-                _tenantState.value = TenantContextState.Authorized(context, isRefreshing = false)
-                scheduleExpirationTimerLocked(context, remaining)
+                _tenantState.value =
+                    TenantContextState.Authorized(
+                        context = context,
+                        sessionRevision = sessionRevision,
+                        isRefreshing = false,
+                    )
+                scheduleExpirationTimerLocked(context, remaining, sessionRevision)
             }
 
             else -> {
                 expirationJob?.cancel()
                 expirationJob = null
-                _tenantState.value = TenantContextState.Authorized(context, isRefreshing = false)
+                _tenantState.value =
+                    TenantContextState.Authorized(
+                        context = context,
+                        sessionRevision = sessionRevision,
+                        isRefreshing = false,
+                    )
             }
         }
     }
@@ -750,6 +776,7 @@ class TenantContextCoordinator(
     private fun scheduleExpirationTimerLocked(
         context: AuthorizedTenantContext,
         remaining: Duration,
+        sessionRevision: Long = -1L,
     ) {
         expirationJob?.cancel()
         val targetGrantId = context.supportGrant?.grantId
@@ -786,6 +813,7 @@ class TenantContextCoordinator(
                             _tenantState.value =
                                 TenantContextState.Authorized(
                                     context = expiredContext,
+                                    sessionRevision = sessionRevision,
                                     isRefreshing = false,
                                 )
                         }

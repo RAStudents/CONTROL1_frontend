@@ -9,6 +9,7 @@ sealed interface GlobalAccessState {
 
     data class Ready(
         val context: GlobalUserContext,
+        val sessionRevision: Long = -1L,
         val isRefreshing: Boolean = false,
     ) : GlobalAccessState
 
@@ -34,6 +35,7 @@ sealed interface TenantContextState {
 
     data class Authorized(
         val context: AuthorizedTenantContext,
+        val sessionRevision: Long = -1L,
         val isRefreshing: Boolean = false,
     ) : TenantContextState
 

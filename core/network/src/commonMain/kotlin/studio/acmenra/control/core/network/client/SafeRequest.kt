@@ -10,6 +10,7 @@ import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.client.statement.request
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.decodeURLPart
 import io.ktor.http.isSuccess
 import io.ktor.util.AttributeKey
 import kotlinx.coroutines.CancellationException
@@ -75,7 +76,7 @@ fun parseErrorDetails(
         val cleanPath = (if (path.startsWith("/")) path else "/$path").trimEnd('/')
         val match = TENANT_ENDPOINT_REGEX.matchEntire(cleanPath)
         if (match != null) {
-            val candidate = match.groupValues[1]
+            val candidate = match.groupValues[1].decodeURLPart()
             if (candidate.isNotBlank() && candidate !in RESERVED_COMPANY_SEGMENTS) {
                 companyId = candidate
             }
@@ -142,7 +143,13 @@ suspend inline fun <reified T> HttpClient.safeRequest(
                     val listener = attributes.getOrNull(AccessInvalidationAttributeKey)
                     if (listener != null) {
                         val (errorCode, companyId) = parseErrorDetails(errorBody, response.request)
-                        listener.onAccessInvalidated(errorCode, companyId)
+                        try {
+                            listener.onAccessInvalidated(errorCode, companyId)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            // Secondary access invalidation failure must not corrupt primary HTTP response
+                        }
                     }
                 }
             }

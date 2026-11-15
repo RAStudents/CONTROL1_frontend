@@ -321,4 +321,114 @@ class AccessManagerTest {
             assertTrue(res2 is NetworkResult.Failure)
             assertTrue(mgr.globalState.value is GlobalAccessState.Restricted.AccountFrozen)
         }
+
+    @Test
+    fun immediateUserSwitchDoesNotReturnStaleUserContext() =
+        runTest {
+            val userAContext =
+                GlobalUserContext(
+                    userId = "user_A",
+                    serverTime = Instant.fromEpochMilliseconds(0),
+                    globalPermissions = emptySet(),
+                    defaultCompanyId = "c1",
+                    canBrowseAllCompanies = false,
+                    memberCompanies = listOf(CompanyBrief("c1", "Company 1", CompanyStatus.ACTIVE)),
+                )
+            val userBContext =
+                GlobalUserContext(
+                    userId = "user_B",
+                    serverTime = Instant.fromEpochMilliseconds(0),
+                    globalPermissions = emptySet(),
+                    defaultCompanyId = "c2",
+                    canBrowseAllCompanies = false,
+                    memberCompanies = listOf(CompanyBrief("c2", "Company 2", CompanyStatus.ACTIVE)),
+                )
+
+            repository.globalResult = NetworkResult.Success(userAContext)
+            sessionManager.saveSession(TokenPair("accA", "refA"))
+
+            val ctxA = accessManager.ensureGlobalContext()
+            assertEquals("user_A", ctxA?.userId)
+            assertEquals("user_A", accessManager.currentUserContext()?.userId)
+
+            // Switch to User B in SessionManager
+            repository.globalResult = NetworkResult.Success(userBContext)
+            sessionManager.saveSession(TokenPair("accB", "refB"))
+
+            // Immediate call to currentUserContext before background refresh finishes
+            // must NOT return user_A!
+            assertEquals(null, accessManager.currentUserContext())
+
+            // Calling ensureGlobalContext fetches user_B
+            val ctxB = accessManager.ensureGlobalContext()
+            assertEquals("user_B", ctxB?.userId)
+            assertEquals("user_B", accessManager.currentUserContext()?.userId)
+        }
+
+    @Test
+    fun logoutDuringInFlightGlobalRefreshDoesNotRestoreAccess() =
+        runTest {
+            val customStorage = FakeTokenStorage()
+            val customSessionManager = SessionManager(customStorage)
+            customSessionManager.saveSession(TokenPair("acc", "ref"))
+
+            val barrier = CompletableDeferred<Unit>()
+            val entered = CompletableDeferred<Unit>()
+
+            val delayedRepo =
+                object : AccessRepository {
+                    override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> {
+                        entered.complete(Unit)
+                        barrier.await()
+                        return NetworkResult.Success(
+                            GlobalUserContext(
+                                userId = "user_stale",
+                                serverTime = Instant.fromEpochMilliseconds(0),
+                                globalPermissions = emptySet(),
+                                defaultCompanyId = "c1",
+                                canBrowseAllCompanies = false,
+                                memberCompanies = listOf(CompanyBrief("c1", "Company 1", CompanyStatus.ACTIVE)),
+                            ),
+                        )
+                    }
+
+                    override suspend fun getCompanyAccess(
+                        userId: String,
+                        companyId: String,
+                        forceRefresh: Boolean,
+                    ): NetworkResult<CompanyAccessDomain> = throw UnsupportedOperationException()
+
+                    override suspend fun getCachedCompanyAccess(
+                        userId: String,
+                        companyId: String,
+                    ): CompanyAccessDomain? = null
+
+                    override suspend fun clearCache() {}
+                }
+
+            val mgr =
+                AccessManager(
+                    accessRepository = delayedRepo,
+                    sessionManager = customSessionManager,
+                    mapper = AccessMapper(),
+                    scope = testScope,
+                )
+
+            // When mgr is created while authenticated, init triggers global context refresh.
+            // Wait until delayedRepo is entered and in-flight.
+            entered.await()
+
+            // User logs out while request is in-flight
+            customSessionManager.logout()
+            mgr.reset()
+            assertEquals(GlobalAccessState.Idle, mgr.globalState.value)
+
+            // In-flight network response finishes
+            barrier.complete(Unit)
+            runCurrent()
+
+            // Stale response must NOT restore access or set globalState to Ready
+            assertEquals(GlobalAccessState.Idle, mgr.globalState.value)
+            assertEquals(null, mgr.currentUserContext())
+        }
 }

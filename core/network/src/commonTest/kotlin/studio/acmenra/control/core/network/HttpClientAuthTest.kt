@@ -18,6 +18,8 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.io.IOException
 import kotlinx.serialization.Serializable
+import studio.acmenra.control.core.network.auth.AccessInvalidationDispatcher
+import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.core.network.client.HttpClientFactory
@@ -1015,5 +1017,86 @@ class HttpClientAuthTest {
                 }
             assertTrue(resultExplicitSkip is NetworkResult.Failure)
             assertFalse(invalidationCalled)
+        }
+
+    @Test
+    fun listenerFailureDoesNotCorruptPrimary403Response() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            val throwingListener =
+                AccessInvalidationListener { _, _ ->
+                    throw RuntimeException("Secondary listener error")
+                }
+            val dispatcher = AccessInvalidationDispatcher().apply { addListener(throwingListener) }
+
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    debugMode = true,
+                    allowInsecureTransport = true,
+                    accessInvalidationListener = dispatcher,
+                    engine =
+                        MockEngine {
+                            respond(
+                                content = """{"error":"PERMISSION_DENIED"}""",
+                                status = HttpStatusCode.Forbidden,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        },
+                )
+
+            val result =
+                client.safeRequest<TestData> {
+                    get("https://api.example.com/api/v1/companies/c1/events")
+                }
+
+            assertTrue(result is NetworkResult.Failure)
+            val error = result.error
+            assertTrue(error is NetworkError.Http)
+            assertEquals(403, error.statusCode)
+        }
+
+    @Test
+    fun specialCharactersInCompanyIdAreCorrectlyDecodedInSafeRequest() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val sessionManager = SessionManager(storage)
+            var reportedCompanyId: String? = null
+            val listener =
+                AccessInvalidationListener { _, companyId ->
+                    reportedCompanyId = companyId
+                }
+            val dispatcher = AccessInvalidationDispatcher().apply { addListener(listener) }
+
+            val client =
+                HttpClientFactory.createApiClient(
+                    sessionManager = sessionManager,
+                    apiBaseUrl = baseUrl,
+                    debugMode = true,
+                    allowInsecureTransport = true,
+                    accessInvalidationListener = dispatcher,
+                    engine =
+                        MockEngine {
+                            respond(
+                                content = """{"error":"PERMISSION_DENIED"}""",
+                                status = HttpStatusCode.Forbidden,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        },
+                )
+
+            // Percent-encoded space in companyId: comp%20123
+            client.safeRequest<TestData> {
+                get("https://api.example.com/api/v1/companies/comp%20123/events")
+            }
+            assertEquals("comp 123", reportedCompanyId)
+
+            // Percent-encoded slash in companyId: comp%2Fspecial
+            client.safeRequest<TestData> {
+                get("https://api.example.com/api/v1/companies/comp%2Fspecial/events")
+            }
+            assertEquals("comp/special", reportedCompanyId)
         }
 }

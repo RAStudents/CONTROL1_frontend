@@ -21,6 +21,7 @@ import studio.acmenra.control.core.access.domain.model.TenantContextState
 import studio.acmenra.control.core.access.domain.model.TenantPermission
 import studio.acmenra.control.core.access.domain.repository.AccessRepository
 import studio.acmenra.control.core.access.domain.usecase.impl.CheckPermissionUseCaseImpl
+import studio.acmenra.control.core.access.domain.usecase.impl.EnsureTenantContextUseCaseImpl
 import studio.acmenra.control.core.access.domain.usecase.impl.ObserveGlobalAccessUseCaseImpl
 import studio.acmenra.control.core.access.domain.usecase.impl.ObserveTenantContextUseCaseImpl
 import studio.acmenra.control.core.access.domain.usecase.impl.RefreshTenantUseCaseImpl
@@ -121,6 +122,7 @@ class AccessUseCasesTest {
     private val observeGlobalAccessUseCase = ObserveGlobalAccessUseCaseImpl(accessManager)
     private val observeTenantContextUseCase = ObserveTenantContextUseCaseImpl(coordinator)
     private val selectTenantUseCase = SelectTenantUseCaseImpl(coordinator)
+    private val ensureTenantContextUseCase = EnsureTenantContextUseCaseImpl(coordinator)
     private val refreshTenantUseCase = RefreshTenantUseCaseImpl(coordinator)
     private val checkPermissionUseCase = CheckPermissionUseCaseImpl(coordinator)
 
@@ -138,6 +140,15 @@ class AccessUseCasesTest {
 
             refreshTenantUseCase(force = true)
             assertEquals(1, repo.refreshCount)
+        }
+
+    @Test
+    fun ensureTenantContextSelectsCompanyWhenNotSelected() =
+        runTest {
+            ensureTenantContextUseCase("c1")
+            val state = observeTenantContextUseCase().value
+            assertTrue(state is TenantContextState.Authorized)
+            assertEquals("c1", state.context.companyId)
         }
 
     @Test

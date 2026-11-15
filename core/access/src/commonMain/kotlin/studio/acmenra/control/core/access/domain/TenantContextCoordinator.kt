@@ -21,11 +21,13 @@ import kotlinx.coroutines.withContext
 import studio.acmenra.control.core.access.domain.concurrent.TenantRequestKey
 import studio.acmenra.control.core.access.domain.concurrent.TenantSingleFlight
 import studio.acmenra.control.core.access.domain.model.AccessDomainError
+import studio.acmenra.control.core.access.domain.model.AccessOrigin
 import studio.acmenra.control.core.access.domain.model.AccessStatus
 import studio.acmenra.control.core.access.domain.model.AuthorizedTenantContext
 import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
 import studio.acmenra.control.core.access.domain.model.CompanyStatus
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
+import studio.acmenra.control.core.access.domain.model.GlobalPermission
 import studio.acmenra.control.core.access.domain.model.RestrictionType
 import studio.acmenra.control.core.access.domain.model.SupportGrantStatus
 import studio.acmenra.control.core.access.domain.model.TenantContextState
@@ -624,6 +626,29 @@ class TenantContextCoordinator(
         context: AuthorizedTenantContext,
         sessionRevision: Long = -1L,
     ) {
+        val currentUserContext = accessManager.currentUserContext()
+        val hasCompaniesManage =
+            currentUserContext?.globalPermissions?.contains(GlobalPermission.COMPANIES_MANAGE) == true
+        val hasRogueVendorGlobalOrigin =
+            domain.activeOrigins.contains(AccessOrigin.VENDOR_GLOBAL) && !hasCompaniesManage
+        val hasLegitimateOrigins =
+            domain.activeOrigins.any {
+                it == AccessOrigin.DIRECT_MEMBERSHIP || it == AccessOrigin.SUPPORT_GRANT
+            }
+        if (hasRogueVendorGlobalOrigin && !hasLegitimateOrigins) {
+            expirationJob?.cancel()
+            expirationJob = null
+            setTenantStateLocked(
+                TenantContextState.Restricted.AccessDenied(
+                    companyId = companyId,
+                    companyName = domain.companyName,
+                    canSwitchCompany = canSwitch,
+                ),
+                sessionRevision,
+            )
+            return
+        }
+
         val isAuthorized =
             when {
                 domain.companyStatus == CompanyStatus.RESTRICTED -> {

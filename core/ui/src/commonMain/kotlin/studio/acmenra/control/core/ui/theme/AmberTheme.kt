@@ -200,6 +200,16 @@ object AmberDimens {
     val NoticeTimerHeight = 3.dp
     val NoticeVerticalPadding = 12.dp
     val NoticeContentGap = 12.dp
+
+    val RestrictedIconSize = 64.dp
+    val RestrictedCardMaxWidth = 480.dp
+    val SupportBannerMinHeight = 48.dp
+    val SupportBannerCountdownMinWidth = 60.dp
+    val CompanySwitcherWidth = 240.dp
+    val CompanySwitcherHeight = 40.dp
+    val OutlinedBorderWidth = 1.dp
+    val StatusBadgePaddingHorizontal = 8.dp
+    val StatusBadgePaddingVertical = 2.dp
 }
 
 // FontFamily.Default is Roboto on Android only. On web bundle Roboto in composeResources/font

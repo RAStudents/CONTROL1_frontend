@@ -6,6 +6,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -37,5 +38,25 @@ fun AmberButton(
                 style = MaterialTheme.typography.labelLarge,
             )
         }
+    }
+}
+
+@Composable
+fun AmberOutlinedButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.height(AmberDimens.ButtonHeight),
+        enabled = enabled,
+        shape = MaterialTheme.shapes.medium,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelLarge,
+        )
     }
 }

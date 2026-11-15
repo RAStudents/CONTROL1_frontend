@@ -6,4 +6,58 @@
     <string name="password_show">Показать пароль</string>
     <string name="password_hide">Скрыть пароль</string>
     <string name="nav_item_events">События</string>
+    <string name="nav_item_companies">Компании</string>
+
+    <!-- Support Override Banner -->
+    <string name="support_banner_title">Режим технической поддержки</string>
+    <string name="support_ticket_label">Тикет: %1$s</string>
+    <string name="support_mode_readonly">Только чтение</string>
+    <string name="support_mode_engineering">Инженерный доступ</string>
+    <string name="support_mode_unknown">Поддержка</string>
+    <string name="support_remaining_time">Осталось: %1$s</string>
+    <string name="support_grant_expired">Срок действия истек</string>
+    <string name="status_support_grant_active">Поддержка активна</string>
+
+    <!-- Company Switcher -->
+    <string name="company_switcher_label">Компания</string>
+    <string name="company_switcher_select">Выбрать компанию</string>
+    <string name="company_switcher_open">Выбрать компанию</string>
+    <string name="company_switcher_all_vendor">Все компании (Вендор)</string>
+    <string name="company_switcher_dialog_title">Выбор компании</string>
+    <string name="company_switcher_search_placeholder">Поиск компании...</string>
+    <string name="company_search_no_results">Компании не найдены</string>
+    <string name="company_status_active">Активна</string>
+    <string name="company_status_restricted">Ограничена</string>
+
+    <!-- Events Screen Top Bar Actions -->
+    <string name="events_export_csv">Экспорт CSV</string>
+    <string name="events_show_statistics">Показать статистику</string>
+    <string name="events_filter_tune">Фильтры</string>
+
+    <!-- Restricted Screens -->
+    <string name="restricted_company_frozen_title">Компания заблокирована</string>
+    <string name="restriction_billing_debt">Задолженность по оплате</string>
+    <string name="restriction_maintenance">Техническое обслуживание</string>
+    <string name="restriction_admin_blocked">Заблокировано администратором</string>
+    <string name="restriction_terms_violation">Нарушение условий использования</string>
+    <string name="restriction_unknown">Ограничение доступа</string>
+    <string name="restriction_reason_label">Причина: %1$s</string>
+    <string name="restriction_until_label">Действует до: %1$s</string>
+    <string name="restriction_contact_label">Служба поддержки: %1$s</string>
+    <string name="restricted_access_denied_title">Доступ к компании запрещен</string>
+    <string name="restricted_access_denied_desc">У вас нет прав для доступа к данной компании.</string>
+    <string name="restricted_no_permissions_title">Недостаточно прав</string>
+    <string name="restricted_no_permissions_desc">У вашей учетной записи нет необходимых разрешений для просмотра данного раздела.</string>
+    <string name="restricted_account_frozen_title">Аккаунт заблокирован</string>
+    <string name="restricted_account_frozen_desc">Действие вашей учетной записи временно приостановлено.</string>
+    <string name="restricted_no_companies_title">Нет доступных компаний</string>
+    <string name="restricted_no_companies_desc">Вы не состоите ни в одной компании.</string>
+    <string name="tenant_error_title">Ошибка загрузки данных компании</string>
+    <string name="action_switch_company">Сменить компанию</string>
+    <string name="action_retry">Повторить</string>
+    <string name="action_logout">Выйти</string>
+    <string name="action_copy">Копировать</string>
+    <string name="notice_copied_to_clipboard">Скопировано в буфер обмена</string>
+    <string name="dialog_select_company_title">Выбор компании</string>
+    <string name="dialog_close">Отмена</string>
 </resources>

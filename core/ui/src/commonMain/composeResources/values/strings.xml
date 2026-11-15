@@ -6,4 +6,58 @@
     <string name="password_show">Show password</string>
     <string name="password_hide">Hide password</string>
     <string name="nav_item_events">Events</string>
+    <string name="nav_item_companies">Companies</string>
+
+    <!-- Support Override Banner -->
+    <string name="support_banner_title">Technical Support Override</string>
+    <string name="support_ticket_label">Ticket: %1$s</string>
+    <string name="support_mode_readonly">Read-only</string>
+    <string name="support_mode_engineering">Engineering</string>
+    <string name="support_mode_unknown">Support</string>
+    <string name="support_remaining_time">Remaining: %1$s</string>
+    <string name="support_grant_expired">Override expired</string>
+    <string name="status_support_grant_active">Support Active</string>
+
+    <!-- Company Switcher -->
+    <string name="company_switcher_label">Company</string>
+    <string name="company_switcher_select">Select company</string>
+    <string name="company_switcher_open">Select company</string>
+    <string name="company_switcher_all_vendor">All companies (Vendor)</string>
+    <string name="company_switcher_dialog_title">Select Company</string>
+    <string name="company_switcher_search_placeholder">Search company...</string>
+    <string name="company_search_no_results">No companies found</string>
+    <string name="company_status_active">Active</string>
+    <string name="company_status_restricted">Restricted</string>
+
+    <!-- Events Screen Top Bar Actions -->
+    <string name="events_export_csv">Export CSV</string>
+    <string name="events_show_statistics">Show statistics</string>
+    <string name="events_filter_tune">Filters</string>
+
+    <!-- Restricted Screens -->
+    <string name="restricted_company_frozen_title">Company is suspended</string>
+    <string name="restriction_billing_debt">Billing debt</string>
+    <string name="restriction_maintenance">Maintenance in progress</string>
+    <string name="restriction_admin_blocked">Blocked by administrator</string>
+    <string name="restriction_terms_violation">Terms of service violation</string>
+    <string name="restriction_unknown">Access restricted</string>
+    <string name="restriction_reason_label">Reason: %1$s</string>
+    <string name="restriction_until_label">Active until: %1$s</string>
+    <string name="restriction_contact_label">Support contact: %1$s</string>
+    <string name="restricted_access_denied_title">Access to company denied</string>
+    <string name="restricted_access_denied_desc">You do not have permission to access this company.</string>
+    <string name="restricted_no_permissions_title">Insufficient permissions</string>
+    <string name="restricted_no_permissions_desc">Your account does not have the required permissions to view this section.</string>
+    <string name="restricted_account_frozen_title">Account is suspended</string>
+    <string name="restricted_account_frozen_desc">Your account has been temporarily suspended.</string>
+    <string name="restricted_no_companies_title">No companies available</string>
+    <string name="restricted_no_companies_desc">You are not a member of any company.</string>
+    <string name="tenant_error_title">Failed to load company data</string>
+    <string name="action_switch_company">Switch company</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_logout">Log out</string>
+    <string name="action_copy">Copy</string>
+    <string name="notice_copied_to_clipboard">Copied to clipboard</string>
+    <string name="dialog_select_company_title">Select Company</string>
+    <string name="dialog_close">Cancel</string>
 </resources>

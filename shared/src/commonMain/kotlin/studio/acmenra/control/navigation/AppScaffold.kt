@@ -64,13 +64,17 @@ fun AppScaffold(
     val backStackEntry by navController.currentBackStackEntryAsState()
     val destination = backStackEntry?.destination
 
-    val isLoginDestination = destination?.hasRoute<LoginRoute>() == true
-    val showNavigation = sessionState == SessionState.Authenticated && destination != null && !isLoginDestination
-    val currentContent by rememberUpdatedState(content)
-    val movableContent = remember { movableContentOf { currentContent() } }
-
     val globalState by observeGlobalAccessUseCase().collectAsState()
     val tenantState by observeTenantContextUseCase().collectAsState()
+
+    val isLoginDestination = destination?.hasRoute<LoginRoute>() == true
+    val showNavigation =
+        sessionState == SessionState.Authenticated &&
+            destination != null &&
+            !isLoginDestination &&
+            globalState is GlobalAccessState.Ready
+    val currentContent by rememberUpdatedState(content)
+    val movableContent = remember { movableContentOf { currentContent() } }
 
     val topBarState = remember { TopBarState() }
     var isCompanyDialogOpen by remember { mutableStateOf(false) }
@@ -102,7 +106,9 @@ fun AppScaffold(
     val isRestricted =
         tenantState is TenantContextState.Restricted ||
             currentCompanyStatus == CompanyStatus.RESTRICTED
-    val canSwitch = globalContext != null && globalContext.hasMultipleCompanies
+    val canSwitch =
+        globalContext != null &&
+            (globalContext.hasMultipleCompanies || TenantAccessResolver.canBrowseAll(globalContext))
 
     val isSupportOverrideActive =
         authorizedContext?.accessStatus == AccessStatus.ACTIVE_SUPPORT_OVERRIDE &&
@@ -112,7 +118,7 @@ fun AppScaffold(
 
     val isOnVendorDashboard =
         destination.hasRoute<CompaniesDashboardRoute>() &&
-            globalContext?.canBrowseAllCompanies == true
+            globalContext?.let { TenantAccessResolver.canBrowseAll(it) } == true
     val currentDestinationItem = visibleItems.firstOrNull { it.isSelected(destination) }
     val defaultTitle =
         when {

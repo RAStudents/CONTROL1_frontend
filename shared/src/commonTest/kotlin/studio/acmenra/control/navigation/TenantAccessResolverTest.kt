@@ -206,4 +206,59 @@ class TenantAccessResolverTest {
             )
         assertNull(fallback)
     }
+
+    @Test
+    fun testResolveFallbackWithMultipleExcludedCompanyIds() {
+        val user =
+            createUserContext(
+                memberCompanies =
+                    listOf(
+                        CompanyBrief("c1", "Acme 1", CompanyStatus.ACTIVE),
+                        CompanyBrief("c2", "Acme 2", CompanyStatus.ACTIVE),
+                        CompanyBrief("c3", "Acme 3", CompanyStatus.ACTIVE),
+                    ),
+                defaultCompanyId = "c1",
+            )
+
+        val fallback =
+            TenantAccessResolver.resolveFallbackCompanyId(
+                userContext = user,
+                previousAuthorizedCompanyId = null,
+                excludedCompanyIds = setOf("c1", "c2"),
+            )
+        assertEquals("c3", fallback)
+    }
+
+    @Test
+    fun testResolveFallbackWithAllCompanyIdsExcludedReturnsNull() {
+        val user =
+            createUserContext(
+                memberCompanies =
+                    listOf(
+                        CompanyBrief("c1", "Acme 1", CompanyStatus.ACTIVE),
+                        CompanyBrief("c2", "Acme 2", CompanyStatus.ACTIVE),
+                    ),
+                defaultCompanyId = "c1",
+            )
+
+        val fallback =
+            TenantAccessResolver.resolveFallbackCompanyId(
+                userContext = user,
+                previousAuthorizedCompanyId = null,
+                excludedCompanyIds = setOf("c1", "c2"),
+            )
+        assertNull(fallback)
+    }
+
+    @Test
+    fun testCanBrowseAllForVendorAdminAndRegularUser() {
+        val regular = createUserContext()
+        assertFalse(TenantAccessResolver.canBrowseAll(regular))
+
+        val vendor = createVendorAdminContext()
+        assertTrue(TenantAccessResolver.canBrowseAll(vendor))
+
+        val userWithBrowseFlag = createUserContext().copy(canBrowseAllCompanies = true)
+        assertTrue(TenantAccessResolver.canBrowseAll(userWithBrowseFlag))
+    }
 }

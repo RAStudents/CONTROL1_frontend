@@ -7,6 +7,9 @@ object TenantAccessResolver {
     fun isVendorAdmin(userContext: GlobalUserContext): Boolean =
         userContext.globalPermissions.contains(GlobalPermission.COMPANIES_MANAGE)
 
+    fun canBrowseAll(userContext: GlobalUserContext): Boolean =
+        userContext.canBrowseAllCompanies || isVendorAdmin(userContext)
+
     fun hasAccess(
         userContext: GlobalUserContext,
         companyId: String,
@@ -20,10 +23,18 @@ object TenantAccessResolver {
         userContext: GlobalUserContext,
         previousAuthorizedCompanyId: String?,
         excludedCompanyId: String? = null,
+        excludedCompanyIds: Set<String> = emptySet(),
     ): String? {
+        val allExcluded =
+            if (excludedCompanyId != null) {
+                excludedCompanyIds + excludedCompanyId
+            } else {
+                excludedCompanyIds
+            }
+
         val isPreviousValid =
             previousAuthorizedCompanyId != null &&
-                previousAuthorizedCompanyId != excludedCompanyId &&
+                previousAuthorizedCompanyId !in allExcluded &&
                 (
                     isVendorAdmin(userContext) ||
                         userContext.memberCompanies.any { it.id == previousAuthorizedCompanyId }
@@ -34,11 +45,11 @@ object TenantAccessResolver {
 
         val defaultAccessible =
             userContext.defaultCompanyId?.takeIf { defId ->
-                defId != excludedCompanyId &&
+                defId !in allExcluded &&
                     (isVendorAdmin(userContext) || userContext.memberCompanies.any { it.id == defId })
             }
 
         return defaultAccessible
-            ?: userContext.memberCompanies.firstOrNull { it.id != excludedCompanyId }?.id
+            ?: userContext.memberCompanies.firstOrNull { it.id !in allExcluded }?.id
     }
 }

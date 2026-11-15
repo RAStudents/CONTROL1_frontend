@@ -60,4 +60,12 @@
     <string name="notice_copied_to_clipboard">Copied to clipboard</string>
     <string name="dialog_select_company_title">Select Company</string>
     <string name="dialog_close">Cancel</string>
+
+    <!-- Vendor Dashboard -->
+    <string name="vendor_dashboard_title">Companies Dashboard</string>
+    <string name="vendor_dashboard_subtitle">Vendor administration and company management</string>
+    <string name="vendor_dashboard_companies_header">Managed Companies</string>
+    <string name="vendor_dashboard_empty">No companies registered in the system</string>
+    <string name="vendor_dashboard_badge">Vendor Mode</string>
+    <string name="vendor_dashboard_search_placeholder">Search companies...</string>
 </resources>

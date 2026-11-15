@@ -11,12 +11,14 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
+import studio.acmenra.control.core.access.domain.AccessManager
 import studio.acmenra.control.core.access.domain.model.AuthorizedTenantContext
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
 import studio.acmenra.control.core.access.domain.model.RoutePermissionRequirement
@@ -44,6 +46,7 @@ fun TenantRouteGuard(
     observeGlobalAccessUseCase: ObserveGlobalAccessUseCase = koinInject(),
     observeTenantContextUseCase: ObserveTenantContextUseCase = koinInject(),
     ensureTenantContextUseCase: EnsureTenantContextUseCase = koinInject(),
+    accessManager: AccessManager = koinInject(),
     sessionManager: SessionManager = koinInject(),
     content: @Composable (AuthorizedTenantContext) -> Unit,
 ) {
@@ -52,10 +55,11 @@ fun TenantRouteGuard(
     val scope = rememberCoroutineScope()
 
     var showCompanyDialog by remember { mutableStateOf(false) }
+    var deniedCompanyIds by rememberSaveable { mutableStateOf(emptySet<String>()) }
 
     val readyContext = (globalState as? GlobalAccessState.Ready)?.context
     val memberCompanies = readyContext?.memberCompanies.orEmpty()
-    val canBrowseAllCompanies = readyContext?.canBrowseAllCompanies == true
+    val canBrowseAllCompanies = readyContext?.let { TenantAccessResolver.canBrowseAll(it) } == true
     val hasMultipleCompanies = readyContext?.hasMultipleCompanies == true
     val canSwitchCompany = hasMultipleCompanies || canBrowseAllCompanies
 
@@ -127,7 +131,11 @@ fun TenantRouteGuard(
                 canSwitchCompany = false,
                 onRetry = {
                     scope.launch {
-                        ensureTenantContextUseCase(requestedCompanyId)
+                        if (requestedCompanyId.isNotBlank()) {
+                            ensureTenantContextUseCase(requestedCompanyId)
+                        } else {
+                            accessManager.refreshGlobalContext(force = true)
+                        }
                     }
                 },
                 onLogout = onLogoutAction,
@@ -150,7 +158,7 @@ fun TenantRouteGuard(
                 onNavigateToCompany(resolvedId)
             }
             LoadingPlaceholder(modifier)
-        } else if (userContext.canBrowseAllCompanies) {
+        } else if (TenantAccessResolver.canBrowseAll(userContext)) {
             LaunchedEffect(Unit) {
                 onNavigateToCompaniesDashboard()
             }
@@ -169,18 +177,19 @@ fun TenantRouteGuard(
     val hasAccessToRequested = TenantAccessResolver.hasAccess(userContext, requestedCompanyId)
     if (!hasAccessToRequested) {
         val previousAuthorizedCompanyId = (tenantState as? TenantContextState.Authorized)?.context?.companyId
+        val currentExcluded = deniedCompanyIds + requestedCompanyId
         val fallbackCompanyId =
             TenantAccessResolver.resolveFallbackCompanyId(
                 userContext = userContext,
                 previousAuthorizedCompanyId = previousAuthorizedCompanyId,
-                excludedCompanyId = requestedCompanyId,
+                excludedCompanyIds = currentExcluded,
             )
-        if (fallbackCompanyId != null) {
+        if (fallbackCompanyId != null && fallbackCompanyId !in currentExcluded) {
             LaunchedEffect(requestedCompanyId, fallbackCompanyId) {
                 onNavigateToCompany(fallbackCompanyId)
             }
             LoadingPlaceholder(modifier)
-        } else if (userContext.canBrowseAllCompanies) {
+        } else if (TenantAccessResolver.canBrowseAll(userContext)) {
             LaunchedEffect(requestedCompanyId) {
                 onNavigateToCompaniesDashboard()
             }
@@ -257,18 +266,23 @@ fun TenantRouteGuard(
             if (state.companyId != requestedCompanyId) {
                 LoadingPlaceholder(modifier)
             } else {
+                LaunchedEffect(requestedCompanyId) {
+                    deniedCompanyIds = deniedCompanyIds + requestedCompanyId
+                }
+
+                val currentExcluded = deniedCompanyIds + requestedCompanyId
                 val fallbackCompanyId =
                     TenantAccessResolver.resolveFallbackCompanyId(
                         userContext = userContext,
                         previousAuthorizedCompanyId = null,
-                        excludedCompanyId = requestedCompanyId,
+                        excludedCompanyIds = currentExcluded,
                     )
-                if (fallbackCompanyId != null && fallbackCompanyId != requestedCompanyId) {
+                if (fallbackCompanyId != null && fallbackCompanyId !in currentExcluded) {
                     LaunchedEffect(requestedCompanyId, fallbackCompanyId) {
                         onNavigateToCompany(fallbackCompanyId)
                     }
                     LoadingPlaceholder(modifier)
-                } else if (userContext.canBrowseAllCompanies) {
+                } else if (TenantAccessResolver.canBrowseAll(userContext)) {
                     LaunchedEffect(requestedCompanyId) {
                         onNavigateToCompaniesDashboard()
                     }
@@ -288,17 +302,22 @@ fun TenantRouteGuard(
         is TenantContextState.Authorized -> {
             if (state.context.companyId != requestedCompanyId) {
                 LoadingPlaceholder(modifier)
-            } else if (requirement != null && !requirement.isSatisfiedBy(state.context)) {
-                NoPermissionsScreen(
-                    companyName = state.context.companyName,
-                    canSwitchCompany = canSwitchCompany,
-                    onSwitchCompany = onSwitchCompanyAction,
-                    onLogout = onLogoutAction,
-                    modifier = modifier,
-                )
             } else {
-                key(state.context.companyId) {
-                    content(state.context)
+                if (deniedCompanyIds.isNotEmpty()) {
+                    deniedCompanyIds = emptySet()
+                }
+                if (requirement != null && !requirement.isSatisfiedBy(state.context)) {
+                    NoPermissionsScreen(
+                        companyName = state.context.companyName,
+                        canSwitchCompany = canSwitchCompany,
+                        onSwitchCompany = onSwitchCompanyAction,
+                        onLogout = onLogoutAction,
+                        modifier = modifier,
+                    )
+                } else {
+                    key(state.context.companyId) {
+                        content(state.context)
+                    }
                 }
             }
         }

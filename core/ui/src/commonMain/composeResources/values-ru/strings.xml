@@ -60,4 +60,12 @@
     <string name="notice_copied_to_clipboard">Скопировано в буфер обмена</string>
     <string name="dialog_select_company_title">Выбор компании</string>
     <string name="dialog_close">Отмена</string>
+
+    <!-- Vendor Dashboard -->
+    <string name="vendor_dashboard_title">Дашборд компаний</string>
+    <string name="vendor_dashboard_subtitle">Режим администратора поставщика и управление компаниями</string>
+    <string name="vendor_dashboard_companies_header">Управляемые компании</string>
+    <string name="vendor_dashboard_empty">В системе нет зарегистрированных компаний</string>
+    <string name="vendor_dashboard_badge">Режим вендора</string>
+    <string name="vendor_dashboard_search_placeholder">Поиск по компаниям...</string>
 </resources>

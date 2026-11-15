@@ -29,7 +29,7 @@ fun VendorRouteGuard(
         }
 
         is GlobalAccessState.Ready -> {
-            if (state.context.canBrowseAllCompanies || TenantAccessResolver.isVendorAdmin(state.context)) {
+            if (TenantAccessResolver.canBrowseAll(state.context)) {
                 content(state.context)
             } else {
                 LaunchedEffect(Unit) {

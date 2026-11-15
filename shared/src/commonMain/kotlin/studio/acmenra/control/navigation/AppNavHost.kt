@@ -19,6 +19,7 @@ import studio.acmenra.control.core.access.domain.model.TenantPermission
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.feature.auth.presentation.LoginRouteContent
 import studio.acmenra.control.feature.events.presentation.EventsRouteContent
+import studio.acmenra.control.navigation.screen.CompaniesDashboardScreen
 
 @Composable
 fun AppNavHost(
@@ -92,20 +93,14 @@ fun AppNavHost(
             if (sessionState == SessionState.Authenticated) {
                 VendorRouteGuard(
                     onAccessDenied = {
-                        navController.navigate(EventsRoute()) {
-                            popUpTo<CompaniesDashboardRoute> {
-                                inclusive = true
-                            }
-                            launchSingleTop = true
-                        }
+                        navController.navigateToEvents()
                     },
                 ) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        CircularProgressIndicator()
-                    }
+                    CompaniesDashboardScreen(
+                        onSelectCompany = { companyId ->
+                            navController.navigateToEvents(companyId)
+                        },
+                    )
                 }
             } else {
                 Box(

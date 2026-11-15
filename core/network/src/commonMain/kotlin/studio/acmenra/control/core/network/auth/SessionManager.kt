@@ -19,8 +19,6 @@ class SessionManager(
     @kotlin.concurrent.Volatile
     private var currentRevision: Long = 0L
 
-    fun currentSessionRevision(): Long = currentRevision
-
     fun currentRevision(): Long = currentRevision
 
     private val _sessionState =
@@ -39,8 +37,6 @@ class SessionManager(
             if (!tokens.isValid()) return null
             SessionSnapshot(tokens = tokens, revision = currentRevision)
         }
-
-    suspend fun getSessionSnapshot(): SessionSnapshot? = getSnapshot()
 
     suspend fun saveSession(tokens: TokenPair): SessionSnapshot =
         mutex.withLock {

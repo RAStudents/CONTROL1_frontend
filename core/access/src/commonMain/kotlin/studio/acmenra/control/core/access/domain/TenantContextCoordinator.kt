@@ -168,7 +168,7 @@ class TenantContextCoordinator(
         requestEpoch: Long,
         requestSessionRevision: Long,
     ) {
-        val snapshot = sessionManager.getSessionSnapshot()
+        val snapshot = sessionManager.getSnapshot()
         if (snapshot == null) {
             mutex.withLock {
                 val latest = _tenantState.value
@@ -630,10 +630,11 @@ class TenantContextCoordinator(
                     domain.accessStatus == AccessStatus.ACTIVE_SUPPORT_OVERRIDE &&
                         context.supportGrant != null &&
                         !context.isSupportGrantLocallyExpired &&
-                        (
-                            context.restriction?.type != RestrictionType.BILLING_DEBT ||
-                                context.supportGrant.allowBillingOverride
-                        )
+                        when (context.restriction?.type) {
+                            RestrictionType.MAINTENANCE -> true
+                            RestrictionType.BILLING_DEBT -> context.supportGrant.allowBillingOverride
+                            else -> false
+                        }
                 }
 
                 domain.companyStatus == CompanyStatus.ACTIVE -> {

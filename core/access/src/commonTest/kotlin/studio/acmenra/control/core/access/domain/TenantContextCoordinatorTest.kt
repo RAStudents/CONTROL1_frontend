@@ -1295,6 +1295,73 @@ class TenantContextCoordinatorTest {
         }
 
     @Test
+    fun adminBlockedRestrictionRejectsSupportOverrideFailClosed() =
+        runTest {
+            val adminBlockedRestriction =
+                AccessRestriction(
+                    type = RestrictionType.ADMIN_BLOCKED,
+                    reason = "Administrative ban",
+                    restrictedAt = null,
+                    untilAt = null,
+                    supportContact = null,
+                )
+
+            val domain =
+                CompanyAccessDomain(
+                    companyId = "c1",
+                    companyName = "Company 1",
+                    serverTime = Instant.fromEpochMilliseconds(0),
+                    revision = "rev_1",
+                    companyStatus = CompanyStatus.RESTRICTED,
+                    accessStatus = AccessStatus.ACTIVE_SUPPORT_OVERRIDE,
+                    activeOrigins = setOf(AccessOrigin.SUPPORT_GRANT),
+                    restriction = adminBlockedRestriction,
+                    tenantPermissions = emptySet(),
+                    supportPermissions = setOf(SupportPermission.DEVICE_DIAGNOSTICS),
+                    permissionSources = emptyMap(),
+                    supportGrant =
+                        SupportGrantInfo(
+                            grantId = "g_admin",
+                            status = SupportGrantStatus.ACTIVE,
+                            mode = SupportMode.ENGINEERING_SUPPORT,
+                            ticketReference = "TICKET-ADMIN",
+                            allowBillingOverride = true,
+                            grantedByUserId = "superadmin",
+                            grantedAt = null,
+                            expiresAt = null,
+                            remainingTtlSec = 300,
+                            revokedAt = null,
+                            fetchedAtMark = timeSource.markNow(),
+                        ),
+                )
+
+            repository.handler = { _ -> NetworkResult.Success(domain) }
+            coordinator.selectTenant("c1")
+
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Restricted.CompanyFrozen)
+            assertEquals(RestrictionType.ADMIN_BLOCKED, state.restriction?.type)
+        }
+
+    @Test
+    fun companyAccessDeniedErrorCodeTransitionsToAccessDenied() =
+        runTest {
+            repository.handler = { companyId ->
+                NetworkResult.Failure(
+                    NetworkError.Http(
+                        statusCode = 403,
+                        errorBody = """{"error":"COMPANY_ACCESS_DENIED","company_id":"$companyId"}""",
+                    ),
+                )
+            }
+
+            coordinator.selectTenant("c1")
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Restricted.AccessDenied)
+            assertEquals("c1", state.companyId)
+        }
+
+    @Test
     fun userSwitchWithoutLogoutResetsNonNotSelectedTenantStates() =
         runTest {
             repository.handler = { _ ->

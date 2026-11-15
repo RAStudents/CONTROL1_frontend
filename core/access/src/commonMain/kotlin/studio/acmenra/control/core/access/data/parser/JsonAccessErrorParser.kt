@@ -26,7 +26,7 @@ class JsonAccessErrorParser(
                     restriction = dto.restriction?.let(mapper::mapRestriction),
                 )
 
-            "ACCESS_DENIED" ->
+            "ACCESS_DENIED", "COMPANY_ACCESS_DENIED" ->
                 AccessDomainError.AccessDenied(
                     companyId = dto.companyId,
                 )

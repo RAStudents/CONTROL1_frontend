@@ -207,7 +207,7 @@
 Для надежного извлечения `companyId` из URL запроса используется регулярное выражение с поддержкой базовых путей:
 ```kotlin
 private val TENANT_ENDPOINT_REGEX =
-    Regex("(?:^|/)(?:api/v\\d+/)?companies/([^/]+)(?:/.*)?$")
+    Regex("^(?:.*?/)?(?:api/v\\d+/)?companies/([^/]+)(?:/.*)?$")
 
 private val RESERVED_COMPANY_SEGMENTS =
     setOf("health", "metrics", "status", "check", "ping", "all", "me", "search")
@@ -230,7 +230,10 @@ private val RESERVED_COMPANY_SEGMENTS =
 Локальное истечение гранта вычисляется динамически на клиенте без обращения к часам ОС (устойчиво к переводу времени пользователем):
 ```kotlin
 val isSupportGrantLocallyExpired: Boolean
-    get() = supportGrant?.isExpiredNow() == true
+    get() =
+        supportGrant?.let {
+            it.runtimeState == SupportGrantRuntimeState.ExpiredLocally || it.isExpiredNow()
+        } ?: false
 ```
 
 ### 6.2. Фоновый таймер экспирации

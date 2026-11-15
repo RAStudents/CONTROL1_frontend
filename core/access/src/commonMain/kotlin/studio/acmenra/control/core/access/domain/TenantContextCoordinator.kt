@@ -88,16 +88,6 @@ class TenantContextCoordinator(
                 }
             }
         }
-        scope.launch {
-            accessManager.globalState.collect { globalState ->
-                if (globalState is GlobalAccessState.Ready) {
-                    val current = _tenantState.value
-                    if (current is TenantContextState.Loading && activeSelectionJob == null) {
-                        selectTenant(current.requestedCompanyId)
-                    }
-                }
-            }
-        }
     }
 
     suspend fun ensureTenantContext(requestedCompanyId: String) {
@@ -226,6 +216,14 @@ class TenantContextCoordinator(
                             is GlobalAccessState.Restricted.NoCompaniesAvailable -> {
                                 TenantContextState.Restricted.AccessDenied(
                                     companyId = companyId,
+                                    canSwitchCompany = false,
+                                )
+                            }
+
+                            is GlobalAccessState.Error -> {
+                                TenantContextState.Error(
+                                    companyId = companyId,
+                                    error = globalState.error,
                                     canSwitchCompany = false,
                                 )
                             }
@@ -460,6 +458,14 @@ class TenantContextCoordinator(
                                 )
                             }
 
+                            is GlobalAccessState.Error -> {
+                                TenantContextState.Error(
+                                    companyId = companyId,
+                                    error = globalState.error,
+                                    canSwitchCompany = false,
+                                )
+                            }
+
                             else -> {
                                 TenantContextState.Error(
                                     companyId = companyId,
@@ -628,15 +634,43 @@ class TenantContextCoordinator(
         }
     }
 
-    private fun applyDomainResultLocked(
+    private suspend fun applyDomainResultLocked(
         domain: CompanyAccessDomain,
         companyId: String,
         canSwitch: Boolean,
         context: AuthorizedTenantContext,
         sessionRevision: Long = -1L,
     ) {
-        val currentUserContext = accessManager.currentUserContext()
-        val isRogue = TenantAccessValidator.isRogueVendorOrigin(domain.activeOrigins, currentUserContext)
+        var currentUserContext = accessManager.currentUserContext()
+        var isRogue = TenantAccessValidator.isRogueVendorOrigin(domain.activeOrigins, currentUserContext)
+        if (isRogue == null) {
+            val refreshResult = accessManager.refreshGlobalContext(force = true)
+            val currentRev = sessionManager.currentRevision()
+            if (currentRev != sessionRevision) {
+                return
+            }
+            currentUserContext = accessManager.currentUserContext()
+            isRogue = TenantAccessValidator.isRogueVendorOrigin(domain.activeOrigins, currentUserContext)
+            if (isRogue == null) {
+                expirationJob?.cancel()
+                expirationJob = null
+                val error =
+                    (refreshResult as? NetworkResult.Failure)?.error
+                        ?: NetworkError.Unknown(
+                            message = "Global user context is not available for origin validation",
+                        )
+                setTenantStateLocked(
+                    TenantContextState.Error(
+                        companyId = companyId,
+                        error = error,
+                        canSwitchCompany = canSwitch,
+                    ),
+                    sessionRevision,
+                )
+                return
+            }
+        }
+
         if (isRogue == true) {
             expirationJob?.cancel()
             expirationJob = null
@@ -648,23 +682,6 @@ class TenantContextCoordinator(
                 ),
                 sessionRevision,
             )
-            return
-        } else if (isRogue == null) {
-            expirationJob?.cancel()
-            expirationJob = null
-            setTenantStateLocked(
-                TenantContextState.Loading(requestedCompanyId = companyId),
-                sessionRevision,
-            )
-            val global = accessManager.globalState.value
-            val isAlreadyLoading =
-                global is GlobalAccessState.InitialLoading ||
-                    (global is GlobalAccessState.Ready && global.isRefreshing)
-            if (!isAlreadyLoading) {
-                scope.launch {
-                    accessManager.refreshGlobalContext(force = true)
-                }
-            }
             return
         }
 

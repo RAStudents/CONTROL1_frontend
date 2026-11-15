@@ -12,6 +12,7 @@ import studio.acmenra.control.core.access.domain.usecase.CheckPermissionUseCase
 import studio.acmenra.control.core.access.domain.usecase.EnsureTenantContextUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveTenantContextUseCase
+import studio.acmenra.control.core.access.domain.usecase.RefreshGlobalAccessUseCase
 import studio.acmenra.control.core.access.domain.usecase.RefreshTenantUseCase
 import studio.acmenra.control.core.access.domain.usecase.SelectTenantUseCase
 import studio.acmenra.control.core.network.auth.AccessInvalidationDispatcher
@@ -123,6 +124,9 @@ class DiTest {
 
         val observeTenantContext: ObserveTenantContextUseCase = koin.get()
         assertNotNull(observeTenantContext)
+
+        val refreshGlobalAccess: RefreshGlobalAccessUseCase = koin.get()
+        assertNotNull(refreshGlobalAccess)
     }
 
     @Test

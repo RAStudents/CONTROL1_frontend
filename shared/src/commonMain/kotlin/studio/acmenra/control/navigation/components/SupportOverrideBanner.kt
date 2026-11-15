@@ -30,6 +30,7 @@ import studio.acmenra.control.core.access.domain.model.SupportGrantInfo
 import studio.acmenra.control.core.access.domain.model.SupportMode
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.ic_timer
+import studio.acmenra.control.core.ui.generated.resources.support_banner_details_format
 import studio.acmenra.control.core.ui.generated.resources.support_banner_title
 import studio.acmenra.control.core.ui.generated.resources.support_grant_expired
 import studio.acmenra.control.core.ui.generated.resources.support_mode_engineering
@@ -92,7 +93,7 @@ fun SupportOverrideBanner(
     ) {
         val detailsText =
             if (ticketText != null) {
-                "$modeText • $ticketText"
+                stringResource(Res.string.support_banner_details_format, modeText, ticketText)
             } else {
                 modeText
             }

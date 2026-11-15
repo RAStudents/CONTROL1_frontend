@@ -100,11 +100,11 @@ fun TenantRouteGuard(
         )
 
     val currentTenantCompanyId =
-        when (tenantState) {
-            is TenantContextState.Authorized -> (tenantState as TenantContextState.Authorized).context.companyId
-            is TenantContextState.Restricted -> (tenantState as TenantContextState.Restricted).companyId
-            is TenantContextState.Error -> (tenantState as TenantContextState.Error).companyId
-            is TenantContextState.Loading -> (tenantState as TenantContextState.Loading).requestedCompanyId
+        when (val state = tenantState) {
+            is TenantContextState.Authorized -> state.context.companyId
+            is TenantContextState.Restricted -> state.companyId
+            is TenantContextState.Error -> state.companyId
+            is TenantContextState.Loading -> state.requestedCompanyId
             is TenantContextState.NotSelected -> null
         }
 
@@ -113,9 +113,7 @@ fun TenantRouteGuard(
             globalState is GlobalAccessState.Ready &&
             TenantAccessResolver.hasAccess((globalState as GlobalAccessState.Ready).context, requestedCompanyId)
         ) {
-            if (currentTenantCompanyId != requestedCompanyId) {
-                ensureTenantContextUseCase(requestedCompanyId)
-            }
+            ensureTenantContextUseCase(requestedCompanyId)
         }
     }
 

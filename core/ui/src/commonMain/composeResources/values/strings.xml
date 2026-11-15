@@ -13,12 +13,13 @@
     <string name="support_mode_readonly">Read-only</string>
     <string name="support_mode_engineering">Engineering</string>
     <string name="support_mode_unknown">Support</string>
+    <string name="support_banner_details_format">%1$s • %2$s</string>
     <string name="support_remaining_time">Remaining: %1$s</string>
     <string name="support_grant_expired">Override expired</string>
 
     <!-- Company Switcher -->
     <string name="company_switcher_select">Select company</string>
-    <string name="company_switcher_open">Select company</string>
+    <string name="company_switcher_open">Open company selector</string>
     <string name="company_switcher_all_vendor">All companies (Vendor)</string>
     <string name="company_switcher_dialog_title">Select Company</string>
     <string name="company_switcher_search_placeholder">Search company...</string>
@@ -56,7 +57,7 @@
     <string name="action_logout">Log out</string>
     <string name="action_copy">Copy</string>
     <string name="notice_copied_to_clipboard">Copied to clipboard</string>
-    <string name="dialog_close">Cancel</string>
+    <string name="dialog_close">Close</string>
 
     <string name="error_network_connection">No internet connection</string>
     <string name="error_server_unavailable">Server is temporarily unavailable</string>

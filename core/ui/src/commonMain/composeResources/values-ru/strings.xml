@@ -13,12 +13,13 @@
     <string name="support_mode_readonly">Только чтение</string>
     <string name="support_mode_engineering">Инженерный доступ</string>
     <string name="support_mode_unknown">Поддержка</string>
+    <string name="support_banner_details_format">%1$s • %2$s</string>
     <string name="support_remaining_time">Осталось: %1$s</string>
     <string name="support_grant_expired">Срок действия истек</string>
 
     <!-- Company Switcher -->
     <string name="company_switcher_select">Выбрать компанию</string>
-    <string name="company_switcher_open">Выбрать компанию</string>
+    <string name="company_switcher_open">Открыть выбор компании</string>
     <string name="company_switcher_all_vendor">Все компании (Вендор)</string>
     <string name="company_switcher_dialog_title">Выбор компании</string>
     <string name="company_switcher_search_placeholder">Поиск компании...</string>
@@ -56,7 +57,7 @@
     <string name="action_logout">Выйти</string>
     <string name="action_copy">Копировать</string>
     <string name="notice_copied_to_clipboard">Скопировано в буфер обмена</string>
-    <string name="dialog_close">Отмена</string>
+    <string name="dialog_close">Закрыть</string>
 
     <string name="error_network_connection">Отсутствует подключение к сети</string>
     <string name="error_server_unavailable">Сервер временно недоступен</string>

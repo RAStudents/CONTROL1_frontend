@@ -26,6 +26,7 @@ fun calculateAppScaffoldUiState(
     tenantState: TenantContextState,
     destination: NavDestination?,
     items: List<AppNavigationItem>,
+    routeCompanyId: String? = null,
 ): AppScaffoldUiState {
     val authorizedContext = (tenantState as? TenantContextState.Authorized)?.context
     val currentCompanyId = authorizedContext?.companyId
@@ -40,11 +41,24 @@ fun calculateAppScaffoldUiState(
             globalContext = globalContext,
             effectiveCompanyId = effectiveCompanyId,
         )
+
+    val pendingCompanyId =
+        (tenantState as? TenantContextState.Loading)?.requestedCompanyId
+            ?: (tenantState as? TenantContextState.Error)?.companyId
+            ?: routeCompanyId
+
+    val selectedCompanyId =
+        authorizedContext?.companyId
+            ?: (tenantState as? TenantContextState.Restricted)?.companyId
+            ?: pendingCompanyId
+
     val currentCompanyName =
         authorizedContext?.companyName
             ?: (tenantState as? TenantContextState.Restricted)?.companyName
+            ?: selectedCompanyId?.let { id ->
+                globalContext?.memberCompanies?.firstOrNull { it.id == id }?.name
+            }
     val currentCompanyStatus = authorizedContext?.companyStatus
-    val selectedCompanyId = authorizedContext?.companyId ?: (tenantState as? TenantContextState.Restricted)?.companyId
     val isRestricted =
         tenantState is TenantContextState.Restricted ||
             currentCompanyStatus == CompanyStatus.RESTRICTED

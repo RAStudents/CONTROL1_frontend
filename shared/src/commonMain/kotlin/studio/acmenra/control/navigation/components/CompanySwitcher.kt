@@ -168,7 +168,14 @@ fun DesktopCompanySelector(
                 )
             }
 
-            companies.forEach { company ->
+            val displayCompanies =
+                if (onOpenFullDialog != null && companies.size > 5) {
+                    companies.take(5)
+                } else {
+                    companies
+                }
+
+            displayCompanies.forEach { company ->
                 val isSelected = company.id == selectedCompanyId
                 DropdownMenuItem(
                     text = {

@@ -26,11 +26,11 @@ import androidx.compose.ui.Modifier
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.toRoute
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
-import studio.acmenra.control.core.access.domain.model.TenantContextState
 import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveTenantContextUseCase
 import studio.acmenra.control.core.network.auth.SessionState
@@ -66,90 +66,92 @@ fun AppScaffold(
     val tenantState by observeTenantContextUseCase().collectAsState()
 
     val isLoginDestination = destination?.hasRoute<LoginRoute>() == true
-    val isVendorDashboardDestination = destination?.hasRoute<CompaniesDashboardRoute>() == true
-    val isTenantAuthorized = tenantState is TenantContextState.Authorized
-    val isVendorAuthorized =
-        isVendorDashboardDestination &&
-            globalState is GlobalAccessState.Ready &&
-            TenantAccessResolver.canBrowseAll((globalState as GlobalAccessState.Ready).context)
-
     val showNavigation =
         sessionState == SessionState.Authenticated &&
             destination != null &&
-            !isLoginDestination &&
-            (isTenantAuthorized || isVendorAuthorized)
+            !isLoginDestination
     val currentContent by rememberUpdatedState(content)
     val movableContent = remember { movableContentOf { currentContent() } }
 
     val topBarState = remember { TopBarState() }
     var isCompanyDialogOpen by remember { mutableStateOf(false) }
 
-    if (!showNavigation) {
-        Box(modifier = modifier.fillMaxSize()) {
-            movableContent()
-        }
-        return
-    }
-
-    val globalContext = (globalState as? GlobalAccessState.Ready)?.context
-    val uiState =
-        remember(globalContext, tenantState, destination, items) {
-            calculateAppScaffoldUiState(
-                globalContext = globalContext,
-                tenantState = tenantState,
-                destination = destination,
-                items = items,
-            )
-        }
-
-    val currentDestinationItem = uiState.visibleItems.firstOrNull { it.isSelected(destination) }
-    val defaultTitle =
-        when {
-            uiState.isOnVendorDashboard -> stringResource(Res.string.company_switcher_all_vendor)
-            currentDestinationItem != null -> stringResource(currentDestinationItem.labelRes)
-            else -> ""
-        }
-    val title = topBarState.title ?: defaultTitle
-
-    val displayCompanyName =
-        if (uiState.isOnVendorDashboard) {
-            stringResource(Res.string.company_switcher_all_vendor)
-        } else {
-            uiState.currentCompanyName.orEmpty()
-        }
-    val displayIsRestricted = if (uiState.isOnVendorDashboard) false else uiState.isRestricted
-    val effectiveSelectedCompanyId = if (uiState.isOnVendorDashboard) null else uiState.selectedCompanyId
-
     CompositionLocalProvider(LocalTopBarState provides topBarState) {
+        if (!showNavigation) {
+            Box(modifier = modifier.fillMaxSize()) {
+                movableContent()
+            }
+            return@CompositionLocalProvider
+        }
+
+        val globalContext = (globalState as? GlobalAccessState.Ready)?.context
+        val routeCompanyId =
+            if (destination.hasRoute<EventsRoute>()) {
+                runCatching { backStackEntry?.toRoute<EventsRoute>()?.companyId }.getOrNull()
+            } else {
+                null
+            }
+
+        val uiState =
+            remember(globalContext, tenantState, destination, items, routeCompanyId) {
+                calculateAppScaffoldUiState(
+                    globalContext = globalContext,
+                    tenantState = tenantState,
+                    destination = destination,
+                    items = items,
+                    routeCompanyId = routeCompanyId,
+                )
+            }
+
+        val currentDestinationItem = uiState.visibleItems.firstOrNull { it.isSelected(destination) }
+        val defaultTitle =
+            when {
+                uiState.isOnVendorDashboard -> stringResource(Res.string.company_switcher_all_vendor)
+                currentDestinationItem != null -> stringResource(currentDestinationItem.labelRes)
+                else -> ""
+            }
+        val title = topBarState.title ?: defaultTitle
+
+        val displayCompanyName =
+            if (uiState.isOnVendorDashboard) {
+                stringResource(Res.string.company_switcher_all_vendor)
+            } else {
+                uiState.currentCompanyName.orEmpty()
+            }
+        val displayIsRestricted = if (uiState.isOnVendorDashboard) false else uiState.isRestricted
+        val effectiveSelectedCompanyId = if (uiState.isOnVendorDashboard) null else uiState.selectedCompanyId
+
         BoxWithConstraints(modifier = modifier.fillMaxSize()) {
             val isDesktopOrTablet = maxWidth >= AmberDimens.TabletBreakpoint
 
             if (isDesktopOrTablet) {
                 Row(modifier = Modifier.fillMaxSize()) {
-                    AmberNavigationRail {
-                        uiState.visibleItems.forEach { item ->
-                            val selected = item.isSelected(destination)
-                            AmberNavigationRailItem(
-                                selected = selected,
-                                onClick = {
-                                    if (!selected) {
-                                        item.navigate(navController, companyId = uiState.effectiveCompanyId)
-                                    }
-                                },
-                                icon = {
-                                    Icon(
-                                        painter = painterResource(item.iconRes),
-                                        contentDescription = null,
-                                        modifier = Modifier.size(AmberDimens.ListIcon),
-                                    )
-                                },
-                                label = {
-                                    Text(
-                                        text = stringResource(item.labelRes),
-                                        style = MaterialTheme.typography.labelMedium,
-                                    )
-                                },
-                            )
+                    if (uiState.visibleItems.isNotEmpty()) {
+                        AmberNavigationRail {
+                            uiState.visibleItems.forEach { item ->
+                                val selected = item.isSelected(destination)
+                                AmberNavigationRailItem(
+                                    selected = selected,
+                                    onClick = {
+                                        if (!selected) {
+                                            item.navigate(navController, companyId = uiState.effectiveCompanyId)
+                                        }
+                                    },
+                                    icon = {
+                                        Icon(
+                                            painter = painterResource(item.iconRes),
+                                            contentDescription = null,
+                                            modifier = Modifier.size(AmberDimens.ListIcon),
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = stringResource(item.labelRes),
+                                            style = MaterialTheme.typography.labelMedium,
+                                        )
+                                    },
+                                )
+                            }
                         }
                     }
 
@@ -230,30 +232,32 @@ fun AppScaffold(
                         )
                     },
                     bottomBar = {
-                        AmberNavigationBar {
-                            uiState.visibleItems.forEach { item ->
-                                val selected = item.isSelected(destination)
-                                AmberNavigationBarItem(
-                                    selected = selected,
-                                    onClick = {
-                                        if (!selected) {
-                                            item.navigate(navController, companyId = uiState.effectiveCompanyId)
-                                        }
-                                    },
-                                    icon = {
-                                        Icon(
-                                            painter = painterResource(item.iconRes),
-                                            contentDescription = null,
-                                            modifier = Modifier.size(AmberDimens.ListIcon),
-                                        )
-                                    },
-                                    label = {
-                                        Text(
-                                            text = stringResource(item.labelRes),
-                                            style = MaterialTheme.typography.labelMedium,
-                                        )
-                                    },
-                                )
+                        if (uiState.visibleItems.isNotEmpty()) {
+                            AmberNavigationBar {
+                                uiState.visibleItems.forEach { item ->
+                                    val selected = item.isSelected(destination)
+                                    AmberNavigationBarItem(
+                                        selected = selected,
+                                        onClick = {
+                                            if (!selected) {
+                                                item.navigate(navController, companyId = uiState.effectiveCompanyId)
+                                            }
+                                        },
+                                        icon = {
+                                            Icon(
+                                                painter = painterResource(item.iconRes),
+                                                contentDescription = null,
+                                                modifier = Modifier.size(AmberDimens.ListIcon),
+                                            )
+                                        },
+                                        label = {
+                                            Text(
+                                                text = stringResource(item.labelRes),
+                                                style = MaterialTheme.typography.labelMedium,
+                                            )
+                                        },
+                                    )
+                                }
                             }
                         }
                     },

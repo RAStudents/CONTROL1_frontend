@@ -61,4 +61,27 @@ class TenantAccessValidatorTest {
             )
         assertNull(isRogue)
     }
+
+    @Test
+    fun testVerdictDistinguishesValidRogueAndNeedsGlobal() {
+        val vendor = createUser(globalPermissions = setOf(GlobalPermission.COMPANIES_MANAGE))
+        val regular = createUser(globalPermissions = emptySet())
+
+        assertEquals(
+            OriginVerdict.VALID,
+            TenantAccessValidator.verdict(setOf(AccessOrigin.VENDOR_GLOBAL), vendor),
+        )
+        assertEquals(
+            OriginVerdict.ROGUE,
+            TenantAccessValidator.verdict(setOf(AccessOrigin.VENDOR_GLOBAL), regular),
+        )
+        assertEquals(
+            OriginVerdict.NEEDS_GLOBAL,
+            TenantAccessValidator.verdict(setOf(AccessOrigin.VENDOR_GLOBAL), null),
+        )
+        assertEquals(
+            OriginVerdict.VALID,
+            TenantAccessValidator.verdict(setOf(AccessOrigin.DIRECT_MEMBERSHIP), regular),
+        )
+    }
 }

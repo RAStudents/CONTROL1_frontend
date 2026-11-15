@@ -1668,4 +1668,70 @@ class TenantContextCoordinatorTest {
             assertEquals("c1", state.companyId)
             assertEquals(expectedError, state.error)
         }
+
+    @Test
+    fun testStaleGlobalContextWithoutManageRefreshesAndAuthorizesWhenUpdated() =
+        runTest {
+            val nonVendorContext =
+                GlobalUserContext(
+                    userId = "user_vendor",
+                    serverTime = Instant.fromEpochMilliseconds(0),
+                    globalPermissions = emptySet(),
+                    defaultCompanyId = "c1",
+                    canBrowseAllCompanies = false,
+                    memberCompanies = emptyList(),
+                )
+            val updatedVendorContext =
+                nonVendorContext.copy(
+                    globalPermissions = setOf(GlobalPermission.COMPANIES_MANAGE),
+                    canBrowseAllCompanies = true,
+                )
+
+            val testRepo = FakeAccessRepository()
+            testRepo.globalResult = NetworkResult.Success(nonVendorContext)
+            testRepo.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Platform Company",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_vendor",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.VENDOR_GLOBAL),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            val testSession = SessionManager(tokenStorage = FakeTokenStorage())
+            val testAccessManager =
+                AccessManager(
+                    accessRepository = testRepo,
+                    sessionManager = testSession,
+                    errorParser = errorParser,
+                )
+            testAccessManager.refreshGlobalContext(force = true)
+
+            testRepo.globalResult = NetworkResult.Success(updatedVendorContext)
+
+            val testCoordinator =
+                TenantContextCoordinator(
+                    accessRepository = testRepo,
+                    accessManager = testAccessManager,
+                    sessionManager = testSession,
+                    errorParser = errorParser,
+                    singleFlight = TenantSingleFlight(),
+                )
+
+            testCoordinator.selectTenant("c1")
+
+            val state = testCoordinator.tenantState.value
+            assertTrue(state is TenantContextState.Authorized)
+            assertEquals("c1", state.context.companyId)
+        }
 }

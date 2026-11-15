@@ -26,7 +26,6 @@ import studio.acmenra.control.core.access.domain.model.AuthorizedTenantContext
 import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
 import studio.acmenra.control.core.access.domain.model.CompanyStatus
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
-import studio.acmenra.control.core.access.domain.model.GlobalUserContext
 import studio.acmenra.control.core.access.domain.model.RestrictionType
 import studio.acmenra.control.core.access.domain.model.SupportGrantStatus
 import studio.acmenra.control.core.access.domain.model.TenantContextState
@@ -265,17 +264,11 @@ class TenantContextCoordinator(
                 )
             }
 
-        val globalRefreshResult =
-            if (result is NetworkResult.Success &&
-                TenantAccessValidator.isRogueVendorOrigin(
-                    result.data.activeOrigins,
-                    accessManager.currentUserContext(),
-                ) ==
-                null
-            ) {
-                accessManager.refreshGlobalContext(force = true)
+        val (originVerdict, verificationError) =
+            if (result is NetworkResult.Success) {
+                verifyOrigins(result.data)
             } else {
-                null
+                OriginVerdict.VALID to null
             }
 
         mutex.withLock {
@@ -309,7 +302,8 @@ class TenantContextCoordinator(
                         canSwitch = canSwitch,
                         context = context,
                         sessionRevision = latestRevision,
-                        globalRefreshResult = globalRefreshResult,
+                        originVerdict = originVerdict,
+                        verificationError = verificationError,
                     )
                 }
 
@@ -510,17 +504,11 @@ class TenantContextCoordinator(
                 accessRepository.getCompanyAccess(userId = userId, companyId = companyId, forceRefresh = force)
             }
 
-        val globalRefreshResult =
-            if (result is NetworkResult.Success &&
-                TenantAccessValidator.isRogueVendorOrigin(
-                    result.data.activeOrigins,
-                    accessManager.currentUserContext(),
-                ) ==
-                null
-            ) {
-                accessManager.refreshGlobalContext(force = true)
+        val (originVerdict, verificationError) =
+            if (result is NetworkResult.Success) {
+                verifyOrigins(result.data)
             } else {
-                null
+                OriginVerdict.VALID to null
             }
 
         mutex.withLock {
@@ -557,7 +545,8 @@ class TenantContextCoordinator(
                         canSwitch = canSwitch,
                         context = context,
                         sessionRevision = latestRevision,
-                        globalRefreshResult = globalRefreshResult,
+                        originVerdict = originVerdict,
+                        verificationError = verificationError,
                     )
                 }
 
@@ -663,51 +652,68 @@ class TenantContextCoordinator(
         }
     }
 
+    private suspend fun verifyOrigins(domain: CompanyAccessDomain): Pair<OriginVerdict, NetworkError?> {
+        val currentContext = accessManager.currentUserContext()
+        val initialVerdict = TenantAccessValidator.verdict(domain.activeOrigins, currentContext)
+        if (initialVerdict == OriginVerdict.VALID) {
+            return OriginVerdict.VALID to null
+        }
+
+        val refreshResult = accessManager.refreshGlobalContext(force = true)
+        val freshContext = accessManager.currentUserContext()
+        val finalVerdict = TenantAccessValidator.verdict(domain.activeOrigins, freshContext)
+        val refreshError = (refreshResult as? NetworkResult.Failure)?.error
+        return finalVerdict to refreshError
+    }
+
     private fun applyDomainResultLocked(
         domain: CompanyAccessDomain,
         companyId: String,
         canSwitch: Boolean,
         context: AuthorizedTenantContext,
         sessionRevision: Long = -1L,
-        globalRefreshResult: NetworkResult<GlobalUserContext>? = null,
+        originVerdict: OriginVerdict = OriginVerdict.VALID,
+        verificationError: NetworkError? = null,
     ) {
         if (sessionRevision != -1L && sessionManager.currentRevision() != sessionRevision) {
             return
         }
 
-        val currentUserContext = accessManager.currentUserContext()
-        val isRogue = TenantAccessValidator.isRogueVendorOrigin(domain.activeOrigins, currentUserContext)
-        if (isRogue == null) {
-            expirationJob?.cancel()
-            expirationJob = null
-            val error =
-                (globalRefreshResult as? NetworkResult.Failure)?.error
-                    ?: NetworkError.Unknown(
-                        message = "Global user context is not available for origin validation",
-                    )
-            setTenantStateLocked(
-                TenantContextState.Error(
-                    companyId = companyId,
-                    error = error,
-                    canSwitchCompany = canSwitch,
-                ),
-                sessionRevision,
-            )
-            return
-        }
+        when (originVerdict) {
+            OriginVerdict.NEEDS_GLOBAL -> {
+                expirationJob?.cancel()
+                expirationJob = null
+                val error =
+                    verificationError
+                        ?: NetworkError.Unknown(
+                            message = "Global user context is not available for origin validation",
+                        )
+                setTenantStateLocked(
+                    TenantContextState.Error(
+                        companyId = companyId,
+                        error = error,
+                        canSwitchCompany = canSwitch,
+                    ),
+                    sessionRevision,
+                )
+                return
+            }
 
-        if (isRogue == true) {
-            expirationJob?.cancel()
-            expirationJob = null
-            setTenantStateLocked(
-                TenantContextState.Restricted.AccessDenied(
-                    companyId = companyId,
-                    companyName = domain.companyName,
-                    canSwitchCompany = canSwitch,
-                ),
-                sessionRevision,
-            )
-            return
+            OriginVerdict.ROGUE -> {
+                expirationJob?.cancel()
+                expirationJob = null
+                setTenantStateLocked(
+                    TenantContextState.Restricted.AccessDenied(
+                        companyId = companyId,
+                        companyName = domain.companyName,
+                        canSwitchCompany = canSwitch,
+                    ),
+                    sessionRevision,
+                )
+                return
+            }
+
+            OriginVerdict.VALID -> Unit
         }
 
         val isAuthorized =

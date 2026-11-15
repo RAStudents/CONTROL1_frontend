@@ -64,6 +64,7 @@
     <string name="error_unknown_occurred">Произошла непредвиденная ошибка</string>
     <string name="error_access_denied">Доступ запрещён</string>
     <string name="error_company_not_found">Компания не найдена</string>
+    <string name="error_session_expired">Сессия истекла. Пожалуйста, выполните вход заново.</string>
 
     <!-- Vendor Dashboard -->
     <string name="vendor_dashboard_title">Дашборд компаний</string>

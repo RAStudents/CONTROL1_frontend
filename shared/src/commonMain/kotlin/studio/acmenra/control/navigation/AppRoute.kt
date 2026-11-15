@@ -21,4 +21,7 @@ sealed interface TenantRoute : AppRoute {
 @SerialName("events")
 data class EventsRoute(
     override val companyId: String? = null,
-) : TenantRoute
+) : TenantRoute {
+    val cleanCompanyId: String?
+        get() = companyId?.takeUnless { it.isBlank() || it == "null" }
+}

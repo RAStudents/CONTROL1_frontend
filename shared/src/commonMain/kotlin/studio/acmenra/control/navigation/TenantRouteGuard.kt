@@ -11,9 +11,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
 import studio.acmenra.control.core.access.domain.model.AuthorizedTenantContext
@@ -24,6 +22,7 @@ import studio.acmenra.control.core.access.domain.usecase.EnsureTenantContextUseC
 import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveTenantContextUseCase
 import studio.acmenra.control.core.access.domain.usecase.RefreshGlobalAccessUseCase
+import studio.acmenra.control.core.access.domain.usecase.RefreshTenantUseCase
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.restricted_no_companies_desc
@@ -45,6 +44,7 @@ fun TenantRouteGuard(
     observeGlobalAccessUseCase: ObserveGlobalAccessUseCase = koinInject(),
     observeTenantContextUseCase: ObserveTenantContextUseCase = koinInject(),
     ensureTenantContextUseCase: EnsureTenantContextUseCase = koinInject(),
+    refreshTenantUseCase: RefreshTenantUseCase = koinInject(),
     refreshGlobalAccessUseCase: RefreshGlobalAccessUseCase = koinInject(),
     sessionManager: SessionManager = koinInject(),
     content: @Composable (AuthorizedTenantContext) -> Unit,
@@ -55,6 +55,7 @@ fun TenantRouteGuard(
 
     var showCompanyDialog by remember { mutableStateOf(false) }
 
+    val targetCompanyId = requestedCompanyId?.takeUnless { it.isBlank() || it == "null" }
     val readyContext = (globalState as? GlobalAccessState.Ready)?.context
     val memberCompanies = readyContext?.memberCompanies.orEmpty()
     val canBrowseAllCompanies = readyContext?.let { TenantAccessResolver.canBrowseAll(it) } == true
@@ -63,14 +64,16 @@ fun TenantRouteGuard(
 
     if (showCompanyDialog) {
         val currentSelectedId =
-            (tenantState as? TenantContextState.Authorized)?.context?.companyId ?: requestedCompanyId.orEmpty()
+            (tenantState as? TenantContextState.Authorized)?.context?.companyId ?: targetCompanyId.orEmpty()
         CompanySelectionDialog(
             companies = memberCompanies,
             selectedCompanyId = currentSelectedId,
             canBrowseAllCompanies = canBrowseAllCompanies,
             onSelectCompany = { companyId ->
                 showCompanyDialog = false
-                onNavigateToCompany(companyId)
+                if (companyId != currentSelectedId) {
+                    onNavigateToCompany(companyId)
+                }
             },
             onSelectAllCompanies = {
                 showCompanyDialog = false
@@ -93,22 +96,31 @@ fun TenantRouteGuard(
         }
     }
 
+    val onRetryTenantAction: () -> Unit = {
+        scope.launch {
+            if (!targetCompanyId.isNullOrBlank()) {
+                ensureTenantContextUseCase(targetCompanyId)
+                refreshTenantUseCase(force = true)
+            } else {
+                refreshGlobalAccessUseCase(force = true)
+            }
+        }
+    }
+
     val decision =
         resolveTenantGuardDecision(
             globalState = globalState,
             tenantState = tenantState,
-            requestedCompanyId = requestedCompanyId,
+            requestedCompanyId = targetCompanyId,
             requirement = requirement,
         )
 
-    val hasAccess = readyContext?.let { TenantAccessResolver.hasAccess(it, requestedCompanyId) } == true
+    val hasAccess = readyContext?.let { TenantAccessResolver.hasAccess(it, targetCompanyId) } == true
     val isTenantNotSelected = tenantState is TenantContextState.NotSelected
 
-    LaunchedEffect(requestedCompanyId, hasAccess, isTenantNotSelected) {
-        if (hasAccess && !requestedCompanyId.isNullOrBlank()) {
-            withContext(NonCancellable) {
-                ensureTenantContextUseCase(requestedCompanyId)
-            }
+    LaunchedEffect(targetCompanyId, hasAccess, isTenantNotSelected) {
+        if (hasAccess && !targetCompanyId.isNullOrBlank()) {
+            ensureTenantContextUseCase(targetCompanyId)
         }
     }
 
@@ -180,11 +192,7 @@ fun TenantRouteGuard(
             TenantErrorScreen(
                 error = decision.error,
                 canSwitchCompany = canSwitchCompany,
-                onRetry = {
-                    scope.launch {
-                        ensureTenantContextUseCase(decision.companyId)
-                    }
-                },
+                onRetry = onRetryTenantAction,
                 onSwitchCompany = onSwitchCompanyAction,
                 onLogout = onLogoutAction,
                 modifier = modifier,
@@ -196,6 +204,7 @@ fun TenantRouteGuard(
                 restriction = decision.restriction,
                 companyName = decision.companyName,
                 canSwitchCompany = canSwitchCompany,
+                onRetry = onRetryTenantAction,
                 onSwitchCompany = onSwitchCompanyAction,
                 onLogout = onLogoutAction,
                 modifier = modifier,
@@ -206,6 +215,7 @@ fun TenantRouteGuard(
             NoPermissionsScreen(
                 companyName = decision.companyName,
                 canSwitchCompany = canSwitchCompany,
+                onRetry = onRetryTenantAction,
                 onSwitchCompany = onSwitchCompanyAction,
                 onLogout = onLogoutAction,
                 modifier = modifier,
@@ -216,6 +226,7 @@ fun TenantRouteGuard(
             AccessDeniedScreen(
                 companyName = decision.companyName,
                 canSwitchCompany = canSwitchCompany,
+                onRetry = onRetryTenantAction,
                 onSwitchCompany = onSwitchCompanyAction,
                 onLogout = onLogoutAction,
                 modifier = modifier,

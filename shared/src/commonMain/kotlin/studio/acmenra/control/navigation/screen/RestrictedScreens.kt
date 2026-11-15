@@ -47,6 +47,7 @@ import studio.acmenra.control.core.ui.generated.resources.error_access_denied
 import studio.acmenra.control.core.ui.generated.resources.error_company_not_found
 import studio.acmenra.control.core.ui.generated.resources.error_network_connection
 import studio.acmenra.control.core.ui.generated.resources.error_server_unavailable
+import studio.acmenra.control.core.ui.generated.resources.error_session_expired
 import studio.acmenra.control.core.ui.generated.resources.error_unknown_occurred
 import studio.acmenra.control.core.ui.generated.resources.ic_content_copy
 import studio.acmenra.control.core.ui.generated.resources.ic_error
@@ -80,6 +81,7 @@ fun CompanyFrozenScreen(
     canSwitchCompany: Boolean,
     onLogout: () -> Unit,
     modifier: Modifier = Modifier,
+    onRetry: (() -> Unit)? = null,
     onSwitchCompany: (() -> Unit)? = null,
     isAccountLevel: Boolean = false,
 ) {
@@ -111,6 +113,7 @@ fun CompanyFrozenScreen(
         canSwitchCompany = canSwitchCompany,
         onSwitchCompany = onSwitchCompany,
         onLogout = onLogout,
+        onRetry = onRetry,
         modifier = modifier,
     ) {
         Column(
@@ -211,6 +214,7 @@ fun AccessDeniedScreen(
     modifier: Modifier = Modifier,
     title: String = stringResource(Res.string.restricted_access_denied_title),
     description: String = stringResource(Res.string.restricted_access_denied_desc),
+    onRetry: (() -> Unit)? = null,
     onSwitchCompany: (() -> Unit)? = null,
 ) {
     RestrictedScreenScaffold(
@@ -222,6 +226,7 @@ fun AccessDeniedScreen(
         canSwitchCompany = canSwitchCompany,
         onSwitchCompany = onSwitchCompany,
         onLogout = onLogout,
+        onRetry = onRetry,
         modifier = modifier,
     )
 }
@@ -232,6 +237,7 @@ fun NoPermissionsScreen(
     canSwitchCompany: Boolean,
     onLogout: () -> Unit,
     modifier: Modifier = Modifier,
+    onRetry: (() -> Unit)? = null,
     onSwitchCompany: (() -> Unit)? = null,
 ) {
     RestrictedScreenScaffold(
@@ -243,6 +249,7 @@ fun NoPermissionsScreen(
         canSwitchCompany = canSwitchCompany,
         onSwitchCompany = onSwitchCompany,
         onLogout = onLogout,
+        onRetry = onRetry,
         modifier = modifier,
     )
 }
@@ -256,12 +263,14 @@ fun TenantErrorScreen(
     modifier: Modifier = Modifier,
     onSwitchCompany: (() -> Unit)? = null,
 ) {
+    val isSessionExpired = error is NetworkError.Http && error.statusCode == 401
     val errorMessage =
         when (error) {
             is NetworkError.Connectivity -> stringResource(Res.string.error_network_connection)
             is NetworkError.Http -> {
                 when (error.statusCode) {
-                    401, 403 -> stringResource(Res.string.error_access_denied)
+                    401 -> stringResource(Res.string.error_session_expired)
+                    403 -> stringResource(Res.string.error_access_denied)
                     404 -> stringResource(Res.string.error_company_not_found)
                     else -> stringResource(Res.string.error_server_unavailable)
                 }
@@ -279,7 +288,7 @@ fun TenantErrorScreen(
         canSwitchCompany = canSwitchCompany,
         onSwitchCompany = onSwitchCompany,
         onLogout = onLogout,
-        onRetry = onRetry,
+        onRetry = if (isSessionExpired) null else onRetry,
         modifier = modifier,
     )
 }

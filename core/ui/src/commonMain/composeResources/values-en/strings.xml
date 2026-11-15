@@ -64,6 +64,7 @@
     <string name="error_unknown_occurred">An unexpected error occurred</string>
     <string name="error_access_denied">Access denied</string>
     <string name="error_company_not_found">Company not found</string>
+    <string name="error_session_expired">Session expired. Please log in again.</string>
 
     <!-- Vendor Dashboard -->
     <string name="vendor_dashboard_title">Companies Dashboard</string>

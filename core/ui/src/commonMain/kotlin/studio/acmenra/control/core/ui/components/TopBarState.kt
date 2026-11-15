@@ -31,6 +31,26 @@ class TopBarState {
             titleOwner = null
         }
     }
+
+    fun updateLeadingAction(action: (@Composable () -> Unit)?) {
+        leadingAction = action
+    }
+
+    fun clearLeadingAction(action: (@Composable () -> Unit)?) {
+        if (leadingAction === action) {
+            leadingAction = null
+        }
+    }
+
+    fun updateActions(newActions: @Composable RowScope.() -> Unit) {
+        actions = newActions
+    }
+
+    fun clearActions(expectedActions: @Composable RowScope.() -> Unit) {
+        if (actions === expectedActions) {
+            actions = {}
+        }
+    }
 }
 
 val LocalTopBarState = compositionLocalOf { TopBarState() }
@@ -52,21 +72,17 @@ fun ProvideTopBar(
     }
 
     DisposableEffect(topBarState, leadingAction) {
-        topBarState.leadingAction = leadingAction
+        topBarState.updateLeadingAction(leadingAction)
         onDispose {
-            if (topBarState.leadingAction === leadingAction) {
-                topBarState.leadingAction = null
-            }
+            topBarState.clearLeadingAction(leadingAction)
         }
     }
 
     DisposableEffect(topBarState, actions) {
         val resolvedActions: @Composable RowScope.() -> Unit = actions ?: {}
-        topBarState.actions = resolvedActions
+        topBarState.updateActions(resolvedActions)
         onDispose {
-            if (topBarState.actions === resolvedActions) {
-                topBarState.actions = {}
-            }
+            topBarState.clearActions(resolvedActions)
         }
     }
 }

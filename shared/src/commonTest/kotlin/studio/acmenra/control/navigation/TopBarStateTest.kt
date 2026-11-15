@@ -44,17 +44,13 @@ class TopBarStateTest {
         val actionA: @Composable () -> Unit = {}
         val actionB: @Composable () -> Unit = {}
 
-        state.leadingAction = actionA
-        state.leadingAction = actionB
+        state.updateLeadingAction(actionA)
+        state.updateLeadingAction(actionB)
 
-        if (state.leadingAction === actionA) {
-            state.leadingAction = null
-        }
+        state.clearLeadingAction(actionA)
         assertEquals(actionB, state.leadingAction)
 
-        if (state.leadingAction === actionB) {
-            state.leadingAction = null
-        }
+        state.clearLeadingAction(actionB)
         assertNull(state.leadingAction)
     }
 }

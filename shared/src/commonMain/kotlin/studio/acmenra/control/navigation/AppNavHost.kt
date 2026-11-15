@@ -57,7 +57,7 @@ fun AppNavHost(
             val route = entry.toRoute<EventsRoute>()
             if (sessionState == SessionState.Authenticated) {
                 TenantRouteGuard(
-                    requestedCompanyId = route.companyId,
+                    requestedCompanyId = route.cleanCompanyId,
                     requirement = RoutePermissionRequirement.Tenant(TenantPermission.EVENTS_READ),
                     onNavigateToCompany = { newCompanyId ->
                         navController.navigateToEvents(newCompanyId)

@@ -287,14 +287,27 @@ class AccessInvalidationTest {
             val localJob = Job()
             val localScope = CoroutineScope(localJob + testDispatcher)
             try {
+                var testStarted = false
                 var globalCallCount = 0
-                val emptyStorage = FakeTokenStorage().apply { clear() }
-                val localSessionManager = SessionManager(emptyStorage)
+                val storage = FakeTokenStorage()
+                val localSessionManager = SessionManager(storage)
                 var coordinatorInstance: AccessInvalidationCoordinator? = null
 
                 val recursiveRepository =
                     object : AccessRepository {
                         override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> {
+                            if (!testStarted) {
+                                return NetworkResult.Success(
+                                    GlobalUserContext(
+                                        userId = "user_init",
+                                        serverTime = Instant.fromEpochMilliseconds(0),
+                                        globalPermissions = emptySet(),
+                                        defaultCompanyId = "c1",
+                                        canBrowseAllCompanies = false,
+                                        memberCompanies = listOf(CompanyBrief("c1", "Company 1", CompanyStatus.ACTIVE)),
+                                    ),
+                                )
+                            }
                             globalCallCount++
                             if (globalCallCount == 1) {
                                 // Simulate second invalidation arriving while first is in flight
@@ -346,6 +359,7 @@ class AccessInvalidationTest {
                         scope = localScope,
                     )
                 coordinatorInstance = coordinator
+                testStarted = true
 
                 coordinator.onAccessInvalidatedAsync("ACCOUNT_FROZEN", null).join()
 
@@ -362,8 +376,10 @@ class AccessInvalidationTest {
         runTest {
             val localJob = Job()
             val localScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + localJob)
-            val localSessionManager = SessionManager(FakeTokenStorage().apply { clear() })
+            val storage = FakeTokenStorage()
+            val localSessionManager = SessionManager(storage)
             try {
+                var testStarted = false
                 var activeGlobalRuns = 0
                 var maxConcurrentGlobalRuns = 0
                 var globalCallCount = 0
@@ -373,6 +389,18 @@ class AccessInvalidationTest {
                 val testRepo =
                     object : AccessRepository {
                         override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> {
+                            if (!testStarted) {
+                                return NetworkResult.Success(
+                                    GlobalUserContext(
+                                        userId = "user_init",
+                                        serverTime = Instant.fromEpochMilliseconds(0),
+                                        globalPermissions = emptySet(),
+                                        defaultCompanyId = "c1",
+                                        canBrowseAllCompanies = false,
+                                        memberCompanies = listOf(CompanyBrief("c1", "Company 1", CompanyStatus.ACTIVE)),
+                                    ),
+                                )
+                            }
                             globalCallCount++
                             activeGlobalRuns++
                             maxConcurrentGlobalRuns = maxOf(maxConcurrentGlobalRuns, activeGlobalRuns)
@@ -430,6 +458,7 @@ class AccessInvalidationTest {
                         tenantCoordinator = tenantCoord,
                         scope = localScope,
                     )
+                testStarted = true
 
                 // 1. First ACCOUNT_FROZEN invalidation starts and enters getGlobalContext (call 1)
                 val job1 = coordinator.onAccessInvalidatedAsync("ACCOUNT_FROZEN", null)

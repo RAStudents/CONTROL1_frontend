@@ -77,9 +77,8 @@
 * [`TenantContextState.Authorized`](file:///home/user/StudioProjects/control/core/access/src/commonMain/kotlin/studio/acmenra/control/core/access/domain/model/AccessState.kt): успешная авторизация в тенанте. Содержит `context: AuthorizedTenantContext` и флаг `isRefreshing: Boolean`.
 * [`TenantContextState.Restricted`](file:///home/user/StudioProjects/control/core/access/src/commonMain/kotlin/studio/acmenra/control/core/access/domain/model/AccessState.kt): доступ ограничен на уровне тенанта. Подтипы:
   * `CompanyFrozen`: компания заблокирована/заморожена администратором или платформой. Сохраняет `restriction: AccessRestriction?` даже после истечения override-гранта.
-  * `CompanyAccessRevoked`: доступ пользователя к компании отозван (увольнение, исключение из участников).
-  * `SubscriptionSuspended`: подписка тенанта приостановлена.
-  * `AccessPending`: заявка на вступление ожидает подтверждения.
+  * `NoPermissions`: у пользователя нет активных прав в компании.
+  * `AccessDenied`: доступ к компании отклонён или отозван.
 * [`TenantContextState.Error`](file:///home/user/StudioProjects/control/core/access/src/commonMain/kotlin/studio/acmenra/control/core/access/domain/model/AccessState.kt): сетевой сбой при загрузке доступа тенанта. Позволяет выполнить повтор по кнопке «Повторить» (`Retry`).
 
 ---
@@ -89,17 +88,17 @@
 ### 3.1. Ключи разрешений (`PermissionKey`)
 
 Разрешения строго типизированы через sealed-интерфейс [`PermissionKey`](file:///home/user/StudioProjects/control/core/access/src/commonMain/kotlin/studio/acmenra/control/core/access/domain/model/Permission.kt):
-* `PermissionKey.Tenant(val permission: TenantPermission)`: права внутри компании (`EVENTS_READ`, `EVENTS_WRITE`, `BILLING_VIEW`, `SETTINGS_MANAGE`, `INTEGRATIONS_CONFIG`, `USERS_MANAGE`, `ANALYTICS_EXPORT`).
-* `PermissionKey.Global(val permission: GlobalPermission)`: глобальные системные права (`SUPER_ADMIN`, `SUPPORT_AGENT`, `PLATFORM_ANALYST`, `COMPANIES_CREATE`, `BILLING_MANAGE`).
-* `PermissionKey.Support(val permission: SupportPermission)`: права технической поддержки (`DEVICE_DIAGNOSTICS`, `REMOTE_DEBUG_SESSION`, `CRASH_DUMP_EXPORT`, `AUDIT_LOG_READ`, `CONFIG_OVERRIDE`).
+* `PermissionKey.Tenant(val permission: TenantPermission)`: права внутри компании (`EVENTS_READ`, `DEVICES_READ`, `DEVICES_CREATE`, `DEVICES_UPDATE`, `DEVICES_DELETE`, `REPORTS_READ`, `REPORTS_EXPORT`, `DICTIONARIES_READ`, `DICTIONARIES_MANAGE`, `AUDIT_READ`, `USERS_READ`, `USERS_MANAGE`).
+* `PermissionKey.Global(val permission: GlobalPermission)`: глобальные системные права (`COMPANIES_MONITOR`, `COMPANIES_MANAGE`, `GLOBAL_USERS_MANAGE`).
+* `PermissionKey.Support(val permission: SupportPermission)`: права технической поддержки (`DEVICE_DIAGNOSTICS`, `DEVICE_RESTART`, `TOKEN_ROTATE`).
 
 ### 3.2. Источники происхождения прав (`AccessOrigin`)
 
 Каждое право мапится на источники, из которых оно получено:
 * `DIRECT_MEMBERSHIP`: прямое членство в штате компании.
-* `ROLE_INHERITANCE`: наследование от группы ролей.
+* `VENDOR_GLOBAL`: глобальные права вендора платформы.
 * `SUPPORT_GRANT`: временное делегирование прав через заявку в техподдержку.
-* `SERVICE_ACCOUNT`: делегирование служебному аккаунту.
+* `UNKNOWN`: неизвестный бэкенд-источник (Fail-Closed игнорирование).
 
 Если бэкенд возвращает неизвестное право или неизвестный origin, кастомный десериализатор [`SafeAccessSerializers.kt`](file:///home/user/StudioProjects/control/core/access/src/commonMain/kotlin/studio/acmenra/control/core/access/data/serializer/SafeAccessSerializers.kt) игнорирует неизвестные элементы, исключая падение приложения и соблюдая принцип минимальных привилегий (Fail-Closed).
 

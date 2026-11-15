@@ -109,6 +109,7 @@ class AccessManagerTest {
     @Test
     fun noCompaniesAvailableRestrictionDetected() =
         runTest {
+            sessionManager.saveSession(TokenPair("acc", "ref"))
             repository.globalResult =
                 NetworkResult.Success(
                     GlobalUserContext(
@@ -128,6 +129,7 @@ class AccessManagerTest {
     @Test
     fun accountFrozenRestrictionDetected() =
         runTest {
+            sessionManager.saveSession(TokenPair("acc", "ref"))
             repository.globalResult =
                 NetworkResult.Failure(
                     NetworkError.Http(
@@ -143,6 +145,7 @@ class AccessManagerTest {
     @Test
     fun accountFrozenParsesRestrictionBody() =
         runTest {
+            sessionManager.saveSession(TokenPair("acc", "ref"))
             repository.globalResult =
                 NetworkResult.Failure(
                     NetworkError.Http(
@@ -222,10 +225,13 @@ class AccessManagerTest {
                     override suspend fun clearCache() {}
                 }
 
+            val customStorage = FakeTokenStorage()
+            val customSessionManager = SessionManager(customStorage)
+            customSessionManager.saveSession(TokenPair("acc", "ref"))
             val mgr =
                 AccessManager(
                     accessRepository = customRepository,
-                    sessionManager = sessionManager,
+                    sessionManager = customSessionManager,
                     mapper = AccessMapper(),
                     scope = testScope,
                 )
@@ -252,12 +258,21 @@ class AccessManagerTest {
     @Test
     fun forceRefreshGlobalContextDoesNotCoalesceIntoStaleNonForceRefresh() =
         runTest {
+            var testStarted = false
             val barrier1 = CompletableDeferred<Unit>()
             val barrier2 = CompletableDeferred<Unit>()
             var callCount = 0
             val customRepository =
                 object : AccessRepository {
                     override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> {
+                        if (!testStarted) {
+                            return NetworkResult.Failure(
+                                NetworkError.Http(
+                                    statusCode = 403,
+                                    errorBody = """{"error":"ACCOUNT_FROZEN"}""",
+                                ),
+                            )
+                        }
                         callCount++
                         if (callCount == 1) {
                             barrier1.await()
@@ -296,13 +311,19 @@ class AccessManagerTest {
                     override suspend fun clearCache() {}
                 }
 
+            val customStorage = FakeTokenStorage()
+            val customSessionManager = SessionManager(customStorage)
+            customSessionManager.saveSession(TokenPair("acc", "ref"))
             val mgr =
                 AccessManager(
                     accessRepository = customRepository,
-                    sessionManager = sessionManager,
+                    sessionManager = customSessionManager,
                     mapper = AccessMapper(),
                     scope = testScope,
                 )
+            runCurrent()
+            assertTrue(mgr.globalState.value is GlobalAccessState.Restricted.AccountFrozen)
+            testStarted = true
 
             // Start non-force refresh (call 1)
             val job1 = async { mgr.refreshGlobalContext(force = false) }
@@ -430,5 +451,50 @@ class AccessManagerTest {
             // Stale response must NOT restore access or set globalState to Ready
             assertEquals(GlobalAccessState.Idle, mgr.globalState.value)
             assertEquals(null, mgr.currentUserContext())
+        }
+
+    @Test
+    fun userSwitchFromAccountFrozenToAuthenticatedForcesRefresh() =
+        runTest {
+            val customStorage = FakeTokenStorage()
+            val customSessionManager = SessionManager(customStorage)
+            val mgr =
+                AccessManager(
+                    accessRepository = repository,
+                    sessionManager = customSessionManager,
+                    mapper = AccessMapper(),
+                    scope = testScope,
+                )
+
+            val userBContext =
+                GlobalUserContext(
+                    userId = "user_B",
+                    serverTime = Instant.fromEpochMilliseconds(0),
+                    globalPermissions = emptySet(),
+                    defaultCompanyId = "c2",
+                    canBrowseAllCompanies = false,
+                    memberCompanies = listOf(CompanyBrief("c2", "Company 2", CompanyStatus.ACTIVE)),
+                )
+
+            repository.globalResult =
+                NetworkResult.Failure(
+                    NetworkError.Http(
+                        statusCode = 403,
+                        errorBody = """{"error":"ACCOUNT_FROZEN"}""",
+                    ),
+                )
+            customSessionManager.saveSession(TokenPair("accA", "refA"))
+            runCurrent()
+            assertTrue(mgr.globalState.value is GlobalAccessState.Restricted.AccountFrozen)
+
+            // Switch to User B with valid access
+            repository.globalResult = NetworkResult.Success(userBContext)
+            customSessionManager.logout()
+            customSessionManager.saveSession(TokenPair("accB", "refB"))
+            runCurrent()
+
+            val state = mgr.globalState.value
+            assertTrue(state is GlobalAccessState.Ready)
+            assertEquals("user_B", state.context.userId)
         }
 }

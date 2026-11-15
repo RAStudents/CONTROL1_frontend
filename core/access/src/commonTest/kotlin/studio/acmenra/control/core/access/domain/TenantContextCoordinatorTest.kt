@@ -99,7 +99,8 @@ class TenantContextCoordinatorTest {
             )
         }
 
-        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> =
+        var lastRequestedUserId: String? = null
+        var globalResult: NetworkResult<GlobalUserContext> =
             NetworkResult.Success(
                 GlobalUserContext(
                     userId = "user_100",
@@ -115,11 +116,16 @@ class TenantContextCoordinatorTest {
                 ),
             )
 
+        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> = globalResult
+
         override suspend fun getCompanyAccess(
             userId: String,
             companyId: String,
             forceRefresh: Boolean,
-        ): NetworkResult<CompanyAccessDomain> = handler(companyId)
+        ): NetworkResult<CompanyAccessDomain> {
+            lastRequestedUserId = userId
+            return handler(companyId)
+        }
 
         override suspend fun getCachedCompanyAccess(
             userId: String,
@@ -1147,7 +1153,7 @@ class TenantContextCoordinatorTest {
                 )
             }
 
-            coordinator.refreshCurrentTenant(force = true)
+            coordinator.refreshTenant("c1", force = true)
             val updated = coordinator.tenantState.value
             assertTrue(updated is TenantContextState.Authorized)
             assertEquals("grant_2", updated.context.supportGrant?.grantId)
@@ -1161,5 +1167,38 @@ class TenantContextCoordinatorTest {
             assertTrue(stateAfter6s is TenantContextState.Authorized)
             assertFalse(stateAfter6s.context.isSupportGrantLocallyExpired)
             assertEquals("grant_2", stateAfter6s.context.supportGrant?.grantId)
+        }
+
+    @Test
+    fun refreshTenantDoesNotUseStaleUserFromPreviousSession() =
+        runTest {
+            coordinator.selectTenant("c1")
+            val stateA = coordinator.tenantState.value
+            assertTrue(stateA is TenantContextState.Authorized)
+            assertEquals("user_100", stateA.context.userId)
+            assertEquals("user_100", repository.lastRequestedUserId)
+
+            // Switch to User B in SessionManager
+            repository.globalResult =
+                NetworkResult.Success(
+                    GlobalUserContext(
+                        userId = "user_200",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        globalPermissions = emptySet(),
+                        defaultCompanyId = "c1",
+                        canBrowseAllCompanies = false,
+                        memberCompanies =
+                            listOf(
+                                CompanyBrief("c1", "Company 1", CompanyStatus.ACTIVE),
+                            ),
+                    ),
+                )
+            sessionManager.saveSession(TokenPair("accB", "refB"))
+
+            coordinator.refreshTenant("c1", force = true)
+            assertEquals("user_200", repository.lastRequestedUserId)
+            val stateB = coordinator.tenantState.value
+            assertTrue(stateB is TenantContextState.Authorized)
+            assertEquals("user_200", stateB.context.userId)
         }
 }

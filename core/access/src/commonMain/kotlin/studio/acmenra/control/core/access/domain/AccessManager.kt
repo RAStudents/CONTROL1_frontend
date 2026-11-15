@@ -46,9 +46,7 @@ class AccessManager(
                     is SessionState.Authenticated -> {
                         val currentRev = sessionManager.currentSessionRevision()
                         val current = _globalState.value
-                        if (current is GlobalAccessState.Idle ||
-                            (current is GlobalAccessState.Ready && current.sessionRevision != currentRev)
-                        ) {
+                        if (current !is GlobalAccessState.Ready || current.sessionRevision != currentRev) {
                             refreshGlobalContext(force = true)
                         }
                     }
@@ -110,8 +108,12 @@ class AccessManager(
                     inFlightRevision = currentRevision
 
                     _globalState.value =
-                        when (currentState) {
-                            is GlobalAccessState.Ready -> currentState.copy(isRefreshing = true)
+                        when {
+                            currentState is GlobalAccessState.Ready &&
+                                currentState.sessionRevision == currentRevision -> {
+                                currentState.copy(isRefreshing = true)
+                            }
+
                             else -> GlobalAccessState.InitialLoading
                         }
 
@@ -121,7 +123,10 @@ class AccessManager(
                             mutex.withLock {
                                 val latestRevision =
                                     sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
-                                if (generation == currentGeneration &&
+                                val isAuthenticated =
+                                    sessionManager.sessionState.value is SessionState.Authenticated
+                                if (isAuthenticated &&
+                                    generation == currentGeneration &&
                                     latestRevision == currentRevision
                                 ) {
                                     applyGlobalContextResultLocked(result, latestRevision)

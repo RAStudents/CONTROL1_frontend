@@ -430,7 +430,13 @@ class TenantContextCoordinator(
         val current = _tenantState.value
         val currentUserId =
             when (current) {
-                is TenantContextState.Authorized -> current.context.userId
+                is TenantContextState.Authorized ->
+                    if (current.sessionRevision == sessionRevision) {
+                        current.context.userId
+                    } else {
+                        null
+                    }
+
                 else -> accessManager.currentUserContext()?.userId
             }
 

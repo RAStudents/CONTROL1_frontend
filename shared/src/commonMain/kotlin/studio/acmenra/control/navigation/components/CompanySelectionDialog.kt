@@ -68,7 +68,7 @@ fun CompanySelectionDialog(
         modifier =
             modifier
                 .defaultMinSize(minWidth = AmberDimens.DialogWidth)
-                .widthIn(max = AmberDimens.RestrictedCardMaxWidth),
+                .widthIn(max = AmberDimens.DialogMaxWidth),
     ) {
         Surface(
             shape = RoundedCornerShape(AmberCorners.ExtraLarge),
@@ -173,26 +173,7 @@ fun CompanySelectionDialog(
                     ) {
                         itemsIndexed(filteredCompanies, key = { _, company -> company.id }) { index, company ->
                             val isSelected = company.id == selectedCompanyId
-                            val shape =
-                                if (total <= 1) {
-                                    RoundedCornerShape(AmberCorners.ExtraLarge)
-                                } else if (index == 0) {
-                                    RoundedCornerShape(
-                                        topStart = AmberCorners.ExtraLarge,
-                                        topEnd = AmberCorners.ExtraLarge,
-                                        bottomStart = AmberCorners.Small,
-                                        bottomEnd = AmberCorners.Small,
-                                    )
-                                } else if (index == total - 1) {
-                                    RoundedCornerShape(
-                                        topStart = AmberCorners.Small,
-                                        topEnd = AmberCorners.Small,
-                                        bottomStart = AmberCorners.ExtraLarge,
-                                        bottomEnd = AmberCorners.ExtraLarge,
-                                    )
-                                } else {
-                                    RoundedCornerShape(AmberCorners.Small)
-                                }
+                            val shape = companyItemShape(index = index, total = total)
 
                             Surface(
                                 onClick = {
@@ -267,3 +248,26 @@ fun CompanySelectionDialog(
         }
     }
 }
+
+private fun companyItemShape(
+    index: Int,
+    total: Int,
+): RoundedCornerShape =
+    when {
+        total <= 1 -> RoundedCornerShape(AmberCorners.ExtraLarge)
+        index == 0 ->
+            RoundedCornerShape(
+                topStart = AmberCorners.ExtraLarge,
+                topEnd = AmberCorners.ExtraLarge,
+                bottomStart = AmberCorners.Small,
+                bottomEnd = AmberCorners.Small,
+            )
+        index == total - 1 ->
+            RoundedCornerShape(
+                topStart = AmberCorners.Small,
+                topEnd = AmberCorners.Small,
+                bottomStart = AmberCorners.ExtraLarge,
+                bottomEnd = AmberCorners.ExtraLarge,
+            )
+        else -> RoundedCornerShape(AmberCorners.Small)
+    }

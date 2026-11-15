@@ -181,6 +181,7 @@ object AmberDimens {
     val RailExpanded = 220.dp
     val RailTopPadding = 24.dp
     val DialogWidth = 312.dp
+    val DialogMaxWidth = 440.dp
     val CardPadding = 20.dp
     val SliderTrack = 16.dp
     val SliderHandleWidth = 4.dp

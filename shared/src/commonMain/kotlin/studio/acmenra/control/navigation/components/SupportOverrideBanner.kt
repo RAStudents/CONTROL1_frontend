@@ -166,4 +166,4 @@ fun SupportOverrideBanner(
     }
 }
 
-private fun Long.padZero(): String = if (this < 10) "0$this" else "$this"
+internal fun Long.padZero(): String = if (this < 10) "0$this" else "$this"

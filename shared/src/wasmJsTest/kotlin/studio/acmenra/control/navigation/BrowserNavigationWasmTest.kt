@@ -29,7 +29,7 @@ class BrowserNavigationWasmTest {
     }
 
     private suspend fun waitUntil(
-        timeoutMs: Long = 2000,
+        timeoutMs: Long = 1500,
         message: String = "Condition timed out",
         condition: () -> Boolean,
     ) {
@@ -58,28 +58,42 @@ class BrowserNavigationWasmTest {
                     navController.currentDestination?.hasRoute<LoginRoute>() == true
             }
 
-            // 1. Navigate to Events
+            // 1. Navigate to Events with default null companyId
             navController.navigateToEvents()
-            waitUntil(message = "Navigate to events") {
-                window.location.hash.startsWith("#events") &&
+            waitUntil(message = "Navigate to events with null companyId") {
+                window.location.hash == "#events?companyId=null" &&
                     navController.currentDestination?.hasRoute<EventsRoute>() == true
             }
 
-            // 2. Browser Back
+            // 2. Navigate to Events with specific companyId
+            navController.navigateToEvents(companyId = "company-123")
+            waitUntil(message = "Navigate to events with companyId") {
+                window.location.hash == "#events?companyId=company-123" &&
+                    navController.currentDestination?.hasRoute<EventsRoute>() == true
+            }
+
+            // 3. Browser Back
+            window.history.back()
+            waitUntil(message = "Browser back to events null companyId") {
+                window.location.hash == "#events?companyId=null" &&
+                    navController.currentDestination?.hasRoute<EventsRoute>() == true
+            }
+
+            // 4. Browser Back again
             window.history.back()
             waitUntil(message = "Browser back to login") {
                 window.location.hash == "#login" &&
                     navController.currentDestination?.hasRoute<LoginRoute>() == true
             }
 
-            // 3. Browser Forward
+            // 5. Browser Forward
             window.history.forward()
             waitUntil(message = "Browser forward to events") {
-                window.location.hash.startsWith("#events") &&
+                window.location.hash == "#events?companyId=null" &&
                     navController.currentDestination?.hasRoute<EventsRoute>() == true
             }
 
-            // 4. Logout: navigateToLogin clears EventsRoute from stack
+            // 6. Logout: navigateToLogin clears EventsRoute from stack
             navController.navigateToLogin()
             waitUntil(message = "Logout navigate to login") {
                 window.location.hash == "#login" &&
@@ -103,7 +117,7 @@ class BrowserNavigationWasmTest {
                 }
 
             waitUntil(message = "Direct URL navigation to #events") {
-                window.location.hash.startsWith("#events") &&
+                window.location.hash == "#events?companyId=null" &&
                     navController.currentDestination?.hasRoute<EventsRoute>() == true
             }
 

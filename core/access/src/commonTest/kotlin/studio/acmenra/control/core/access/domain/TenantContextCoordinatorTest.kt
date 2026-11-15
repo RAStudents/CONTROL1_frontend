@@ -1419,4 +1419,53 @@ class TenantContextCoordinatorTest {
             assertTrue(state is TenantContextState.Authorized)
             assertEquals("c1", state.context.companyId)
         }
+
+    @Test
+    fun testEnsureTenantContextWhenAlreadySelectedCompanyDoesNotReload() =
+        runTest {
+            var callCount = 0
+            repository.handler = { _ ->
+                callCount++
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = "c1",
+                        companyName = "Company 1",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_1",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            coordinator.ensureTenantContext("c1")
+            assertEquals(1, callCount)
+            assertTrue(coordinator.tenantState.value is TenantContextState.Authorized)
+
+            // Second call with same company id should not re-query repository
+            coordinator.ensureTenantContext("c1")
+            assertEquals(1, callCount)
+            assertTrue(coordinator.tenantState.value is TenantContextState.Authorized)
+        }
+
+    @Test
+    fun testEnsureTenantContextWhenRepositoryFailsSetsErrorState() =
+        runTest {
+            val expectedError = NetworkError.Connectivity("Network connection failed")
+            repository.handler = { _ ->
+                NetworkResult.Failure(expectedError)
+            }
+
+            coordinator.ensureTenantContext("c_fail")
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Error)
+            assertEquals("c_fail", state.companyId)
+            assertEquals(expectedError, state.error)
+        }
 }

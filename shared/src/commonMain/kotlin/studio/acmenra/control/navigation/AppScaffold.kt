@@ -29,8 +29,6 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
-import studio.acmenra.control.core.access.domain.model.AccessStatus
-import studio.acmenra.control.core.access.domain.model.CompanyStatus
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
 import studio.acmenra.control.core.access.domain.model.TenantContextState
 import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
@@ -94,63 +92,33 @@ fun AppScaffold(
     }
 
     val globalContext = (globalState as? GlobalAccessState.Ready)?.context
-    val authorizedContext = (tenantState as? TenantContextState.Authorized)?.context
-
-    val visibleItems =
-        remember(authorizedContext, items) {
-            items.filter { item ->
-                val perm = item.requiredPermission
-                perm == null || (authorizedContext != null && perm.isSatisfiedBy(authorizedContext))
-            }
+    val uiState =
+        remember(globalContext, tenantState, destination, items) {
+            calculateAppScaffoldUiState(
+                globalContext = globalContext,
+                tenantState = tenantState,
+                destination = destination,
+                items = items,
+            )
         }
 
-    val currentCompanyId = authorizedContext?.companyId.orEmpty()
-    val currentCompanyName =
-        authorizedContext?.companyName
-            ?: (tenantState as? TenantContextState.Restricted)?.companyName
-    val currentCompanyStatus = authorizedContext?.companyStatus
-    val selectedCompanyId = authorizedContext?.companyId ?: (tenantState as? TenantContextState.Restricted)?.companyId
-    val isRestricted =
-        tenantState is TenantContextState.Restricted ||
-            currentCompanyStatus == CompanyStatus.RESTRICTED
-    val canSwitch =
-        globalContext != null &&
-            (globalContext.hasMultipleCompanies || TenantAccessResolver.canBrowseAll(globalContext))
-
-    val isSupportOverrideActive =
-        authorizedContext?.accessStatus == AccessStatus.ACTIVE_SUPPORT_OVERRIDE &&
-            authorizedContext.supportGrant != null &&
-            !authorizedContext.isSupportGrantLocallyExpired
-    val activeSupportGrant = if (isSupportOverrideActive) authorizedContext.supportGrant else null
-
-    val isOnVendorDashboard =
-        destination.hasRoute<CompaniesDashboardRoute>() &&
-            globalContext?.let(TenantAccessResolver::canBrowseAll) == true
-    val currentDestinationItem = visibleItems.firstOrNull { it.isSelected(destination) }
+    val currentDestinationItem = uiState.visibleItems.firstOrNull { it.isSelected(destination) }
     val defaultTitle =
         when {
-            isOnVendorDashboard -> stringResource(Res.string.company_switcher_all_vendor)
+            uiState.isOnVendorDashboard -> stringResource(Res.string.company_switcher_all_vendor)
             currentDestinationItem != null -> stringResource(currentDestinationItem.labelRes)
             else -> ""
         }
     val title = topBarState.title ?: defaultTitle
 
     val displayCompanyName =
-        if (isOnVendorDashboard) {
+        if (uiState.isOnVendorDashboard) {
             stringResource(Res.string.company_switcher_all_vendor)
         } else {
-            currentCompanyName.orEmpty()
+            uiState.currentCompanyName.orEmpty()
         }
-    val displayIsRestricted = if (isOnVendorDashboard) false else isRestricted
-    val effectiveSelectedCompanyId = if (isOnVendorDashboard) null else selectedCompanyId
-    val effectiveCompanyId =
-        currentCompanyId.ifBlank {
-            globalContext?.defaultCompanyId ?: globalContext
-                ?.memberCompanies
-                ?.firstOrNull()
-                ?.id
-                .orEmpty()
-        }
+    val displayIsRestricted = if (uiState.isOnVendorDashboard) false else uiState.isRestricted
+    val effectiveSelectedCompanyId = if (uiState.isOnVendorDashboard) null else uiState.selectedCompanyId
 
     CompositionLocalProvider(LocalTopBarState provides topBarState) {
         BoxWithConstraints(modifier = modifier.fillMaxSize()) {
@@ -159,13 +127,13 @@ fun AppScaffold(
             if (isDesktopOrTablet) {
                 Row(modifier = Modifier.fillMaxSize()) {
                     AmberNavigationRail {
-                        visibleItems.forEach { item ->
+                        uiState.visibleItems.forEach { item ->
                             val selected = item.isSelected(destination)
                             AmberNavigationRailItem(
                                 selected = selected,
                                 onClick = {
                                     if (!selected) {
-                                        item.navigate(navController, companyId = effectiveCompanyId)
+                                        item.navigate(navController, companyId = uiState.effectiveCompanyId)
                                     }
                                 },
                                 icon = {
@@ -193,6 +161,14 @@ fun AppScaffold(
                     ) {
                         AmberTopAppBar(
                             title = title,
+                            subtitle =
+                                if (!isDesktopOrTablet &&
+                                    displayCompanyName.isNotBlank()
+                                ) {
+                                    displayCompanyName
+                                } else {
+                                    null
+                                },
                             leadingAction = topBarState.leadingAction,
                             actions = topBarState.actions,
                             desktopCompanyBox =
@@ -201,7 +177,7 @@ fun AppScaffold(
                                         DesktopCompanySelector(
                                             currentCompanyName = displayCompanyName,
                                             isRestricted = displayIsRestricted,
-                                            canSwitch = canSwitch,
+                                            canSwitch = uiState.canSwitch,
                                             companies = globalContext.memberCompanies,
                                             selectedCompanyId = effectiveSelectedCompanyId,
                                             canBrowseAllCompanies = TenantAccessResolver.canBrowseAll(globalContext),
@@ -222,8 +198,8 @@ fun AppScaffold(
                             mobileCompanyAction = null,
                         )
 
-                        if (activeSupportGrant != null) {
-                            SupportOverrideBanner(grant = activeSupportGrant)
+                        if (uiState.activeSupportGrant != null) {
+                            SupportOverrideBanner(grant = uiState.activeSupportGrant)
                         }
 
                         Box(
@@ -243,11 +219,12 @@ fun AppScaffold(
                     topBar = {
                         AmberTopAppBar(
                             title = title,
+                            subtitle = if (displayCompanyName.isNotBlank()) displayCompanyName else null,
                             leadingAction = topBarState.leadingAction,
                             actions = topBarState.actions,
                             desktopCompanyBox = null,
                             mobileCompanyAction =
-                                if (globalContext != null && canSwitch) {
+                                if (globalContext != null && uiState.canSwitch) {
                                     {
                                         MobileCompanyIconButton(
                                             isRestricted = displayIsRestricted,
@@ -261,13 +238,13 @@ fun AppScaffold(
                     },
                     bottomBar = {
                         AmberNavigationBar {
-                            visibleItems.forEach { item ->
+                            uiState.visibleItems.forEach { item ->
                                 val selected = item.isSelected(destination)
                                 AmberNavigationBarItem(
                                     selected = selected,
                                     onClick = {
                                         if (!selected) {
-                                            item.navigate(navController, companyId = effectiveCompanyId)
+                                            item.navigate(navController, companyId = uiState.effectiveCompanyId)
                                         }
                                     },
                                     icon = {
@@ -294,8 +271,8 @@ fun AppScaffold(
                                 .fillMaxSize()
                                 .padding(innerPadding),
                     ) {
-                        if (activeSupportGrant != null) {
-                            SupportOverrideBanner(grant = activeSupportGrant)
+                        if (uiState.activeSupportGrant != null) {
+                            SupportOverrideBanner(grant = uiState.activeSupportGrant)
                         }
 
                         Box(

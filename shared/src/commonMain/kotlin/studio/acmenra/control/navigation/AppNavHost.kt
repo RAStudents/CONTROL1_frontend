@@ -1,12 +1,9 @@
 package studio.acmenra.control.navigation
 
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
@@ -19,6 +16,7 @@ import studio.acmenra.control.core.access.domain.model.TenantPermission
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.feature.auth.presentation.LoginRouteContent
 import studio.acmenra.control.feature.events.presentation.EventsRouteContent
+import studio.acmenra.control.navigation.components.LoadingPlaceholder
 import studio.acmenra.control.navigation.screen.CompaniesDashboardScreen
 
 @Composable
@@ -39,7 +37,8 @@ fun AppNavHost(
             }
 
             sessionState != SessionState.Authenticated &&
-                destination?.hasRoute<LoginRoute>() != true -> {
+                destination != null &&
+                !destination.hasRoute<LoginRoute>() -> {
                 navController.navigateToLogin()
             }
         }
@@ -61,31 +60,16 @@ fun AppNavHost(
                     requestedCompanyId = route.companyId,
                     requirement = RoutePermissionRequirement.Tenant(TenantPermission.EVENTS_READ),
                     onNavigateToCompany = { newCompanyId ->
-                        navController.navigate(EventsRoute(companyId = newCompanyId)) {
-                            popUpTo<EventsRoute> {
-                                inclusive = true
-                            }
-                            launchSingleTop = true
-                        }
+                        navController.navigateToEvents(newCompanyId)
                     },
                     onNavigateToCompaniesDashboard = {
-                        navController.navigate(CompaniesDashboardRoute) {
-                            popUpTo<EventsRoute> {
-                                inclusive = true
-                            }
-                            launchSingleTop = true
-                        }
+                        navController.navigateToCompaniesDashboard()
                     },
                 ) { tenantContext ->
                     EventsRouteContent(companyId = tenantContext.companyId)
                 }
             } else {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CircularProgressIndicator()
-                }
+                LoadingPlaceholder(modifier = Modifier.fillMaxSize())
             }
         }
 
@@ -103,12 +87,7 @@ fun AppNavHost(
                     )
                 }
             } else {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CircularProgressIndicator()
-                }
+                LoadingPlaceholder(modifier = Modifier.fillMaxSize())
             }
         }
     }

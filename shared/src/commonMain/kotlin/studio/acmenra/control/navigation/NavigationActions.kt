@@ -11,9 +11,9 @@ fun NavController.navigateToLogin() {
     }
 }
 
-fun NavController.navigateToEvents(companyId: String = "") {
+fun NavController.navigateToEvents(companyId: String? = null) {
     navigate(EventsRoute(companyId = companyId)) {
-        popUpTo(graph.id) {
+        popUpTo<EventsRoute> {
             inclusive = true
         }
         launchSingleTop = true
@@ -22,7 +22,7 @@ fun NavController.navigateToEvents(companyId: String = "") {
 
 fun NavController.navigateToCompaniesDashboard() {
     navigate(CompaniesDashboardRoute) {
-        popUpTo(graph.id) {
+        popUpTo<EventsRoute> {
             inclusive = true
         }
         launchSingleTop = true

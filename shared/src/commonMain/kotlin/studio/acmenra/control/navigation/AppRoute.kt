@@ -14,11 +14,11 @@ data object LoginRoute : AppRoute
 data object CompaniesDashboardRoute : AppRoute
 
 sealed interface TenantRoute : AppRoute {
-    val companyId: String
+    val companyId: String?
 }
 
 @Serializable
 @SerialName("events")
 data class EventsRoute(
-    override val companyId: String = "",
+    override val companyId: String? = null,
 ) : TenantRoute

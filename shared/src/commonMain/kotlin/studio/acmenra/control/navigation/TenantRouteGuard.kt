@@ -1,8 +1,5 @@
 package studio.acmenra.control.navigation
 
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -12,12 +9,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
-import studio.acmenra.control.core.access.domain.AccessManager
 import studio.acmenra.control.core.access.domain.model.AuthorizedTenantContext
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
 import studio.acmenra.control.core.access.domain.model.RoutePermissionRequirement
@@ -25,11 +20,13 @@ import studio.acmenra.control.core.access.domain.model.TenantContextState
 import studio.acmenra.control.core.access.domain.usecase.EnsureTenantContextUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveTenantContextUseCase
+import studio.acmenra.control.core.access.domain.usecase.RefreshGlobalAccessUseCase
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.restricted_no_companies_desc
 import studio.acmenra.control.core.ui.generated.resources.restricted_no_companies_title
 import studio.acmenra.control.navigation.components.CompanySelectionDialog
+import studio.acmenra.control.navigation.components.LoadingPlaceholder
 import studio.acmenra.control.navigation.screen.AccessDeniedScreen
 import studio.acmenra.control.navigation.screen.CompanyFrozenScreen
 import studio.acmenra.control.navigation.screen.NoPermissionsScreen
@@ -37,7 +34,7 @@ import studio.acmenra.control.navigation.screen.TenantErrorScreen
 
 @Composable
 fun TenantRouteGuard(
-    requestedCompanyId: String,
+    requestedCompanyId: String?,
     modifier: Modifier = Modifier,
     requirement: RoutePermissionRequirement? = null,
     onNavigateToCompany: (companyId: String) -> Unit = {},
@@ -45,7 +42,7 @@ fun TenantRouteGuard(
     observeGlobalAccessUseCase: ObserveGlobalAccessUseCase = koinInject(),
     observeTenantContextUseCase: ObserveTenantContextUseCase = koinInject(),
     ensureTenantContextUseCase: EnsureTenantContextUseCase = koinInject(),
-    accessManager: AccessManager = koinInject(),
+    refreshGlobalAccessUseCase: RefreshGlobalAccessUseCase = koinInject(),
     sessionManager: SessionManager = koinInject(),
     content: @Composable (AuthorizedTenantContext) -> Unit,
 ) {
@@ -63,7 +60,7 @@ fun TenantRouteGuard(
 
     if (showCompanyDialog) {
         val currentSelectedId =
-            (tenantState as? TenantContextState.Authorized)?.context?.companyId ?: requestedCompanyId
+            (tenantState as? TenantContextState.Authorized)?.context?.companyId ?: requestedCompanyId.orEmpty()
         CompanySelectionDialog(
             companies = memberCompanies,
             selectedCompanyId = currentSelectedId,
@@ -93,25 +90,40 @@ fun TenantRouteGuard(
         }
     }
 
-    when (val global = globalState) {
-        is GlobalAccessState.Idle, is GlobalAccessState.InitialLoading -> {
+    val decision =
+        resolveTenantGuardDecision(
+            globalState = globalState,
+            tenantState = tenantState,
+            requestedCompanyId = requestedCompanyId,
+            requirement = requirement,
+        )
+
+    LaunchedEffect(requestedCompanyId, globalState) {
+        if (!requestedCompanyId.isNullOrBlank() &&
+            globalState is GlobalAccessState.Ready &&
+            TenantAccessResolver.hasAccess((globalState as GlobalAccessState.Ready).context, requestedCompanyId)
+        ) {
+            ensureTenantContextUseCase(requestedCompanyId)
+        }
+    }
+
+    when (decision) {
+        is TenantGuardDecision.ShowLoading -> {
             LoadingPlaceholder(modifier)
-            return
         }
 
-        is GlobalAccessState.Restricted.AccountFrozen -> {
+        is TenantGuardDecision.AccountFrozen -> {
             CompanyFrozenScreen(
-                restriction = global.restriction,
+                restriction = decision.restriction,
                 companyName = null,
                 canSwitchCompany = false,
                 onLogout = onLogoutAction,
                 isAccountLevel = true,
                 modifier = modifier,
             )
-            return
         }
 
-        is GlobalAccessState.Restricted.NoCompaniesAvailable -> {
+        is TenantGuardDecision.NoCompaniesAvailable -> {
             AccessDeniedScreen(
                 companyName = null,
                 canSwitchCompany = false,
@@ -120,48 +132,41 @@ fun TenantRouteGuard(
                 description = stringResource(Res.string.restricted_no_companies_desc),
                 modifier = modifier,
             )
-            return
         }
 
-        is GlobalAccessState.Error -> {
+        is TenantGuardDecision.GlobalError -> {
             TenantErrorScreen(
-                error = global.error,
+                error = decision.error,
                 canSwitchCompany = false,
                 onRetry = {
                     scope.launch {
-                        if (requestedCompanyId.isNotBlank()) {
+                        if (!requestedCompanyId.isNullOrBlank()) {
                             ensureTenantContextUseCase(requestedCompanyId)
                         } else {
-                            accessManager.refreshGlobalContext(force = true)
+                            refreshGlobalAccessUseCase(force = true)
                         }
                     }
                 },
                 onLogout = onLogoutAction,
                 modifier = modifier,
             )
-            return
         }
 
-        is GlobalAccessState.Ready -> {
-            // Handled below
-        }
-    }
-
-    val userContext = (globalState as GlobalAccessState.Ready).context
-
-    if (requestedCompanyId.isBlank()) {
-        val resolvedId = userContext.defaultCompanyId ?: userContext.memberCompanies.firstOrNull()?.id
-        if (resolvedId != null) {
-            LaunchedEffect(resolvedId) {
-                onNavigateToCompany(resolvedId)
+        is TenantGuardDecision.RedirectToCompany -> {
+            LaunchedEffect(decision.targetCompanyId) {
+                onNavigateToCompany(decision.targetCompanyId)
             }
             LoadingPlaceholder(modifier)
-        } else if (TenantAccessResolver.canBrowseAll(userContext)) {
+        }
+
+        is TenantGuardDecision.RedirectToVendorDashboard -> {
             LaunchedEffect(Unit) {
                 onNavigateToCompaniesDashboard()
             }
             LoadingPlaceholder(modifier)
-        } else {
+        }
+
+        is TenantGuardDecision.AccessDenied -> {
             AccessDeniedScreen(
                 companyName = null,
                 canSwitchCompany = false,
@@ -169,136 +174,57 @@ fun TenantRouteGuard(
                 modifier = modifier,
             )
         }
-        return
-    }
 
-    val hasAccessToRequested = TenantAccessResolver.hasAccess(userContext, requestedCompanyId)
-    if (!hasAccessToRequested) {
-        val previousAuthorizedCompanyId = (tenantState as? TenantContextState.Authorized)?.context?.companyId
-        val fallbackCompanyId =
-            TenantAccessResolver.resolveFallbackCompanyId(
-                userContext = userContext,
-                previousAuthorizedCompanyId = previousAuthorizedCompanyId,
-                excludedCompanyId = requestedCompanyId,
-            )
-        if (fallbackCompanyId != null && fallbackCompanyId != requestedCompanyId) {
-            LaunchedEffect(requestedCompanyId, fallbackCompanyId) {
-                onNavigateToCompany(fallbackCompanyId)
-            }
-            LoadingPlaceholder(modifier)
-        } else if (TenantAccessResolver.canBrowseAll(userContext)) {
-            LaunchedEffect(requestedCompanyId) {
-                onNavigateToCompaniesDashboard()
-            }
-            LoadingPlaceholder(modifier)
-        } else {
-            AccessDeniedScreen(
-                companyName = null,
-                canSwitchCompany = false,
+        is TenantGuardDecision.TenantError -> {
+            TenantErrorScreen(
+                error = decision.error,
+                canSwitchCompany = canSwitchCompany,
+                onRetry = {
+                    scope.launch {
+                        ensureTenantContextUseCase(decision.companyId)
+                    }
+                },
+                onSwitchCompany = onSwitchCompanyAction,
                 onLogout = onLogoutAction,
                 modifier = modifier,
             )
         }
-        return
-    }
 
-    LaunchedEffect(requestedCompanyId) {
-        ensureTenantContextUseCase(requestedCompanyId)
-    }
-
-    when (val state = tenantState) {
-        is TenantContextState.NotSelected, is TenantContextState.Loading -> {
-            LoadingPlaceholder(modifier)
+        is TenantGuardDecision.CompanyFrozen -> {
+            CompanyFrozenScreen(
+                restriction = decision.restriction,
+                companyName = decision.companyName,
+                canSwitchCompany = canSwitchCompany,
+                onSwitchCompany = onSwitchCompanyAction,
+                onLogout = onLogoutAction,
+                modifier = modifier,
+            )
         }
 
-        is TenantContextState.Error -> {
-            if (state.companyId != requestedCompanyId) {
-                LoadingPlaceholder(modifier)
-            } else {
-                TenantErrorScreen(
-                    error = state.error,
-                    canSwitchCompany = canSwitchCompany,
-                    onRetry = {
-                        scope.launch {
-                            ensureTenantContextUseCase(requestedCompanyId)
-                        }
-                    },
-                    onSwitchCompany = onSwitchCompanyAction,
-                    onLogout = onLogoutAction,
-                    modifier = modifier,
-                )
+        is TenantGuardDecision.NoPermissions -> {
+            NoPermissionsScreen(
+                companyName = decision.companyName,
+                canSwitchCompany = canSwitchCompany,
+                onSwitchCompany = onSwitchCompanyAction,
+                onLogout = onLogoutAction,
+                modifier = modifier,
+            )
+        }
+
+        is TenantGuardDecision.TenantAccessDenied -> {
+            AccessDeniedScreen(
+                companyName = decision.companyName,
+                canSwitchCompany = canSwitchCompany,
+                onSwitchCompany = onSwitchCompanyAction,
+                onLogout = onLogoutAction,
+                modifier = modifier,
+            )
+        }
+
+        is TenantGuardDecision.RenderContent -> {
+            key(decision.context.companyId) {
+                content(decision.context)
             }
         }
-
-        is TenantContextState.Restricted.CompanyFrozen -> {
-            if (state.companyId != requestedCompanyId) {
-                LoadingPlaceholder(modifier)
-            } else {
-                CompanyFrozenScreen(
-                    restriction = state.restriction,
-                    companyName = state.companyName,
-                    canSwitchCompany = canSwitchCompany,
-                    onSwitchCompany = onSwitchCompanyAction,
-                    onLogout = onLogoutAction,
-                    modifier = modifier,
-                )
-            }
-        }
-
-        is TenantContextState.Restricted.NoPermissions -> {
-            if (state.companyId != requestedCompanyId) {
-                LoadingPlaceholder(modifier)
-            } else {
-                NoPermissionsScreen(
-                    companyName = state.companyName,
-                    canSwitchCompany = canSwitchCompany,
-                    onSwitchCompany = onSwitchCompanyAction,
-                    onLogout = onLogoutAction,
-                    modifier = modifier,
-                )
-            }
-        }
-
-        is TenantContextState.Restricted.AccessDenied -> {
-            if (state.companyId != requestedCompanyId) {
-                LoadingPlaceholder(modifier)
-            } else {
-                AccessDeniedScreen(
-                    companyName = state.companyName,
-                    canSwitchCompany = canSwitchCompany,
-                    onSwitchCompany = onSwitchCompanyAction,
-                    onLogout = onLogoutAction,
-                    modifier = modifier,
-                )
-            }
-        }
-
-        is TenantContextState.Authorized -> {
-            if (state.context.companyId != requestedCompanyId) {
-                LoadingPlaceholder(modifier)
-            } else if (requirement != null && !requirement.isSatisfiedBy(state.context)) {
-                NoPermissionsScreen(
-                    companyName = state.context.companyName,
-                    canSwitchCompany = canSwitchCompany,
-                    onSwitchCompany = onSwitchCompanyAction,
-                    onLogout = onLogoutAction,
-                    modifier = modifier,
-                )
-            } else {
-                key(state.context.companyId) {
-                    content(state.context)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LoadingPlaceholder(modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center,
-    ) {
-        CircularProgressIndicator()
     }
 }

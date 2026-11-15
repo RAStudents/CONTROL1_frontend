@@ -7,34 +7,25 @@ object TenantAccessResolver {
     fun isVendorAdmin(userContext: GlobalUserContext): Boolean =
         userContext.globalPermissions.contains(GlobalPermission.COMPANIES_MANAGE)
 
-    fun canBrowseAll(userContext: GlobalUserContext): Boolean =
-        userContext.canBrowseAllCompanies || isVendorAdmin(userContext)
+    fun canBrowseAll(userContext: GlobalUserContext): Boolean = isVendorAdmin(userContext)
 
     fun hasAccess(
         userContext: GlobalUserContext,
-        companyId: String,
+        companyId: String?,
     ): Boolean {
-        if (companyId.isBlank()) return false
+        if (companyId.isNullOrBlank()) return false
         return isVendorAdmin(userContext) ||
             userContext.memberCompanies.any { it.id == companyId }
     }
 
     fun resolveFallbackCompanyId(
         userContext: GlobalUserContext,
-        previousAuthorizedCompanyId: String?,
-        excludedCompanyId: String? = null,
+        previousAuthorizedCompanyId: String? = null,
         excludedCompanyIds: Set<String> = emptySet(),
     ): String? {
-        val allExcluded =
-            if (excludedCompanyId != null) {
-                excludedCompanyIds + excludedCompanyId
-            } else {
-                excludedCompanyIds
-            }
-
         val isPreviousValid =
             previousAuthorizedCompanyId != null &&
-                previousAuthorizedCompanyId !in allExcluded &&
+                previousAuthorizedCompanyId !in excludedCompanyIds &&
                 (
                     isVendorAdmin(userContext) ||
                         userContext.memberCompanies.any { it.id == previousAuthorizedCompanyId }
@@ -45,11 +36,11 @@ object TenantAccessResolver {
 
         val defaultAccessible =
             userContext.defaultCompanyId?.takeIf { defId ->
-                defId !in allExcluded &&
+                defId !in excludedCompanyIds &&
                     (isVendorAdmin(userContext) || userContext.memberCompanies.any { it.id == defId })
             }
 
         return defaultAccessible
-            ?: userContext.memberCompanies.firstOrNull { it.id !in allExcluded }?.id
+            ?: userContext.memberCompanies.firstOrNull { it.id !in excludedCompanyIds }?.id
     }
 }

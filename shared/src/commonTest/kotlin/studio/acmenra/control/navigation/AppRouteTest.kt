@@ -35,7 +35,7 @@ class AppRouteTest {
         assertEquals("{}", json)
         val decoded = Json.decodeFromString<EventsRoute>(json)
         assertEquals(EventsRoute(), decoded)
-        assertEquals("", decoded.companyId)
+        assertEquals(null, decoded.companyId)
     }
 
     @Test

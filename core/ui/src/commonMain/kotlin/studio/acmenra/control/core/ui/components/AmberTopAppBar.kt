@@ -2,12 +2,16 @@ package studio.acmenra.control.core.ui.components
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -24,12 +28,15 @@ import studio.acmenra.control.core.ui.theme.AmberDimens
  * На широких экранах (Desktop / Tablet) отображает справа выделенный контейнер [desktopCompanyBox]
  * (селектор компании на фоне surfaceContainerHigh).
  * На мобильных экранах действие выбора компании передаётся через [mobileCompanyAction] и отображается
- * в блоке действий справа от заголовка.
+ * в блоке действий справа от заголовка. При наличии [subtitle] отображает его под заголовком.
+ * Учитывает [windowInsets] (по умолчанию [WindowInsets.statusBars]) для корректного edge-to-edge отображения.
  */
 @Composable
 fun AmberTopAppBar(
     title: String,
     modifier: Modifier = Modifier,
+    subtitle: String? = null,
+    windowInsets: WindowInsets = WindowInsets.statusBars,
     containerColor: Color = MaterialTheme.colorScheme.surfaceContainer,
     contentColor: Color = MaterialTheme.colorScheme.onSurface,
     leadingAction: (@Composable () -> Unit)? = null,
@@ -38,18 +45,19 @@ fun AmberTopAppBar(
     desktopCompanyBox: (@Composable () -> Unit)? = null,
 ) {
     Surface(
-        modifier =
-            modifier
-                .fillMaxWidth()
-                .height(AmberDimens.TopBarHeight),
+        modifier = modifier.fillMaxWidth(),
         color = containerColor,
         contentColor = contentColor,
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().fillMaxHeight(),
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(windowInsets)
+                    .height(AmberDimens.TopBarHeight),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Основная часть бара (Заголовок + иконки действий)
+            // Основная часть бара (Заголовок + подзаголовок + иконки действий)
             Row(
                 modifier =
                     Modifier
@@ -63,13 +71,26 @@ fun AmberTopAppBar(
                     leadingAction()
                 }
 
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                Column(
                     modifier = Modifier.weight(1f),
-                )
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (!subtitle.isNullOrBlank()) {
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,

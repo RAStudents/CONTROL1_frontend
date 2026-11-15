@@ -34,6 +34,7 @@ import studio.acmenra.control.core.access.domain.model.CompanyStatus
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.company_status_active
 import studio.acmenra.control.core.ui.generated.resources.company_status_restricted
+import studio.acmenra.control.core.ui.generated.resources.company_status_unknown
 import studio.acmenra.control.core.ui.generated.resources.company_switcher_all_vendor
 import studio.acmenra.control.core.ui.generated.resources.company_switcher_dialog_title
 import studio.acmenra.control.core.ui.generated.resources.company_switcher_open
@@ -41,7 +42,6 @@ import studio.acmenra.control.core.ui.generated.resources.company_switcher_selec
 import studio.acmenra.control.core.ui.generated.resources.ic_arrow_drop_down
 import studio.acmenra.control.core.ui.generated.resources.ic_check_circle
 import studio.acmenra.control.core.ui.generated.resources.ic_company
-import studio.acmenra.control.core.ui.generated.resources.restriction_unknown
 import studio.acmenra.control.core.ui.theme.AmberCorners
 import studio.acmenra.control.core.ui.theme.AmberDimens
 
@@ -256,7 +256,7 @@ fun CompanyStatusBadge(
 
             CompanyStatus.UNKNOWN ->
                 Triple(
-                    Res.string.restriction_unknown,
+                    Res.string.company_status_unknown,
                     MaterialTheme.colorScheme.surfaceContainerHighest,
                     MaterialTheme.colorScheme.onSurfaceVariant,
                 )

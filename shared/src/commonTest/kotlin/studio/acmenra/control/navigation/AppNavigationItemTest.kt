@@ -1,5 +1,13 @@
 package studio.acmenra.control.navigation
 
+import studio.acmenra.control.core.access.domain.model.AccessOrigin
+import studio.acmenra.control.core.access.domain.model.AccessStatus
+import studio.acmenra.control.core.access.domain.model.AuthorizedTenantContext
+import studio.acmenra.control.core.access.domain.model.CompanyBrief
+import studio.acmenra.control.core.access.domain.model.CompanyStatus
+import studio.acmenra.control.core.access.domain.model.GlobalPermission
+import studio.acmenra.control.core.access.domain.model.GlobalUserContext
+import studio.acmenra.control.core.access.domain.model.PermissionKey
 import studio.acmenra.control.core.access.domain.model.RoutePermissionRequirement
 import studio.acmenra.control.core.access.domain.model.TenantPermission
 import studio.acmenra.control.core.ui.generated.resources.Res
@@ -8,8 +16,44 @@ import studio.acmenra.control.core.ui.generated.resources.nav_item_events
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+import kotlin.time.Instant
 
 class AppNavigationItemTest {
+    private fun createAuthorizedContext(
+        tenantPermissions: Set<TenantPermission> = setOf(TenantPermission.EVENTS_READ),
+    ): AuthorizedTenantContext =
+        AuthorizedTenantContext(
+            userId = "u1",
+            companyId = "c1",
+            companyName = "Acme Corp",
+            tenantRevision = 1L,
+            accessRevision = "rev1",
+            companyStatus = CompanyStatus.ACTIVE,
+            accessStatus = AccessStatus.ACTIVE,
+            activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+            rawTenantPermissions = tenantPermissions,
+            rawSupportPermissions = emptySet(),
+            permissionSources =
+                tenantPermissions.associate {
+                    PermissionKey.Tenant(it) to setOf(AccessOrigin.DIRECT_MEMBERSHIP)
+                },
+            supportGrant = null,
+        )
+
+    private fun createGlobalContext(
+        canBrowseAllCompanies: Boolean = false,
+        globalPermissions: Set<GlobalPermission> = emptySet(),
+    ): GlobalUserContext =
+        GlobalUserContext(
+            userId = "u1",
+            serverTime = Instant.fromEpochMilliseconds(0),
+            globalPermissions = globalPermissions,
+            defaultCompanyId = "c1",
+            canBrowseAllCompanies = canBrowseAllCompanies,
+            memberCompanies = listOf(CompanyBrief("c1", "Acme", CompanyStatus.ACTIVE)),
+        )
+
     @Test
     fun testDefaultItemsContainEvents() {
         assertEquals(1, AppNavigationItem.DEFAULT_ITEMS.size)
@@ -30,5 +74,75 @@ class AppNavigationItemTest {
     @Test
     fun testIsSelectedWithNullDestination() {
         assertFalse(AppNavigationItem.Events.isSelected(null))
+    }
+
+    @Test
+    fun testVisibleItemsWhenAuthorizedWithEventsRead() {
+        val items = AppNavigationItem.DEFAULT_ITEMS
+        val authorized = createAuthorizedContext(setOf(TenantPermission.EVENTS_READ))
+        val visible = AppNavigationItem.filterVisibleNavigationItems(items, authorized)
+
+        assertEquals(1, visible.size)
+        assertEquals(AppNavigationItem.Events, visible.first())
+    }
+
+    @Test
+    fun testVisibleItemsWhenAuthorizedWithoutEventsRead() {
+        val items = AppNavigationItem.DEFAULT_ITEMS
+        val authorized = createAuthorizedContext(emptySet())
+        val visible = AppNavigationItem.filterVisibleNavigationItems(items, authorized)
+
+        assertTrue(visible.isEmpty())
+    }
+
+    @Test
+    fun testVisibleItemsWhenNotAuthorizedAndRegularUser() {
+        val items = AppNavigationItem.DEFAULT_ITEMS
+        val global = createGlobalContext()
+        val visible =
+            AppNavigationItem.filterVisibleNavigationItems(
+                items = items,
+                authorizedContext = null,
+                globalContext = global,
+            )
+
+        assertTrue(visible.isEmpty())
+    }
+
+    @Test
+    fun testVisibleItemsWhenNotAuthorizedAndVendorAdmin() {
+        val items = AppNavigationItem.DEFAULT_ITEMS
+        val vendor =
+            createGlobalContext(
+                canBrowseAllCompanies = true,
+                globalPermissions = setOf(GlobalPermission.COMPANIES_MANAGE),
+            )
+        val visible =
+            AppNavigationItem.filterVisibleNavigationItems(
+                items = items,
+                authorizedContext = null,
+                globalContext = vendor,
+            )
+
+        assertEquals(1, visible.size)
+        assertEquals(AppNavigationItem.Events, visible.first())
+    }
+
+    @Test
+    fun testVisibleItemsWhenNotAuthorizedAndSupportEngineer() {
+        val items = AppNavigationItem.DEFAULT_ITEMS
+        val support =
+            createGlobalContext(
+                canBrowseAllCompanies = true,
+                globalPermissions = setOf(GlobalPermission.COMPANIES_MONITOR),
+            )
+        val visible =
+            AppNavigationItem.filterVisibleNavigationItems(
+                items = items,
+                authorizedContext = null,
+                globalContext = support,
+            )
+
+        assertTrue(visible.isEmpty())
     }
 }

@@ -24,7 +24,7 @@ fun ProvideTopBar(
 ) {
     val topBarState = LocalTopBarState.current
 
-    DisposableEffect(title) {
+    DisposableEffect(topBarState, title) {
         if (title != null) {
             topBarState.title = title
         }
@@ -35,7 +35,7 @@ fun ProvideTopBar(
         }
     }
 
-    DisposableEffect(leadingAction) {
+    DisposableEffect(topBarState, leadingAction) {
         topBarState.leadingAction = leadingAction
         onDispose {
             if (topBarState.leadingAction === leadingAction) {
@@ -44,7 +44,7 @@ fun ProvideTopBar(
         }
     }
 
-    DisposableEffect(actions) {
+    DisposableEffect(topBarState, actions) {
         val resolvedActions: @Composable RowScope.() -> Unit = actions ?: {}
         topBarState.actions = resolvedActions
         onDispose {

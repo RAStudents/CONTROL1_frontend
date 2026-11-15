@@ -36,7 +36,6 @@ fun EventsRouteContent(
     EventsScreen(
         state = state,
         onToggleExportMode = viewModel::toggleExportMode,
-        onFilterClick = {},
         modifier = modifier,
     )
 }
@@ -46,20 +45,21 @@ fun EventsScreen(
     state: EventsState,
     onToggleExportMode: () -> Unit,
     modifier: Modifier = Modifier,
-    onFilterClick: () -> Unit = {},
+    onFilterClick: (() -> Unit)? = null,
 ) {
     ProvideTopBar(
         title = stringResource(Res.string.nav_item_events),
-        leadingAction = {
-            IconButton(onClick = onFilterClick) {
-                Icon(
-                    painter = painterResource(Res.drawable.ic_tune),
-                    contentDescription = stringResource(Res.string.events_filter_tune),
-                    modifier = Modifier.size(AmberDimens.ListIcon),
-                )
-            }
-        },
+        leadingAction = null,
         actions = {
+            if (onFilterClick != null) {
+                IconButton(onClick = onFilterClick) {
+                    Icon(
+                        painter = painterResource(Res.drawable.ic_tune),
+                        contentDescription = stringResource(Res.string.events_filter_tune),
+                        modifier = Modifier.size(AmberDimens.ListIcon),
+                    )
+                }
+            }
             IconButton(onClick = onToggleExportMode) {
                 Icon(
                     painter =

@@ -1,18 +1,15 @@
 package studio.acmenra.control.navigation
 
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import org.koin.compose.koinInject
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
 import studio.acmenra.control.core.access.domain.model.GlobalUserContext
 import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
+import studio.acmenra.control.navigation.components.LoadingPlaceholder
 
 @Composable
 fun VendorRouteGuard(
@@ -45,15 +42,5 @@ fun VendorRouteGuard(
             }
             LoadingPlaceholder(modifier)
         }
-    }
-}
-
-@Composable
-private fun LoadingPlaceholder(modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center,
-    ) {
-        CircularProgressIndicator()
     }
 }

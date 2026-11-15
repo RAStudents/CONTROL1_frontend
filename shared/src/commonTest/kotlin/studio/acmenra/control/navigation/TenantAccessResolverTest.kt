@@ -172,7 +172,7 @@ class TenantAccessResolverTest {
             TenantAccessResolver.resolveFallbackCompanyId(
                 userContext = user,
                 previousAuthorizedCompanyId = null,
-                excludedCompanyId = "c1",
+                excludedCompanyIds = setOf("c1"),
             )
         assertEquals("c2", fallback)
     }
@@ -185,7 +185,7 @@ class TenantAccessResolverTest {
             TenantAccessResolver.resolveFallbackCompanyId(
                 userContext = user,
                 previousAuthorizedCompanyId = "c2",
-                excludedCompanyId = "c2",
+                excludedCompanyIds = setOf("c2"),
             )
         assertEquals("c1", fallback)
     }
@@ -202,7 +202,7 @@ class TenantAccessResolverTest {
             TenantAccessResolver.resolveFallbackCompanyId(
                 userContext = user,
                 previousAuthorizedCompanyId = null,
-                excludedCompanyId = "c1",
+                excludedCompanyIds = setOf("c1"),
             )
         assertNull(fallback)
     }
@@ -258,8 +258,8 @@ class TenantAccessResolverTest {
         val vendor = createVendorAdminContext()
         assertTrue(TenantAccessResolver.canBrowseAll(vendor))
 
-        val userWithBrowseFlag = createUserContext().copy(canBrowseAllCompanies = true)
-        assertTrue(TenantAccessResolver.canBrowseAll(userWithBrowseFlag))
+        val supportEngineer = createSupportEngineerContext()
+        assertFalse(TenantAccessResolver.canBrowseAll(supportEngineer))
     }
 
     @Test

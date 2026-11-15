@@ -6,283 +6,294 @@ import studio.acmenra.control.core.access.domain.model.AccessStatus
 import studio.acmenra.control.core.access.domain.model.AuthorizedTenantContext
 import studio.acmenra.control.core.access.domain.model.CompanyBrief
 import studio.acmenra.control.core.access.domain.model.CompanyStatus
+import studio.acmenra.control.core.access.domain.model.GlobalAccessState
 import studio.acmenra.control.core.access.domain.model.GlobalPermission
 import studio.acmenra.control.core.access.domain.model.GlobalUserContext
 import studio.acmenra.control.core.access.domain.model.PermissionKey
 import studio.acmenra.control.core.access.domain.model.RestrictionType
 import studio.acmenra.control.core.access.domain.model.RoutePermissionRequirement
-import studio.acmenra.control.core.access.domain.model.SupportGrantInfo
-import studio.acmenra.control.core.access.domain.model.SupportGrantRuntimeState
-import studio.acmenra.control.core.access.domain.model.SupportGrantStatus
-import studio.acmenra.control.core.access.domain.model.SupportMode
-import studio.acmenra.control.core.access.domain.model.SupportPermission
 import studio.acmenra.control.core.access.domain.model.TenantContextState
 import studio.acmenra.control.core.access.domain.model.TenantPermission
+import studio.acmenra.control.core.network.model.NetworkError
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
-import kotlin.time.Duration
 import kotlin.time.Instant
 
 class TenantRouteGuardTest {
     private fun createAuthorizedContext(
         companyId: String = "c1",
-        companyName: String = "Acme Corp",
         tenantPermissions: Set<TenantPermission> = setOf(TenantPermission.EVENTS_READ),
-        supportPermissions: Set<SupportPermission> = emptySet(),
-        supportGrant: SupportGrantInfo? = null,
-        companyStatus: CompanyStatus = CompanyStatus.ACTIVE,
-        accessStatus: AccessStatus = AccessStatus.ACTIVE,
     ): AuthorizedTenantContext =
         AuthorizedTenantContext(
             userId = "u1",
             companyId = companyId,
-            companyName = companyName,
+            companyName = "Acme Corp",
             tenantRevision = 1L,
             accessRevision = "rev1",
-            companyStatus = companyStatus,
-            accessStatus = accessStatus,
+            companyStatus = CompanyStatus.ACTIVE,
+            accessStatus = AccessStatus.ACTIVE,
             activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
             rawTenantPermissions = tenantPermissions,
-            rawSupportPermissions = supportPermissions,
+            rawSupportPermissions = emptySet(),
             permissionSources =
                 tenantPermissions.associate {
                     PermissionKey.Tenant(it) to setOf(AccessOrigin.DIRECT_MEMBERSHIP)
                 },
-            supportGrant = supportGrant,
+            supportGrant = null,
+        )
+
+    private fun createGlobalContext(
+        memberCompanies: List<CompanyBrief> =
+            listOf(
+                CompanyBrief("c1", "Acme", CompanyStatus.ACTIVE),
+                CompanyBrief("c2", "Beta", CompanyStatus.ACTIVE),
+            ),
+        defaultCompanyId: String? = "c1",
+        canBrowseAllCompanies: Boolean = false,
+        globalPermissions: Set<GlobalPermission> = emptySet(),
+    ): GlobalUserContext =
+        GlobalUserContext(
+            userId = "u1",
+            serverTime = Instant.fromEpochMilliseconds(0),
+            globalPermissions = globalPermissions,
+            defaultCompanyId = defaultCompanyId,
+            canBrowseAllCompanies = canBrowseAllCompanies,
+            memberCompanies = memberCompanies,
         )
 
     @Test
-    fun testRoutePermissionRequirementSatisfiedWhenPermissionPresent() {
-        val context = createAuthorizedContext(tenantPermissions = setOf(TenantPermission.EVENTS_READ))
-        val requirement = RoutePermissionRequirement.Tenant(TenantPermission.EVENTS_READ)
+    fun testGlobalStateIdleOrLoadingYieldsShowLoading() {
+        val decisionIdle =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Idle,
+                tenantState = TenantContextState.NotSelected,
+                requestedCompanyId = "c1",
+            )
+        assertEquals(TenantGuardDecision.ShowLoading, decisionIdle)
 
-        assertTrue(requirement.isSatisfiedBy(context))
+        val decisionLoading =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.InitialLoading,
+                tenantState = TenantContextState.NotSelected,
+                requestedCompanyId = "c1",
+            )
+        assertEquals(TenantGuardDecision.ShowLoading, decisionLoading)
     }
 
     @Test
-    fun testRoutePermissionRequirementDeniedWhenPermissionMissing() {
-        val context = createAuthorizedContext(tenantPermissions = setOf(TenantPermission.EVENTS_READ))
-        val requirement = RoutePermissionRequirement.Tenant(TenantPermission.DEVICES_DELETE)
-
-        assertFalse(requirement.isSatisfiedBy(context))
+    fun testGlobalStateAccountFrozenYieldsAccountFrozenDecision() {
+        val restriction =
+            AccessRestriction(
+                type = RestrictionType.ADMIN_BLOCKED,
+                reason = "Blocked",
+                restrictedAt = Instant.fromEpochMilliseconds(0),
+                untilAt = null,
+                supportContact = null,
+            )
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Restricted.AccountFrozen(restriction),
+                tenantState = TenantContextState.NotSelected,
+                requestedCompanyId = "c1",
+            )
+        assertEquals(TenantGuardDecision.AccountFrozen(restriction), decision)
     }
 
     @Test
-    fun testRoutePermissionRequirementDeniedWhenGrantLocallyExpiredAndRequiresImmediateRevalidation() {
-        val expiredGrant =
-            SupportGrantInfo(
-                grantId = "g1",
-                status = SupportGrantStatus.ACTIVE,
-                mode = SupportMode.READ_ONLY_SUPPORT,
-                ticketReference = "SD-100",
-                allowBillingOverride = false,
-                grantedByUserId = "admin1",
-                grantedAt = Instant.fromEpochMilliseconds(0),
-                expiresAt = Instant.fromEpochMilliseconds(1000),
-                remainingTtlSec = 0L,
-                revokedAt = null,
-                runtimeState = SupportGrantRuntimeState.ExpiredLocally,
+    fun testGlobalStateNoCompaniesAvailableYieldsNoCompaniesAvailableDecision() {
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Restricted.NoCompaniesAvailable,
+                tenantState = TenantContextState.NotSelected,
+                requestedCompanyId = "c1",
             )
-
-        val context =
-            createAuthorizedContext(
-                accessStatus = AccessStatus.ACTIVE_SUPPORT_OVERRIDE,
-                supportGrant = expiredGrant,
-            )
-
-        assertTrue(context.isSupportGrantLocallyExpired)
-        assertTrue(context.requiresImmediateRevalidation)
-
-        val requirement = RoutePermissionRequirement.Tenant(TenantPermission.EVENTS_READ)
-        assertFalse(requirement.isSatisfiedBy(context))
+        assertEquals(TenantGuardDecision.NoCompaniesAvailable, decision)
     }
 
     @Test
-    fun testNavigationItemsFilteredByEffectivePermissions() {
-        val items = AppNavigationItem.DEFAULT_ITEMS
-
-        // When user has EVENTS_READ
-        val authorizedWithEvents = createAuthorizedContext(tenantPermissions = setOf(TenantPermission.EVENTS_READ))
-        val visibleWithEvents =
-            items.filter { item ->
-                item.requiredPermission == null || item.requiredPermission!!.isSatisfiedBy(authorizedWithEvents)
-            }
-        assertEquals(1, visibleWithEvents.size)
-        assertEquals(AppNavigationItem.Events, visibleWithEvents.first())
-
-        // When user does NOT have EVENTS_READ
-        val authorizedWithoutEvents = createAuthorizedContext(tenantPermissions = emptySet())
-        val visibleWithoutEvents =
-            items.filter { item ->
-                item.requiredPermission == null || item.requiredPermission!!.isSatisfiedBy(authorizedWithoutEvents)
-            }
-        assertTrue(visibleWithoutEvents.isEmpty())
+    fun testGlobalStateErrorYieldsGlobalErrorDecision() {
+        val error = NetworkError.Connectivity("Network failed")
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Error(error),
+                tenantState = TenantContextState.NotSelected,
+                requestedCompanyId = "c1",
+            )
+        assertEquals(TenantGuardDecision.GlobalError(error), decision)
     }
 
     @Test
-    fun testGlobalUserContextMultiCompanyFlags() {
-        val singleCompanyContext =
-            GlobalUserContext(
-                userId = "u1",
-                serverTime = Instant.fromEpochMilliseconds(0),
-                globalPermissions = emptySet(),
-                defaultCompanyId = "c1",
-                canBrowseAllCompanies = false,
-                memberCompanies = listOf(CompanyBrief("c1", "Company 1", CompanyStatus.ACTIVE)),
+    fun testNullRequestedCompanyResolvesFallbackCompany() {
+        val globalContext = createGlobalContext(defaultCompanyId = "c2")
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Ready(globalContext),
+                tenantState = TenantContextState.NotSelected,
+                requestedCompanyId = null,
             )
-        assertFalse(singleCompanyContext.hasMultipleCompanies)
+        assertEquals(TenantGuardDecision.RedirectToCompany("c2"), decision)
+    }
 
-        val multiCompanyContext =
-            singleCompanyContext.copy(
-                memberCompanies =
-                    listOf(
-                        CompanyBrief("c1", "Company 1", CompanyStatus.ACTIVE),
-                        CompanyBrief("c2", "Company 2", CompanyStatus.ACTIVE),
-                    ),
-            )
-        assertTrue(multiCompanyContext.hasMultipleCompanies)
-
-        val vendorContext =
-            singleCompanyContext.copy(
+    @Test
+    fun testBlankRequestedCompanyWithNoMemberCompaniesForVendorRedirectsToDashboard() {
+        val vendor =
+            createGlobalContext(
+                memberCompanies = emptyList(),
+                defaultCompanyId = null,
                 canBrowseAllCompanies = true,
-                globalPermissions = setOf(GlobalPermission.COMPANIES_MONITOR),
+                globalPermissions = setOf(GlobalPermission.COMPANIES_MANAGE),
             )
-        assertTrue(vendorContext.hasMultipleCompanies)
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Ready(vendor),
+                tenantState = TenantContextState.NotSelected,
+                requestedCompanyId = "",
+            )
+        assertEquals(TenantGuardDecision.RedirectToVendorDashboard, decision)
     }
 
     @Test
-    fun testSupportGrantInfoRemainingDurationCalculation() {
-        val activeGrant =
-            SupportGrantInfo(
-                grantId = "g1",
-                status = SupportGrantStatus.ACTIVE,
-                mode = SupportMode.ENGINEERING_SUPPORT,
-                ticketReference = "T-999",
-                allowBillingOverride = true,
-                grantedByUserId = "u0",
-                grantedAt = Instant.fromEpochMilliseconds(0),
-                expiresAt = Instant.fromEpochMilliseconds(10000),
-                remainingTtlSec = 300L,
-                revokedAt = null,
+    fun testBlankRequestedCompanyWithNoMemberCompaniesForRegularUserYieldsAccessDenied() {
+        val regular =
+            createGlobalContext(
+                memberCompanies = emptyList(),
+                defaultCompanyId = null,
+                canBrowseAllCompanies = false,
             )
-
-        val remaining = activeGrant.remainingDurationNow()
-        assertTrue(remaining > Duration.ZERO)
-        assertTrue(remaining.inWholeSeconds <= 300L)
-        assertFalse(activeGrant.isExpiredNow())
-
-        val zeroTtlGrant = activeGrant.copy(remainingTtlSec = 0L)
-        assertEquals(Duration.ZERO, zeroTtlGrant.remainingDurationNow())
-        assertTrue(zeroTtlGrant.isExpiredNow())
-
-        val expiredStateGrant = activeGrant.copy(runtimeState = SupportGrantRuntimeState.ExpiredLocally)
-        assertEquals(Duration.ZERO, expiredStateGrant.remainingDurationNow())
-        assertTrue(expiredStateGrant.isExpiredNow())
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Ready(regular),
+                tenantState = TenantContextState.NotSelected,
+                requestedCompanyId = "",
+            )
+        assertEquals(TenantGuardDecision.AccessDenied, decision)
     }
 
     @Test
-    fun testRestrictedStateProperties() {
+    fun testUnauthorizedCompanyRequestedRedirectsToAccessibleFallback() {
+        val user = createGlobalContext(defaultCompanyId = "c1")
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Ready(user),
+                tenantState = TenantContextState.NotSelected,
+                requestedCompanyId = "inaccessible_company",
+            )
+        assertEquals(TenantGuardDecision.RedirectToCompany("c1"), decision)
+    }
+
+    @Test
+    fun testTenantStateDifferentCompanyYieldsShowLoading() {
+        val user = createGlobalContext()
+        val authorizedForOther = createAuthorizedContext(companyId = "c2")
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Ready(user),
+                tenantState = TenantContextState.Authorized(authorizedForOther),
+                requestedCompanyId = "c1",
+            )
+        assertEquals(TenantGuardDecision.ShowLoading, decision)
+    }
+
+    @Test
+    fun testTenantStateTenantErrorYieldsTenantError() {
+        val user = createGlobalContext()
+        val error = NetworkError.Http(500, "Server error")
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Ready(user),
+                tenantState = TenantContextState.Error(companyId = "c1", error = error, canSwitchCompany = true),
+                requestedCompanyId = "c1",
+            )
+        assertEquals(TenantGuardDecision.TenantError(error, "c1"), decision)
+    }
+
+    @Test
+    fun testTenantStateCompanyFrozenYieldsCompanyFrozenDecision() {
+        val user = createGlobalContext()
         val restriction =
             AccessRestriction(
                 type = RestrictionType.BILLING_DEBT,
-                reason = "Overdue invoice",
-                restrictedAt = Instant.fromEpochMilliseconds(1000),
+                reason = "Invoice overdue",
+                restrictedAt = Instant.fromEpochMilliseconds(0),
                 untilAt = null,
-                supportContact = "billing@control.acmenra.studio",
+                supportContact = "help@company.com",
             )
-
-        val frozenState =
-            TenantContextState.Restricted.CompanyFrozen(
-                companyId = "c-frozen",
-                companyName = "Frozen Corp",
-                restriction = restriction,
-                canSwitchCompany = true,
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Ready(user),
+                tenantState =
+                    TenantContextState.Restricted.CompanyFrozen(
+                        companyId = "c1",
+                        companyName = "Acme",
+                        restriction = restriction,
+                        canSwitchCompany = true,
+                    ),
+                requestedCompanyId = "c1",
             )
-
-        assertEquals("c-frozen", frozenState.companyId)
-        assertEquals("Frozen Corp", frozenState.companyName)
-        assertEquals(RestrictionType.BILLING_DEBT, frozenState.restriction?.type)
-        assertEquals("billing@control.acmenra.studio", frozenState.restriction?.supportContact)
-        assertTrue(frozenState.canSwitchCompany)
+        assertEquals(TenantGuardDecision.CompanyFrozen("c1", "Acme", restriction), decision)
     }
 
     @Test
-    fun testCanSwitchCompanyFlagTrueWhenVendorEvenWithEmptyMemberCompanies() {
-        val vendor =
-            GlobalUserContext(
-                userId = "u1",
-                serverTime = Instant.fromEpochMilliseconds(0),
-                globalPermissions = setOf(GlobalPermission.COMPANIES_MONITOR),
-                defaultCompanyId = null,
-                canBrowseAllCompanies = true,
-                memberCompanies = emptyList(),
+    fun testTenantStateNoPermissionsYieldsNoPermissionsDecision() {
+        val user = createGlobalContext()
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Ready(user),
+                tenantState =
+                    TenantContextState.Restricted.NoPermissions(
+                        companyId = "c1",
+                        companyName = "Acme",
+                        canSwitchCompany = true,
+                    ),
+                requestedCompanyId = "c1",
             )
-
-        assertTrue(vendor.hasMultipleCompanies)
-        assertTrue(vendor.canBrowseAllCompanies)
+        assertEquals(TenantGuardDecision.NoPermissions("c1", "Acme"), decision)
     }
 
     @Test
-    fun testVendorDashboardRequiresCanBrowseAllCompanies() {
-        val regularUser =
-            GlobalUserContext(
-                userId = "u1",
-                serverTime = Instant.fromEpochMilliseconds(0),
-                globalPermissions = emptySet(),
-                defaultCompanyId = "c1",
-                canBrowseAllCompanies = false,
-                memberCompanies = listOf(CompanyBrief("c1", "Acme", CompanyStatus.ACTIVE)),
+    fun testTenantStateAccessDeniedYieldsTenantAccessDeniedDecision() {
+        val user = createGlobalContext()
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Ready(user),
+                tenantState =
+                    TenantContextState.Restricted.AccessDenied(
+                        companyId = "c1",
+                        companyName = "Acme",
+                        canSwitchCompany = true,
+                    ),
+                requestedCompanyId = "c1",
             )
-        assertFalse(regularUser.canBrowseAllCompanies)
-
-        val vendorUser = regularUser.copy(canBrowseAllCompanies = true)
-        assertTrue(vendorUser.canBrowseAllCompanies)
+        assertEquals(TenantGuardDecision.TenantAccessDenied("c1", "Acme"), decision)
     }
 
     @Test
-    fun testNavigationShellVisibilityRules() {
-        val globalReady =
-            GlobalUserContext(
-                userId = "u1",
-                serverTime = Instant.fromEpochMilliseconds(0),
-                globalPermissions = setOf(GlobalPermission.COMPANIES_MANAGE),
-                defaultCompanyId = "c1",
-                canBrowseAllCompanies = true,
-                memberCompanies = listOf(CompanyBrief("c1", "Acme", CompanyStatus.ACTIVE)),
+    fun testAuthorizedContextSatisfyingRequirementYieldsRenderContent() {
+        val user = createGlobalContext()
+        val context = createAuthorizedContext(companyId = "c1", tenantPermissions = setOf(TenantPermission.EVENTS_READ))
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Ready(user),
+                tenantState = TenantContextState.Authorized(context),
+                requestedCompanyId = "c1",
+                requirement = RoutePermissionRequirement.Tenant(TenantPermission.EVENTS_READ),
             )
-
-        // Rule 1: Tenant destination + Tenant Loading -> shell NOT ready
-        val tenantLoading: TenantContextState = TenantContextState.Loading("c1")
-        assertFalse(tenantLoading is TenantContextState.Authorized)
-
-        // Rule 2: Tenant destination + Tenant Authorized -> shell IS ready
-        val tenantAuthorized: TenantContextState =
-            TenantContextState.Authorized(
-                createAuthorizedContext(companyId = "c1"),
-            )
-        assertTrue(tenantAuthorized is TenantContextState.Authorized)
-
-        // Rule 3: Vendor dashboard destination + Global Ready for vendor -> shell IS ready
-        assertTrue(TenantAccessResolver.canBrowseAll(globalReady))
-
-        // Rule 4: Regular user without vendor rights -> cannot browse vendor dashboard
-        val regularUser = globalReady.copy(canBrowseAllCompanies = false, globalPermissions = emptySet())
-        assertFalse(TenantAccessResolver.canBrowseAll(regularUser))
+        assertTrue(decision is TenantGuardDecision.RenderContent)
+        assertEquals("c1", decision.context.companyId)
     }
 
     @Test
-    fun testServerAccessDeniedDirectlyPresentsRestrictedStateWithoutLoop() {
-        val deniedState =
-            TenantContextState.Restricted.AccessDenied(
-                companyId = "c-denied",
-                companyName = "Denied Corp",
-                canSwitchCompany = true,
+    fun testAuthorizedContextFailingRequirementYieldsNoPermissions() {
+        val user = createGlobalContext()
+        val context = createAuthorizedContext(companyId = "c1", tenantPermissions = setOf(TenantPermission.EVENTS_READ))
+        val decision =
+            resolveTenantGuardDecision(
+                globalState = GlobalAccessState.Ready(user),
+                tenantState = TenantContextState.Authorized(context),
+                requestedCompanyId = "c1",
+                requirement = RoutePermissionRequirement.Tenant(TenantPermission.DEVICES_DELETE),
             )
-
-        assertEquals("c-denied", deniedState.companyId)
-        assertEquals("Denied Corp", deniedState.companyName)
-        assertTrue(deniedState.canSwitchCompany)
+        assertEquals(TenantGuardDecision.NoPermissions("c1", "Acme Corp"), decision)
     }
 }

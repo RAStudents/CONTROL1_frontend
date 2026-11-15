@@ -10,16 +10,25 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextAlign
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
 import studio.acmenra.control.core.access.domain.model.AccessRestriction
@@ -32,10 +41,14 @@ import studio.acmenra.control.core.ui.generated.resources.action_copy
 import studio.acmenra.control.core.ui.generated.resources.action_logout
 import studio.acmenra.control.core.ui.generated.resources.action_retry
 import studio.acmenra.control.core.ui.generated.resources.action_switch_company
+import studio.acmenra.control.core.ui.generated.resources.error_network_connection
+import studio.acmenra.control.core.ui.generated.resources.error_server_unavailable
+import studio.acmenra.control.core.ui.generated.resources.error_unknown_occurred
 import studio.acmenra.control.core.ui.generated.resources.ic_content_copy
 import studio.acmenra.control.core.ui.generated.resources.ic_error
 import studio.acmenra.control.core.ui.generated.resources.ic_lock
 import studio.acmenra.control.core.ui.generated.resources.ic_warning
+import studio.acmenra.control.core.ui.generated.resources.notice_copied_to_clipboard
 import studio.acmenra.control.core.ui.generated.resources.restricted_access_denied_desc
 import studio.acmenra.control.core.ui.generated.resources.restricted_access_denied_title
 import studio.acmenra.control.core.ui.generated.resources.restricted_account_frozen_desc
@@ -132,31 +145,45 @@ fun CompanyFrozenScreen(
             if (!restriction?.supportContact.isNullOrBlank()) {
                 @Suppress("DEPRECATION")
                 val clipboardManager = LocalClipboardManager.current
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text(
-                        text =
-                            stringResource(
-                                Res.string.restriction_contact_label,
-                                restriction.supportContact.orEmpty(),
-                            ),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f),
-                    )
-                    IconButton(
-                        onClick = {
-                            clipboardManager.setText(AnnotatedString(restriction.supportContact.orEmpty()))
-                        },
+                var isCopied by remember { mutableStateOf(false) }
+
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Icon(
-                            painter = painterResource(Res.drawable.ic_content_copy),
-                            contentDescription = stringResource(Res.string.action_copy),
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(AmberDimens.ListIcon),
+                        Text(
+                            text =
+                                stringResource(
+                                    Res.string.restriction_contact_label,
+                                    restriction.supportContact.orEmpty(),
+                                ),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        IconButton(
+                            onClick = {
+                                clipboardManager.setText(AnnotatedString(restriction.supportContact.orEmpty()))
+                                isCopied = true
+                            },
+                        ) {
+                            Icon(
+                                painter = painterResource(Res.drawable.ic_content_copy),
+                                contentDescription = stringResource(Res.string.action_copy),
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(AmberDimens.ListIcon),
+                            )
+                        }
+                    }
+
+                    if (isCopied) {
+                        Text(
+                            text = stringResource(Res.string.notice_copied_to_clipboard),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(top = AmberDimens.StatusBadgePaddingVertical),
                         )
                     }
                 }
@@ -220,10 +247,10 @@ fun TenantErrorScreen(
 ) {
     val errorMessage =
         when (error) {
-            is NetworkError.Http -> error.message ?: error.errorBody
-            is NetworkError.Connectivity -> error.message
-            is NetworkError.Serialization -> error.message
-            is NetworkError.Unknown -> error.message
+            is NetworkError.Connectivity -> stringResource(Res.string.error_network_connection)
+            is NetworkError.Http -> stringResource(Res.string.error_server_unavailable)
+            is NetworkError.Serialization, is NetworkError.Unknown ->
+                stringResource(Res.string.error_unknown_occurred)
         }
 
     RestrictedScreenScaffold(
@@ -241,8 +268,8 @@ fun TenantErrorScreen(
 
 @Composable
 private fun RestrictedScreenScaffold(
-    iconRes: org.jetbrains.compose.resources.DrawableResource,
-    iconTint: androidx.compose.ui.graphics.Color,
+    iconRes: DrawableResource,
+    iconTint: Color,
     title: String,
     modifier: Modifier = Modifier,
     subtitle: String? = null,
@@ -264,7 +291,8 @@ private fun RestrictedScreenScaffold(
             modifier =
                 Modifier
                     .widthIn(max = AmberDimens.RestrictedCardMaxWidth)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(AmberDimens.GapMedium),
         ) {
@@ -279,6 +307,7 @@ private fun RestrictedScreenScaffold(
                 text = title,
                 style = MaterialTheme.typography.headlineSmall,
                 color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Center,
             )
 
             if (!subtitle.isNullOrBlank()) {
@@ -286,6 +315,7 @@ private fun RestrictedScreenScaffold(
                     text = subtitle,
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
                 )
             }
 
@@ -294,6 +324,7 @@ private fun RestrictedScreenScaffold(
                     text = description,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
                 )
             }
 

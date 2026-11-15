@@ -5,6 +5,8 @@ import androidx.navigation.NavDestination
 import androidx.navigation.NavDestination.Companion.hasRoute
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.StringResource
+import studio.acmenra.control.core.access.domain.model.AuthorizedTenantContext
+import studio.acmenra.control.core.access.domain.model.GlobalUserContext
 import studio.acmenra.control.core.access.domain.model.RoutePermissionRequirement
 import studio.acmenra.control.core.access.domain.model.TenantPermission
 import studio.acmenra.control.core.ui.generated.resources.Res
@@ -20,7 +22,7 @@ sealed interface AppNavigationItem {
 
     fun navigate(
         navController: NavController,
-        companyId: String = "",
+        companyId: String? = null,
     )
 
     data object Events : AppNavigationItem {
@@ -33,14 +35,28 @@ sealed interface AppNavigationItem {
 
         override fun navigate(
             navController: NavController,
-            companyId: String,
+            companyId: String?,
         ) {
             navController.navigateToEvents(companyId = companyId)
         }
     }
 
     companion object {
-        val DEFAULT_ITEMS: List<AppNavigationItem>
-            get() = listOf(Events)
+        val DEFAULT_ITEMS: List<AppNavigationItem> by lazy { listOf(Events) }
+
+        fun filterVisibleNavigationItems(
+            items: List<AppNavigationItem>,
+            authorizedContext: AuthorizedTenantContext?,
+            globalContext: GlobalUserContext? = null,
+        ): List<AppNavigationItem> =
+            items.filter { item ->
+                val perm = item.requiredPermission
+                when {
+                    perm == null -> true
+                    authorizedContext != null -> perm.isSatisfiedBy(authorizedContext)
+                    globalContext != null && TenantAccessResolver.canBrowseAll(globalContext) -> true
+                    else -> false
+                }
+            }
     }
 }

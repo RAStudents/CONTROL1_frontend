@@ -318,6 +318,7 @@ val accessDomainModule = module {
     factory<ObserveGlobalAccessUseCase> { ObserveGlobalAccessUseCaseImpl(accessManager = get()) }
     factory<ObserveTenantContextUseCase> { ObserveTenantContextUseCaseImpl(coordinator = get()) }
     factory<SelectTenantUseCase> { SelectTenantUseCaseImpl(coordinator = get()) }
+    factory<EnsureTenantContextUseCase> { EnsureTenantContextUseCaseImpl(coordinator = get()) }
     factory<RefreshTenantUseCase> { RefreshTenantUseCaseImpl(coordinator = get()) }
     factory<CheckPermissionUseCase> { CheckPermissionUseCaseImpl(coordinator = get()) }
 }
@@ -327,4 +328,31 @@ val accessModule = module {
 }
 ```
 
-Модуль `accessModule` автоматически подключается в корневой DI граф приложения в `:shared` (`Koin.kt`).
+Модуль `accessModule` автоматически подключается в корневой DI граф приложения в `:shared` (`AppModule.kt`).
+
+---
+
+## 9. Навигация, TenantRouteGuard и UI-компоненты (Этап 4)
+
+### 9.1. Типобезопасная маршрутизация с мультитенантностью (`AppRoute.kt`)
+Маршруты разделены на три категории:
+1. **Вне-тенантные**: `LoginRoute` — экран авторизации.
+2. **Глобальные платформенные**: `CompaniesDashboardRoute` — обзор компаний и метрик здоровья вендора.
+3. **Тенантные (`TenantRoute`)**: `EventsRoute(override val companyId: String = "")` — параметризованные `companyId`.
+
+### 9.2. `TenantRouteGuard`
+Защищает все тенантные маршруты:
+- До совпадения активного контекста `TenantContextState.Authorized(requestedCompanyId)` и успешной проверки прав `RoutePermissionRequirement` целевой экран и его `ViewModel` **не создаются**.
+- При отсутствии `companyId` в URL (`requestedCompanyId.isBlank()`) выполняет автоматическое разрешение на основе `defaultCompanyId` или первой компании пользователя, либо редирект на дашборд вендора.
+- В состояниях ограничений отображает экраны `CompanyFrozenScreen`, `AccessDeniedScreen`, `NoPermissionsScreen` или `TenantErrorScreen` с возможностью переключения компании через `CompanySelectionDialog` или повтора сетевого запроса.
+
+### 9.3. UI-компоненты дизайн-системы Amber
+1. **`SupportOverrideBanner`**:
+   - Отображается поверх контента экрана при статусе `ACTIVE_SUPPORT_OVERRIDE`.
+   - Показывает режим техподдержки (`SupportMode`), номер тикета и динамический монотонный таймер до локального истечения.
+   - Является чистым представлением без сайд-эффектов.
+2. **`CompanySwitcher`**:
+   - Интегрирован в верхний бар навигации (для планшетов/десктопа и смартфонов).
+   - Отображает текущую компанию, статус (`ACTIVE` / `RESTRICTED`) и меню выбора доступных компаний.
+3. **Фильтрация навигации в `AppScaffold`**:
+   - Элементы навигации (`AppNavigationItem`) динамически фильтруются по `effectiveTenantPermissions`. При отсутствии требуемого права элемент скрывается из бокового rail и нижней панели.

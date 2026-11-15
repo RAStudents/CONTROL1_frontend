@@ -51,7 +51,7 @@ fun AppContent(
         val startDestination =
             remember {
                 if (sessionState == SessionState.Authenticated) {
-                    EventsRoute
+                    EventsRoute()
                 } else {
                     LoginRoute
                 }

@@ -17,6 +17,11 @@ class AppRouteTest {
     }
 
     @Test
+    fun companiesDashboardRouteHasExpectedSerialName() {
+        assertEquals("companies_dashboard", CompaniesDashboardRoute.serializer().descriptor.serialName)
+    }
+
+    @Test
     fun testLoginRouteSerializationRoundTrip() {
         val json = Json.encodeToString(LoginRoute)
         assertEquals("{}", json)
@@ -25,10 +30,27 @@ class AppRouteTest {
     }
 
     @Test
-    fun testEventsRouteSerializationRoundTrip() {
-        val json = Json.encodeToString(EventsRoute)
+    fun testEventsRouteSerializationRoundTripDefault() {
+        val json = Json.encodeToString(EventsRoute())
         assertEquals("{}", json)
         val decoded = Json.decodeFromString<EventsRoute>(json)
-        assertEquals(EventsRoute, decoded)
+        assertEquals(EventsRoute(), decoded)
+        assertEquals("", decoded.companyId)
+    }
+
+    @Test
+    fun testEventsRouteSerializationRoundTripWithCompanyId() {
+        val json = Json.encodeToString(EventsRoute(companyId = "company-123"))
+        assertEquals("{\"companyId\":\"company-123\"}", json)
+        val decoded = Json.decodeFromString<EventsRoute>(json)
+        assertEquals("company-123", decoded.companyId)
+    }
+
+    @Test
+    fun testCompaniesDashboardRouteSerializationRoundTrip() {
+        val json = Json.encodeToString(CompaniesDashboardRoute)
+        assertEquals("{}", json)
+        val decoded = Json.decodeFromString<CompaniesDashboardRoute>(json)
+        assertEquals(CompaniesDashboardRoute, decoded)
     }
 }

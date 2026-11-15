@@ -4,15 +4,24 @@ import androidx.navigation.NavController
 
 fun NavController.navigateToLogin() {
     navigate(LoginRoute) {
-        popUpTo<EventsRoute> {
+        popUpTo<LoginRoute> {
             inclusive = true
         }
         launchSingleTop = true
     }
 }
 
-fun NavController.navigateToEvents() {
-    navigate(EventsRoute) {
+fun NavController.navigateToEvents(companyId: String = "") {
+    navigate(EventsRoute(companyId = companyId)) {
+        popUpTo<LoginRoute> {
+            inclusive = true
+        }
+        launchSingleTop = true
+    }
+}
+
+fun NavController.navigateToCompaniesDashboard() {
+    navigate(CompaniesDashboardRoute) {
         popUpTo<LoginRoute> {
             inclusive = true
         }

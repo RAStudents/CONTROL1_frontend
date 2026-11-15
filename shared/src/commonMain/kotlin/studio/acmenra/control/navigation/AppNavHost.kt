@@ -13,6 +13,9 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.toRoute
+import studio.acmenra.control.core.access.domain.model.RoutePermissionRequirement
+import studio.acmenra.control.core.access.domain.model.TenantPermission
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.feature.auth.presentation.LoginRouteContent
 import studio.acmenra.control.feature.events.presentation.EventsRouteContent
@@ -35,7 +38,7 @@ fun AppNavHost(
             }
 
             sessionState != SessionState.Authenticated &&
-                destination?.hasRoute<EventsRoute>() == true -> {
+                destination?.hasRoute<LoginRoute>() != true -> {
                 navController.navigateToLogin()
             }
         }
@@ -50,9 +53,60 @@ fun AppNavHost(
             LoginRouteContent()
         }
 
-        composable<EventsRoute> {
+        composable<EventsRoute> { entry ->
+            val route = entry.toRoute<EventsRoute>()
             if (sessionState == SessionState.Authenticated) {
-                EventsRouteContent()
+                TenantRouteGuard(
+                    requestedCompanyId = route.companyId,
+                    requirement = RoutePermissionRequirement.Tenant(TenantPermission.EVENTS_READ),
+                    onNavigateToCompany = { newCompanyId ->
+                        navController.navigate(EventsRoute(companyId = newCompanyId)) {
+                            popUpTo<EventsRoute> {
+                                inclusive = true
+                            }
+                            launchSingleTop = true
+                        }
+                    },
+                    onNavigateToCompaniesDashboard = {
+                        navController.navigate(CompaniesDashboardRoute) {
+                            popUpTo<EventsRoute> {
+                                inclusive = true
+                            }
+                            launchSingleTop = true
+                        }
+                    },
+                ) { _ ->
+                    EventsRouteContent()
+                }
+            } else {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator()
+                }
+            }
+        }
+
+        composable<CompaniesDashboardRoute> {
+            if (sessionState == SessionState.Authenticated) {
+                VendorRouteGuard(
+                    onAccessDenied = {
+                        navController.navigate(EventsRoute()) {
+                            popUpTo<CompaniesDashboardRoute> {
+                                inclusive = true
+                            }
+                            launchSingleTop = true
+                        }
+                    },
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                }
             } else {
                 Box(
                     modifier = Modifier.fillMaxSize(),

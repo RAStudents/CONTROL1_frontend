@@ -1,5 +1,7 @@
 package studio.acmenra.control.navigation
 
+import studio.acmenra.control.core.access.domain.model.RoutePermissionRequirement
+import studio.acmenra.control.core.access.domain.model.TenantPermission
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.ic_nav_events
 import studio.acmenra.control.core.ui.generated.resources.nav_item_events
@@ -19,6 +21,10 @@ class AppNavigationItemTest {
         val item = AppNavigationItem.Events
         assertEquals(Res.string.nav_item_events, item.labelRes)
         assertEquals(Res.drawable.ic_nav_events, item.iconRes)
+        assertEquals(
+            RoutePermissionRequirement.Tenant(TenantPermission.EVENTS_READ),
+            item.requiredPermission,
+        )
     }
 
     @Test

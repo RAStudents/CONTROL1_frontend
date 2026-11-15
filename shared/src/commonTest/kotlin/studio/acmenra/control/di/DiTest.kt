@@ -9,6 +9,7 @@ import studio.acmenra.control.core.access.domain.AccessInvalidationCoordinator
 import studio.acmenra.control.core.access.domain.AccessManager
 import studio.acmenra.control.core.access.domain.TenantContextCoordinator
 import studio.acmenra.control.core.access.domain.usecase.CheckPermissionUseCase
+import studio.acmenra.control.core.access.domain.usecase.EnsureTenantContextUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveTenantContextUseCase
 import studio.acmenra.control.core.access.domain.usecase.RefreshTenantUseCase
@@ -110,6 +111,9 @@ class DiTest {
 
         val selectTenant: SelectTenantUseCase = koin.get()
         assertNotNull(selectTenant)
+
+        val ensureTenantContext: EnsureTenantContextUseCase = koin.get()
+        assertNotNull(ensureTenantContext)
 
         val refreshTenant: RefreshTenantUseCase = koin.get()
         assertNotNull(refreshTenant)

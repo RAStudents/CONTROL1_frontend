@@ -61,7 +61,7 @@ class BrowserNavigationWasmTest {
             // 1. Navigate to Events
             navController.navigateToEvents()
             waitUntil(message = "Navigate to events") {
-                window.location.hash == "#events" &&
+                window.location.hash.startsWith("#events") &&
                     navController.currentDestination?.hasRoute<EventsRoute>() == true
             }
 
@@ -75,7 +75,7 @@ class BrowserNavigationWasmTest {
             // 3. Browser Forward
             window.history.forward()
             waitUntil(message = "Browser forward to events") {
-                window.location.hash == "#events" &&
+                window.location.hash.startsWith("#events") &&
                     navController.currentDestination?.hasRoute<EventsRoute>() == true
             }
 
@@ -103,7 +103,7 @@ class BrowserNavigationWasmTest {
                 }
 
             waitUntil(message = "Direct URL navigation to #events") {
-                window.location.hash == "#events" &&
+                window.location.hash.startsWith("#events") &&
                     navController.currentDestination?.hasRoute<EventsRoute>() == true
             }
 

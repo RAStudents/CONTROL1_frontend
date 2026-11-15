@@ -282,7 +282,7 @@ class AccessInvalidationTest {
         }
 
     @Test
-    fun reentrantInvalidationCallsAreDroppedByCoordinator() =
+    fun repeatGlobalInvalidationDuringSingleRequestTriggersRepeatRevalidation() =
         runTest {
             val localJob = Job()
             val localScope = CoroutineScope(localJob + testDispatcher)
@@ -297,7 +297,7 @@ class AccessInvalidationTest {
                         override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> {
                             globalCallCount++
                             if (globalCallCount == 1) {
-                                // Simulate re-entrant call during invalidation
+                                // Simulate second invalidation arriving while first is in flight
                                 coordinatorInstance?.onAccessInvalidated("ACCOUNT_FROZEN", null)
                             }
                             return NetworkResult.Failure(
@@ -349,9 +349,114 @@ class AccessInvalidationTest {
 
                 coordinator.onAccessInvalidatedAsync("ACCOUNT_FROZEN", null).join()
 
-                // Re-entrant call was dropped, exactly 1 call executed
-                assertEquals(1, globalCallCount)
+                // Second invalidation was preserved in pending and executed as repeat revalidation
+                assertEquals(2, globalCallCount)
                 assertTrue(mgr.globalState.value is GlobalAccessState.Restricted.AccountFrozen)
+            } finally {
+                localJob.cancel()
+            }
+        }
+
+    @Test
+    fun repeatAccountFrozenDuringInFlightGlobalRefreshTriggersSequentialRevalidation() =
+        runTest {
+            val localJob = Job()
+            val localScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + localJob)
+            val localSessionManager = SessionManager(FakeTokenStorage().apply { clear() })
+            try {
+                var activeGlobalRuns = 0
+                var maxConcurrentGlobalRuns = 0
+                var globalCallCount = 0
+                val barrier = CompletableDeferred<Unit>()
+                val entered = CompletableDeferred<Unit>()
+
+                val testRepo =
+                    object : AccessRepository {
+                        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> {
+                            globalCallCount++
+                            activeGlobalRuns++
+                            maxConcurrentGlobalRuns = maxOf(maxConcurrentGlobalRuns, activeGlobalRuns)
+
+                            if (globalCallCount == 1) {
+                                entered.complete(Unit)
+                                barrier.await()
+                            }
+
+                            activeGlobalRuns--
+                            return NetworkResult.Failure(
+                                NetworkError.Http(
+                                    statusCode = 403,
+                                    errorBody =
+                                        """{"error":"ACCOUNT_FROZEN",""" +
+                                            """"restriction":{"type":"BILLING_DEBT","reason":"Unpaid balance"}}""",
+                                ),
+                            )
+                        }
+
+                        override suspend fun getCompanyAccess(
+                            userId: String,
+                            companyId: String,
+                            forceRefresh: Boolean,
+                        ): NetworkResult<CompanyAccessDomain> = throw UnsupportedOperationException()
+
+                        override suspend fun getCachedCompanyAccess(
+                            userId: String,
+                            companyId: String,
+                        ): CompanyAccessDomain? = null
+
+                        override suspend fun clearCache() {}
+                    }
+
+                val mgr =
+                    AccessManager(
+                        accessRepository = testRepo,
+                        sessionManager = localSessionManager,
+                        mapper = mapper,
+                        scope = localScope,
+                    )
+
+                val tenantCoord =
+                    TenantContextCoordinator(
+                        accessRepository = testRepo,
+                        accessManager = mgr,
+                        sessionManager = localSessionManager,
+                        mapper = mapper,
+                        scope = localScope,
+                    )
+
+                val coordinator =
+                    AccessInvalidationCoordinator(
+                        accessManager = mgr,
+                        tenantCoordinator = tenantCoord,
+                        scope = localScope,
+                    )
+
+                // 1. First ACCOUNT_FROZEN invalidation starts and enters getGlobalContext (call 1)
+                val job1 = coordinator.onAccessInvalidatedAsync("ACCOUNT_FROZEN", null)
+                entered.await()
+                assertEquals(1, globalCallCount)
+                assertEquals(1, activeGlobalRuns)
+
+                // 2. While first is in-flight, second ACCOUNT_FROZEN invalidation arrives
+                val job2 = coordinator.onAccessInvalidatedAsync("ACCOUNT_FROZEN", null)
+
+                // Must NOT run concurrently
+                assertEquals(1, activeGlobalRuns)
+                assertEquals(1, maxConcurrentGlobalRuns)
+
+                // 3. Release barrier for first call
+                barrier.complete(Unit)
+                job1.join()
+                job2.join()
+
+                // Second invalidation was preserved in pending and executed sequentially
+                assertEquals(2, globalCallCount)
+                assertEquals(0, activeGlobalRuns)
+                assertEquals(1, maxConcurrentGlobalRuns)
+
+                val state = mgr.globalState.value
+                assertTrue(state is GlobalAccessState.Restricted.AccountFrozen)
+                assertEquals("Unpaid balance", state.restriction?.reason)
             } finally {
                 localJob.cancel()
             }

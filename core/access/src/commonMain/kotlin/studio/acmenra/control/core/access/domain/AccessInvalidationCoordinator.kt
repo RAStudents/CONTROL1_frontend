@@ -46,9 +46,7 @@ class AccessInvalidationCoordinator(
         val acquired =
             targetMutex.withLock {
                 if (inProgressTargets.containsKey(targetKey)) {
-                    if (targetKey.startsWith("company:")) {
-                        pendingRetryTargets[targetKey] = errorCode to companyId
-                    }
+                    pendingRetryTargets[targetKey] = errorCode to companyId
                     false
                 } else {
                     inProgressTargets[targetKey] = ownerToken

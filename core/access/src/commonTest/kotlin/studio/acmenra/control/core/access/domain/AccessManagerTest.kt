@@ -8,7 +8,7 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import studio.acmenra.control.core.access.data.mapper.AccessMapper
+import studio.acmenra.control.core.access.data.parser.JsonAccessErrorParser
 import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
 import studio.acmenra.control.core.access.domain.model.CompanyBrief
 import studio.acmenra.control.core.access.domain.model.CompanyStatus
@@ -87,8 +87,9 @@ class AccessManagerTest {
     private val storage = FakeTokenStorage()
     private val sessionManager = SessionManager(storage)
     private val repository = FakeAccessRepository()
+    private val errorParser = JsonAccessErrorParser()
 
-    private val accessManager = AccessManager(repository, sessionManager, scope = testScope)
+    private val accessManager = AccessManager(repository, sessionManager, errorParser, scope = testScope)
 
     @Test
     fun initialStateIsIdle() =
@@ -232,7 +233,7 @@ class AccessManagerTest {
                 AccessManager(
                     accessRepository = customRepository,
                     sessionManager = customSessionManager,
-                    mapper = AccessMapper(),
+                    errorParser = errorParser,
                     scope = testScope,
                 )
 
@@ -318,7 +319,7 @@ class AccessManagerTest {
                 AccessManager(
                     accessRepository = customRepository,
                     sessionManager = customSessionManager,
-                    mapper = AccessMapper(),
+                    errorParser = errorParser,
                     scope = testScope,
                 )
             runCurrent()
@@ -431,7 +432,7 @@ class AccessManagerTest {
                 AccessManager(
                     accessRepository = delayedRepo,
                     sessionManager = customSessionManager,
-                    mapper = AccessMapper(),
+                    errorParser = errorParser,
                     scope = testScope,
                 )
 
@@ -462,7 +463,7 @@ class AccessManagerTest {
                 AccessManager(
                     accessRepository = repository,
                     sessionManager = customSessionManager,
-                    mapper = AccessMapper(),
+                    errorParser = errorParser,
                     scope = testScope,
                 )
 

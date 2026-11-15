@@ -5,6 +5,7 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import studio.acmenra.control.core.access.data.mapper.AccessMapper
+import studio.acmenra.control.core.access.data.parser.JsonAccessErrorParser
 import studio.acmenra.control.core.access.domain.AccessManager
 import studio.acmenra.control.core.access.domain.TenantContextCoordinator
 import studio.acmenra.control.core.access.domain.concurrent.TenantSingleFlight
@@ -104,14 +105,15 @@ class AccessUseCasesTest {
     private val sessionManager = SessionManager(FakeStorage())
     private val repo = FakeRepo()
     private val mapper = AccessMapper()
-    private val accessManager = AccessManager(repo, sessionManager, scope = testScope)
+    private val errorParser = JsonAccessErrorParser()
+    private val accessManager = AccessManager(repo, sessionManager, errorParser, scope = testScope)
     private val singleFlight = TenantSingleFlight(testScope)
     private val coordinator =
         TenantContextCoordinator(
             accessRepository = repo,
             accessManager = accessManager,
             sessionManager = sessionManager,
-            mapper = mapper,
+            errorParser = errorParser,
             scope = testScope,
             singleFlight = singleFlight,
         )

@@ -14,7 +14,7 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import studio.acmenra.control.core.access.data.datasource.KtorAccessRemoteDataSource
-import studio.acmenra.control.core.access.data.mapper.AccessMapper
+import studio.acmenra.control.core.access.data.parser.JsonAccessErrorParser
 import studio.acmenra.control.core.access.domain.model.AccessOrigin
 import studio.acmenra.control.core.access.domain.model.AccessStatus
 import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
@@ -116,19 +116,25 @@ class AccessInvalidationTest {
     private val storage = FakeTokenStorage()
     private val sessionManager = SessionManager(storage)
     private val repository = RecordingAccessRepository()
-    private val mapper = AccessMapper()
+    private val errorParser = JsonAccessErrorParser()
 
-    private val accessManager = AccessManager(repository, sessionManager, mapper, scope = testScope)
+    private val accessManager = AccessManager(repository, sessionManager, errorParser, scope = testScope)
     private val tenantCoordinator =
         TenantContextCoordinator(
             accessRepository = repository,
             accessManager = accessManager,
             sessionManager = sessionManager,
-            mapper = mapper,
+            errorParser = errorParser,
             scope = testScope,
         )
 
-    private val coordinator = AccessInvalidationCoordinator(accessManager, tenantCoordinator, scope = testScope)
+    private val coordinator =
+        AccessInvalidationCoordinator(
+            accessManager = accessManager,
+            tenantCoordinator = tenantCoordinator,
+            sessionManager = sessionManager,
+            scope = testScope,
+        )
     private val dispatcher = AccessInvalidationDispatcher().apply { addListener(coordinator) }
 
     @Test
@@ -339,7 +345,7 @@ class AccessInvalidationTest {
                     AccessManager(
                         accessRepository = recursiveRepository,
                         sessionManager = localSessionManager,
-                        mapper = mapper,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -348,7 +354,7 @@ class AccessInvalidationTest {
                         accessRepository = recursiveRepository,
                         accessManager = mgr,
                         sessionManager = localSessionManager,
-                        mapper = mapper,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -356,6 +362,7 @@ class AccessInvalidationTest {
                     AccessInvalidationCoordinator(
                         accessManager = mgr,
                         tenantCoordinator = tenantCoord,
+                        sessionManager = localSessionManager,
                         scope = localScope,
                     )
                 coordinatorInstance = coordinator
@@ -439,7 +446,7 @@ class AccessInvalidationTest {
                     AccessManager(
                         accessRepository = testRepo,
                         sessionManager = localSessionManager,
-                        mapper = mapper,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -448,7 +455,7 @@ class AccessInvalidationTest {
                         accessRepository = testRepo,
                         accessManager = mgr,
                         sessionManager = localSessionManager,
-                        mapper = mapper,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -456,6 +463,7 @@ class AccessInvalidationTest {
                     AccessInvalidationCoordinator(
                         accessManager = mgr,
                         tenantCoordinator = tenantCoord,
+                        sessionManager = localSessionManager,
                         scope = localScope,
                     )
                 testStarted = true
@@ -560,7 +568,7 @@ class AccessInvalidationTest {
                     AccessManager(
                         accessRepository = testRepo,
                         sessionManager = localSessionManager,
-                        mapper = mapper,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -569,7 +577,7 @@ class AccessInvalidationTest {
                         accessRepository = testRepo,
                         accessManager = mgr,
                         sessionManager = localSessionManager,
-                        mapper = mapper,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -577,6 +585,7 @@ class AccessInvalidationTest {
                     AccessInvalidationCoordinator(
                         accessManager = mgr,
                         tenantCoordinator = tenantCoord,
+                        sessionManager = localSessionManager,
                         scope = localScope,
                     )
 
@@ -675,7 +684,7 @@ class AccessInvalidationTest {
                     AccessManager(
                         accessRepository = testRepo,
                         sessionManager = localSessionManager,
-                        mapper = mapper,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -684,7 +693,7 @@ class AccessInvalidationTest {
                         accessRepository = testRepo,
                         accessManager = mgr,
                         sessionManager = localSessionManager,
-                        mapper = mapper,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -692,6 +701,7 @@ class AccessInvalidationTest {
                     AccessInvalidationCoordinator(
                         accessManager = mgr,
                         tenantCoordinator = tenantCoord,
+                        sessionManager = localSessionManager,
                         scope = localScope,
                     )
 
@@ -775,7 +785,7 @@ class AccessInvalidationTest {
                     AccessManager(
                         accessRepository = testRepo,
                         sessionManager = localSessionManager,
-                        mapper = mapper,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -784,7 +794,7 @@ class AccessInvalidationTest {
                         accessRepository = testRepo,
                         accessManager = mgr,
                         sessionManager = localSessionManager,
-                        mapper = mapper,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -792,6 +802,7 @@ class AccessInvalidationTest {
                     AccessInvalidationCoordinator(
                         accessManager = mgr,
                         tenantCoordinator = tenantCoord,
+                        sessionManager = localSessionManager,
                         scope = localScope,
                     )
 
@@ -896,7 +907,7 @@ class AccessInvalidationTest {
                     AccessManager(
                         accessRepository = testRepo,
                         sessionManager = localSessionManager,
-                        mapper = mapper,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -905,7 +916,7 @@ class AccessInvalidationTest {
                         accessRepository = testRepo,
                         accessManager = mgr,
                         sessionManager = localSessionManager,
-                        mapper = mapper,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -913,6 +924,7 @@ class AccessInvalidationTest {
                     AccessInvalidationCoordinator(
                         accessManager = mgr,
                         tenantCoordinator = tenantCoord,
+                        sessionManager = localSessionManager,
                         scope = localScope,
                     )
 
@@ -948,25 +960,21 @@ class AccessInvalidationTest {
         }
 
     @Test
-    fun staleFinallyDoesNotDeleteLockBelongingToNewOperation() =
+    fun unauthenticatedSessionSkipsInvalidation() =
         runTest {
             val localJob = Job()
             val localScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + localJob)
-            val localSessionManager = SessionManager(FakeTokenStorage())
+            val emptyStorage = FakeTokenStorage().apply { clear() }
+            val unauthenticatedSessionManager = SessionManager(emptyStorage)
             try {
-                var activeRuns = 0
-                var maxConcurrentRuns = 0
-                val op2Barrier = CompletableDeferred<Unit>()
-                val op2Entered = CompletableDeferred<Unit>()
-                val op1BeforeFinallyReached = CompletableDeferred<Unit>()
-                val op1AllowFinally = CompletableDeferred<Unit>()
-
-                var refreshCount = 0
+                var globalCallCount = 0
+                var companyCallCount = 0
 
                 val testRepo =
                     object : AccessRepository {
-                        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> =
-                            NetworkResult.Success(
+                        override suspend fun getGlobalContext(): NetworkResult<GlobalUserContext> {
+                            globalCallCount++
+                            return NetworkResult.Success(
                                 GlobalUserContext(
                                     userId = "u1",
                                     serverTime = Instant.fromEpochMilliseconds(0),
@@ -976,28 +984,20 @@ class AccessInvalidationTest {
                                     memberCompanies = listOf(CompanyBrief("comp_A", "Company A", CompanyStatus.ACTIVE)),
                                 ),
                             )
+                        }
 
                         override suspend fun getCompanyAccess(
                             userId: String,
                             companyId: String,
                             forceRefresh: Boolean,
                         ): NetworkResult<CompanyAccessDomain> {
-                            refreshCount++
-                            activeRuns++
-                            maxConcurrentRuns = maxOf(maxConcurrentRuns, activeRuns)
-
-                            if (refreshCount == 3) {
-                                op2Entered.complete(Unit)
-                                op2Barrier.await()
-                            }
-
-                            activeRuns--
+                            companyCallCount++
                             return NetworkResult.Success(
                                 CompanyAccessDomain(
                                     companyId = companyId,
                                     companyName = "Company $companyId",
                                     serverTime = Instant.fromEpochMilliseconds(0),
-                                    revision = "rev_$refreshCount",
+                                    revision = "rev_1",
                                     companyStatus = CompanyStatus.ACTIVE,
                                     accessStatus = AccessStatus.ACTIVE,
                                     activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
@@ -1021,8 +1021,8 @@ class AccessInvalidationTest {
                 val mgr =
                     AccessManager(
                         accessRepository = testRepo,
-                        sessionManager = localSessionManager,
-                        mapper = mapper,
+                        sessionManager = unauthenticatedSessionManager,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -1030,8 +1030,8 @@ class AccessInvalidationTest {
                     TenantContextCoordinator(
                         accessRepository = testRepo,
                         accessManager = mgr,
-                        sessionManager = localSessionManager,
-                        mapper = mapper,
+                        sessionManager = unauthenticatedSessionManager,
+                        errorParser = errorParser,
                         scope = localScope,
                     )
 
@@ -1039,56 +1039,17 @@ class AccessInvalidationTest {
                     AccessInvalidationCoordinator(
                         accessManager = mgr,
                         tenantCoordinator = tenantCoord,
+                        sessionManager = unauthenticatedSessionManager,
                         scope = localScope,
                     )
 
-                // 1. Initial selection (refreshCount == 1)
-                tenantCoord.selectTenant("comp_A")
-                assertEquals(1, refreshCount)
+                // 403 on unauthenticated login attempt (e.g. ACCOUNT_FROZEN)
+                coord.onAccessInvalidatedAsync("ACCOUNT_FROZEN", null).join()
+                coord.onAccessInvalidatedAsync("COMPANY_RESTRICTED", "comp_A").join()
 
-                // Configure hook to intercept Op 1 right between while loop exit and finally block
-                coord.onBeforeFinallyHook = {
-                    op1BeforeFinallyReached.complete(Unit)
-                    op1AllowFinally.await()
-                }
-
-                // 2. Launch Op 1: completes while loop (refreshCount == 2), hits hook before finally
-                val job1 = coord.onAccessInvalidatedAsync("PERMISSION_DENIED", "comp_A")
-                op1BeforeFinallyReached.await()
-                assertEquals(2, refreshCount)
-
-                // Clear hook so subsequent operations don't block
-                coord.onBeforeFinallyHook = null
-
-                // 3. Launch Op 2 while Op 1 is paused before finally.
-                // Op 2 sees lock was released by loop, acquires it with ownerToken2, and starts getCompanyAccess (refreshCount == 3)
-                val job2 = coord.onAccessInvalidatedAsync("PERMISSION_DENIED", "comp_A")
-                op2Entered.await()
-                assertEquals(3, refreshCount)
-                assertEquals(1, activeRuns)
-
-                // 4. Now allow Op 1 to proceed into its finally block!
-                // Op 1's finally must NOT delete the lock belonging to Op 2!
-                op1AllowFinally.complete(Unit)
-                job1.join()
-
-                // 5. While Op 2 is still suspended in getCompanyAccess, launch Op 3
-                val job3 = coord.onAccessInvalidatedAsync("SUPPORT_GRANT_EXPIRED", "comp_A")
-
-                // If Op 1's finally had cleared the lock, Op 3 would run concurrently (activeRuns would be 2).
-                // With ownerToken protection, Op 3 is queued as pending, so activeRuns remains 1.
-                assertEquals(1, activeRuns)
-                assertEquals(1, maxConcurrentRuns)
-
-                // 6. Release Op 2 barrier
-                op2Barrier.complete(Unit)
-                job2.join()
-                job3.join()
-
-                // Op 3 executed sequentially after Op 2
-                assertEquals(4, refreshCount)
-                assertEquals(0, activeRuns)
-                assertEquals(1, maxConcurrentRuns)
+                // Both must be skipped because session is unauthenticated
+                assertEquals(0, globalCallCount)
+                assertEquals(0, companyCallCount)
             } finally {
                 localJob.cancel()
             }

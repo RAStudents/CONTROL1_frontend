@@ -14,10 +14,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import studio.acmenra.control.core.access.data.mapper.AccessMapper
-import studio.acmenra.control.core.access.data.model.AccessErrorResponseDto
+import studio.acmenra.control.core.access.domain.model.AccessDomainError
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
 import studio.acmenra.control.core.access.domain.model.GlobalUserContext
+import studio.acmenra.control.core.access.domain.parser.AccessErrorParser
 import studio.acmenra.control.core.access.domain.repository.AccessRepository
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.SessionState
@@ -27,7 +27,7 @@ import studio.acmenra.control.core.network.model.NetworkResult
 class AccessManager(
     private val accessRepository: AccessRepository,
     private val sessionManager: SessionManager,
-    private val mapper: AccessMapper = AccessMapper(),
+    private val errorParser: AccessErrorParser,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
     private val mutex = Mutex()
@@ -44,7 +44,7 @@ class AccessManager(
             sessionManager.sessionState.collect { sessionState ->
                 when (sessionState) {
                     is SessionState.Authenticated -> {
-                        val currentRev = sessionManager.currentSessionRevision()
+                        val currentRev = sessionManager.currentRevision()
                         val current = _globalState.value
                         if (current !is GlobalAccessState.Ready || current.sessionRevision != currentRev) {
                             refreshGlobalContext(force = true)
@@ -62,7 +62,7 @@ class AccessManager(
     }
 
     fun currentUserContext(): GlobalUserContext? {
-        val currentRev = sessionManager.currentSessionRevision()
+        val currentRev = sessionManager.currentRevision()
         return when (val current = _globalState.value) {
             is GlobalAccessState.Ready -> if (current.sessionRevision == currentRev) current.context else null
             else -> null
@@ -70,7 +70,7 @@ class AccessManager(
     }
 
     suspend fun ensureGlobalContext(): GlobalUserContext? {
-        val currentRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
+        val currentRevision = sessionManager.currentRevision()
         val current = _globalState.value
         if (current is GlobalAccessState.Ready && current.sessionRevision == currentRevision) {
             return current.context
@@ -82,7 +82,7 @@ class AccessManager(
     suspend fun refreshGlobalContext(force: Boolean = false): NetworkResult<GlobalUserContext> {
         val deferred =
             mutex.withLock {
-                val currentRevision = sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
+                val currentRevision = sessionManager.currentRevision()
                 val currentState = _globalState.value
                 if (!force &&
                     currentState is GlobalAccessState.Ready &&
@@ -121,8 +121,7 @@ class AccessManager(
                         scope.async {
                             val result = accessRepository.getGlobalContext()
                             mutex.withLock {
-                                val latestRevision =
-                                    sessionManager.getSessionSnapshot()?.revision ?: sessionManager.currentRevision()
+                                val latestRevision = sessionManager.currentRevision()
                                 val isAuthenticated =
                                     sessionManager.sessionState.value is SessionState.Authenticated
                                 if (isAuthenticated &&
@@ -191,22 +190,11 @@ class AccessManager(
 
             is NetworkResult.Failure -> {
                 val error = result.error
-                val errorDto =
-                    if (error is NetworkError.Http) {
-                        AccessErrorResponseDto.parse(error.errorBody)
-                    } else {
-                        null
-                    }
-                val isAccountFrozen =
-                    error is NetworkError.Http &&
-                        error.statusCode == 403 &&
-                        errorDto?.resolvedCode == "ACCOUNT_FROZEN"
-
+                val domainError = errorParser.parse(error)
                 _globalState.value =
                     when {
-                        isAccountFrozen -> {
-                            val restriction = errorDto.restriction?.let { mapper.mapRestriction(it) }
-                            GlobalAccessState.Restricted.AccountFrozen(restriction)
+                        domainError is AccessDomainError.AccountFrozen -> {
+                            GlobalAccessState.Restricted.AccountFrozen(domainError.restriction)
                         }
 
                         _globalState.value is GlobalAccessState.Ready -> {

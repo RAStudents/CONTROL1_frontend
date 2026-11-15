@@ -38,12 +38,12 @@ class AccessRepositoryImpl(
                 else -> cached.etag
             }
 
+        val requestMark = timeSource.markNow()
         return when (val remoteResult = remoteDataSource.getCompanyAccess(companyId, ifNoneMatch)) {
             is NetworkResult.Success -> {
                 when (val fetchResult = remoteResult.data) {
                     is AccessFetchResult.Modified -> {
-                        val mark = timeSource.markNow()
-                        val domain = mapper.mapCompanyAccess(fetchResult.dto, mark)
+                        val domain = mapper.mapCompanyAccess(fetchResult.dto, requestMark)
                         localDataSource.put(
                             userId = userId,
                             companyId = companyId,
@@ -51,7 +51,6 @@ class AccessRepositoryImpl(
                                 CachedCompanyAccess(
                                     domain = domain,
                                     etag = fetchResult.etag,
-                                    cachedAtMark = mark,
                                 ),
                         )
                         NetworkResult.Success(domain, remoteResult.statusCode)
@@ -91,13 +90,13 @@ class AccessRepositoryImpl(
     private suspend fun retryWithoutIfNoneMatch(
         userId: String,
         companyId: String,
-    ): NetworkResult<CompanyAccessDomain> =
-        when (val retryResult = remoteDataSource.getCompanyAccess(companyId, ifNoneMatch = null)) {
+    ): NetworkResult<CompanyAccessDomain> {
+        val requestMark = timeSource.markNow()
+        return when (val retryResult = remoteDataSource.getCompanyAccess(companyId, ifNoneMatch = null)) {
             is NetworkResult.Success -> {
                 when (val retryData = retryResult.data) {
                     is AccessFetchResult.Modified -> {
-                        val mark = timeSource.markNow()
-                        val domain = mapper.mapCompanyAccess(retryData.dto, mark)
+                        val domain = mapper.mapCompanyAccess(retryData.dto, requestMark)
                         localDataSource.put(
                             userId = userId,
                             companyId = companyId,
@@ -105,7 +104,6 @@ class AccessRepositoryImpl(
                                 CachedCompanyAccess(
                                     domain = domain,
                                     etag = retryData.etag,
-                                    cachedAtMark = mark,
                                 ),
                         )
                         NetworkResult.Success(domain, retryResult.statusCode)
@@ -123,4 +121,5 @@ class AccessRepositoryImpl(
 
             is NetworkResult.Failure -> retryResult
         }
+    }
 }

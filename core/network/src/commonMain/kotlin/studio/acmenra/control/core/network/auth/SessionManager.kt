@@ -21,6 +21,8 @@ class SessionManager(
 
     fun currentSessionRevision(): Long = currentRevision
 
+    fun currentRevision(): Long = currentRevision
+
     private val _sessionState =
         MutableStateFlow<SessionState>(
             if (tokenStorage.hasTokens()) {
@@ -39,8 +41,6 @@ class SessionManager(
         }
 
     suspend fun getSessionSnapshot(): SessionSnapshot? = getSnapshot()
-
-    suspend fun currentRevision(): Long = mutex.withLock { currentRevision }
 
     suspend fun saveSession(tokens: TokenPair): SessionSnapshot =
         mutex.withLock {

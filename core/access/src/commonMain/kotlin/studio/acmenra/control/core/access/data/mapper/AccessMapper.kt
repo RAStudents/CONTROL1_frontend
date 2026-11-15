@@ -53,20 +53,10 @@ class AccessMapper(
         domain: CompanyAccessDomain,
         tenantRevision: Long = 1L,
     ): AuthorizedTenantContext =
-        AuthorizedTenantContext(
+        AuthorizedTenantContext.fromDomain(
             userId = userId,
-            companyId = domain.companyId,
-            companyName = domain.companyName,
+            domain = domain,
             tenantRevision = tenantRevision,
-            accessRevision = domain.revision,
-            companyStatus = domain.companyStatus,
-            accessStatus = domain.accessStatus,
-            activeOrigins = domain.activeOrigins,
-            rawTenantPermissions = domain.tenantPermissions,
-            rawSupportPermissions = domain.supportPermissions,
-            permissionSources = domain.permissionSources,
-            supportGrant = domain.supportGrant,
-            restriction = domain.restriction,
         )
 
     private fun mapCompanyBrief(dto: CompanyBriefDto): CompanyBrief =

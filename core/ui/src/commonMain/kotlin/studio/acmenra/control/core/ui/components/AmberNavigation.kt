@@ -3,6 +3,7 @@ package studio.acmenra.control.core.ui.components
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
@@ -23,7 +24,7 @@ fun AmberNavigationBar(
     content: @Composable RowScope.() -> Unit,
 ) {
     NavigationBar(
-        modifier = modifier.height(AmberDimens.NavBarHeight),
+        modifier = modifier.defaultMinSize(minHeight = AmberDimens.NavBarHeight),
         containerColor = MaterialTheme.colorScheme.surfaceContainer,
         contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         content = content,
@@ -69,15 +70,10 @@ fun AmberNavigationRail(
         modifier = modifier.width(AmberDimens.RailCollapsed).fillMaxHeight(),
         containerColor = MaterialTheme.colorScheme.surfaceContainer,
         contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-        header =
-            if (header != null) {
-                {
-                    Spacer(modifier = Modifier.height(AmberDimens.RailTopPadding))
-                    header()
-                }
-            } else {
-                null
-            },
+        header = {
+            Spacer(modifier = Modifier.height(AmberDimens.RailTopPadding))
+            header?.invoke(this)
+        },
         content = content,
     )
 }

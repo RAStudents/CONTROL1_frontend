@@ -19,7 +19,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import kotlin.time.TimeSource
 
 class AccessRepositoryTest {
     private class FakeRemoteDataSource : AccessRemoteDataSource {
@@ -132,7 +131,6 @@ class AccessRepositoryTest {
                             ),
                         ),
                     etag = "W/\"rev_old\"",
-                    cachedAtMark = TimeSource.Monotonic.markNow(),
                 ),
             )
 
@@ -188,7 +186,6 @@ class AccessRepositoryTest {
                 CachedCompanyAccess(
                     domain = domainWithGrant,
                     etag = "W/\"rev_grant\"",
-                    cachedAtMark = TimeSource.Monotonic.markNow(),
                 ),
             )
 

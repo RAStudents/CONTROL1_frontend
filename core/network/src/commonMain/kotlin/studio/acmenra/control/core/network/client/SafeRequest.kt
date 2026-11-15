@@ -30,11 +30,11 @@ val SkipAccessInvalidationAttributeKey =
     AttributeKey<Boolean>("SkipAccessInvalidation")
 
 private val ACCESS_QUERY_ENDPOINT_REGEX =
-    Regex("^(?:/api/v\\d+)?/(?:auth/context|companies/[^/]+/access)$")
+    Regex("(?:^|/)(?:api/v\\d+/)?(?:auth/context|companies/[^/]+/access)$")
 
 fun isAccessQueryEndpoint(path: String): Boolean {
-    val cleanPath = if (path.startsWith("/")) path else "/$path"
-    return cleanPath.trimEnd('/').matches(ACCESS_QUERY_ENDPOINT_REGEX)
+    val cleanPath = (if (path.startsWith("/")) path else "/$path").trimEnd('/')
+    return cleanPath.contains(ACCESS_QUERY_ENDPOINT_REGEX)
 }
 
 @Serializable
@@ -51,7 +51,7 @@ private val errorJson =
     }
 
 private val TENANT_ENDPOINT_REGEX =
-    Regex("^(?:/api/v\\d+)?/companies/([^/]+)(?:/.*)?$")
+    Regex("^(?:.*?/)?(?:api/v\\d+/)?companies/([^/]+)(?:/.*)?$")
 
 private val RESERVED_COMPANY_SEGMENTS =
     setOf("health", "metrics", "status", "check", "ping", "all", "me", "search")

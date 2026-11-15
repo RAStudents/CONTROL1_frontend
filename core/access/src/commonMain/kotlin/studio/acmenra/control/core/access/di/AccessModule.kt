@@ -7,11 +7,13 @@ import studio.acmenra.control.core.access.data.datasource.AccessRemoteDataSource
 import studio.acmenra.control.core.access.data.datasource.InMemoryAccessLocalDataSource
 import studio.acmenra.control.core.access.data.datasource.KtorAccessRemoteDataSource
 import studio.acmenra.control.core.access.data.mapper.AccessMapper
+import studio.acmenra.control.core.access.data.parser.JsonAccessErrorParser
 import studio.acmenra.control.core.access.data.repository.AccessRepositoryImpl
 import studio.acmenra.control.core.access.domain.AccessInvalidationCoordinator
 import studio.acmenra.control.core.access.domain.AccessManager
 import studio.acmenra.control.core.access.domain.TenantContextCoordinator
 import studio.acmenra.control.core.access.domain.concurrent.TenantSingleFlight
+import studio.acmenra.control.core.access.domain.parser.AccessErrorParser
 import studio.acmenra.control.core.access.domain.repository.AccessRepository
 import studio.acmenra.control.core.access.domain.usecase.CheckPermissionUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
@@ -28,6 +30,7 @@ import studio.acmenra.control.core.network.auth.AccessInvalidationDispatcher
 val accessDataModule =
     module {
         single { AccessMapper() }
+        single<AccessErrorParser> { JsonAccessErrorParser(mapper = get()) }
         single<AccessLocalDataSource> { InMemoryAccessLocalDataSource() }
         single<AccessRemoteDataSource> {
             KtorAccessRemoteDataSource(
@@ -50,7 +53,7 @@ val accessDomainModule =
             AccessManager(
                 accessRepository = get(),
                 sessionManager = get(),
-                mapper = get(),
+                errorParser = get(),
             )
         }
         single {
@@ -58,7 +61,7 @@ val accessDomainModule =
                 accessRepository = get(),
                 accessManager = get(),
                 sessionManager = get(),
-                mapper = get(),
+                errorParser = get(),
                 singleFlight = get(),
             )
         }
@@ -66,6 +69,7 @@ val accessDomainModule =
             AccessInvalidationCoordinator(
                 accessManager = get(),
                 tenantCoordinator = get(),
+                sessionManager = get(),
             ).also { coordinator ->
                 get<AccessInvalidationDispatcher>().addListener(coordinator)
             }

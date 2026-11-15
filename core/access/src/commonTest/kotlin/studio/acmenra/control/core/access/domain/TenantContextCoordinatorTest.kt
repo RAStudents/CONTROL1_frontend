@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
 import studio.acmenra.control.core.access.data.mapper.AccessMapper
+import studio.acmenra.control.core.access.data.parser.JsonAccessErrorParser
 import studio.acmenra.control.core.access.domain.concurrent.TenantSingleFlight
 import studio.acmenra.control.core.access.domain.model.AccessOrigin
 import studio.acmenra.control.core.access.domain.model.AccessRestriction
@@ -143,7 +144,8 @@ class TenantContextCoordinatorTest {
     private val timeMark = SettableTimeMark()
     private val timeSource = SettableTimeSource(timeMark)
     private val mapper = AccessMapper(timeSource)
-    private val accessManager = AccessManager(repository, sessionManager, scope = testScope)
+    private val errorParser = JsonAccessErrorParser()
+    private val accessManager = AccessManager(repository, sessionManager, errorParser, scope = testScope)
     private val singleFlight = TenantSingleFlight(testScope)
 
     private val coordinator =
@@ -151,7 +153,7 @@ class TenantContextCoordinatorTest {
             accessRepository = repository,
             accessManager = accessManager,
             sessionManager = sessionManager,
-            mapper = mapper,
+            errorParser = errorParser,
             scope = testScope,
             singleFlight = singleFlight,
         )
@@ -369,7 +371,13 @@ class TenantContextCoordinatorTest {
             coordinator.selectTenant("c1")
             refreshCalled = false
 
-            val invalidationCoordinator = AccessInvalidationCoordinator(accessManager, coordinator, scope = testScope)
+            val invalidationCoordinator =
+                AccessInvalidationCoordinator(
+                    accessManager = accessManager,
+                    tenantCoordinator = coordinator,
+                    sessionManager = sessionManager,
+                    scope = testScope,
+                )
             invalidationCoordinator.onAccessInvalidatedAsync("PERMISSION_DENIED", "c1").join()
 
             assertTrue(refreshCalled)
@@ -583,7 +591,8 @@ class TenantContextCoordinatorTest {
                     accessRepository = customRepo,
                     accessManager = accessManager,
                     sessionManager = sessionManager,
-                    mapper = mapper,
+                    errorParser = errorParser,
+                    scope = testScope,
                 )
 
             try {
@@ -985,8 +994,15 @@ class TenantContextCoordinatorTest {
                     override suspend fun clearCache() {}
                 }
 
-            val testMgr = AccessManager(testRepo, sessionManager, mapper, scope = testScope)
-            val testCoord = TenantContextCoordinator(testRepo, testMgr, sessionManager, mapper, scope = testScope)
+            val testMgr = AccessManager(testRepo, sessionManager, errorParser, scope = testScope)
+            val testCoord =
+                TenantContextCoordinator(
+                    testRepo,
+                    testMgr,
+                    sessionManager,
+                    errorParser,
+                    scope = testScope,
+                )
 
             // Step 1: Initial selectTenant fails because network is down
             testCoord.selectTenant("c1")
@@ -1200,5 +1216,140 @@ class TenantContextCoordinatorTest {
             val stateB = coordinator.tenantState.value
             assertTrue(stateB is TenantContextState.Authorized)
             assertEquals("user_200", stateB.context.userId)
+        }
+
+    @Test
+    fun finallyBlockCleansUpActiveRefreshAndSelectionJobs() =
+        runTest {
+            assertEquals(0, coordinator.activeRefreshJobsCount())
+            assertFalse(coordinator.hasActiveSelectionJob())
+
+            coordinator.selectTenant("c1")
+            assertEquals(0, coordinator.activeRefreshJobsCount())
+            assertFalse(coordinator.hasActiveSelectionJob())
+
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Authorized)
+            assertFalse(state.isRefreshing)
+
+            coordinator.refreshCurrentTenant(force = true)
+            assertEquals(0, coordinator.activeRefreshJobsCount())
+            assertFalse(coordinator.hasActiveSelectionJob())
+
+            val updatedState = coordinator.tenantState.value
+            assertTrue(updatedState is TenantContextState.Authorized)
+            assertFalse(updatedState.isRefreshing)
+        }
+
+    @Test
+    fun billingDebtRestrictionEnforcesAllowBillingOverride() =
+        runTest {
+            val billingDebtRestriction =
+                AccessRestriction(
+                    type = RestrictionType.BILLING_DEBT,
+                    reason = "Unpaid invoice",
+                    restrictedAt = null,
+                    untilAt = null,
+                    supportContact = null,
+                )
+
+            fun createRestrictedDomain(allowOverride: Boolean) =
+                CompanyAccessDomain(
+                    companyId = "c1",
+                    companyName = "Company 1",
+                    serverTime = Instant.fromEpochMilliseconds(0),
+                    revision = "rev_1",
+                    companyStatus = CompanyStatus.RESTRICTED,
+                    accessStatus = AccessStatus.ACTIVE_SUPPORT_OVERRIDE,
+                    activeOrigins = setOf(AccessOrigin.SUPPORT_GRANT),
+                    restriction = billingDebtRestriction,
+                    tenantPermissions = emptySet(),
+                    supportPermissions = setOf(SupportPermission.DEVICE_DIAGNOSTICS),
+                    permissionSources = emptyMap(),
+                    supportGrant =
+                        SupportGrantInfo(
+                            grantId = "g_bill",
+                            status = SupportGrantStatus.ACTIVE,
+                            mode = SupportMode.ENGINEERING_SUPPORT,
+                            ticketReference = "TICKET-1",
+                            allowBillingOverride = allowOverride,
+                            grantedByUserId = "admin",
+                            grantedAt = null,
+                            expiresAt = null,
+                            remainingTtlSec = 300,
+                            revokedAt = null,
+                            fetchedAtMark = timeSource.markNow(),
+                        ),
+                )
+
+            repository.handler = { _ -> NetworkResult.Success(createRestrictedDomain(allowOverride = false)) }
+            coordinator.selectTenant("c1")
+            val stateBlocked = coordinator.tenantState.value
+            assertTrue(stateBlocked is TenantContextState.Restricted.CompanyFrozen)
+
+            repository.handler = { _ -> NetworkResult.Success(createRestrictedDomain(allowOverride = true)) }
+            coordinator.selectTenant("c1")
+            val stateAllowed = coordinator.tenantState.value
+            assertTrue(stateAllowed is TenantContextState.Authorized)
+            assertEquals("g_bill", stateAllowed.context.supportGrant?.grantId)
+        }
+
+    @Test
+    fun userSwitchWithoutLogoutResetsNonNotSelectedTenantStates() =
+        runTest {
+            repository.handler = { _ ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = "c1",
+                        companyName = "Company 1",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_1",
+                        companyStatus = CompanyStatus.RESTRICTED,
+                        accessStatus = AccessStatus.RESTRICTED,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        restriction =
+                            AccessRestriction(
+                                type = RestrictionType.ADMIN_BLOCKED,
+                                reason = "Suspended",
+                                restrictedAt = null,
+                                untilAt = null,
+                                supportContact = null,
+                            ),
+                        tenantPermissions = emptySet(),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+            coordinator.selectTenant("c1")
+            assertTrue(coordinator.tenantState.value is TenantContextState.Restricted.CompanyFrozen)
+
+            // Switch to User B with valid Authorized access
+            repository.handler = { _ ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = "c1",
+                        companyName = "Company 1",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_2",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+            sessionManager.saveSession(TokenPair("acc_user_b", "ref_user_b"))
+
+            // ensureTenantContext("c1") must NOT retain User A's Restricted state; it must refresh and authorize User B
+            coordinator.ensureTenantContext("c1")
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Authorized)
+            assertEquals("c1", state.context.companyId)
         }
 }

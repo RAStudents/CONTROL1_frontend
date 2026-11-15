@@ -139,4 +139,27 @@ data class AuthorizedTenantContext(
         if (grant.runtimeState == SupportGrantRuntimeState.ExpiredLocally) return this
         return copy(supportGrant = grant.copy(runtimeState = SupportGrantRuntimeState.ExpiredLocally))
     }
+
+    companion object {
+        fun fromDomain(
+            userId: String,
+            domain: CompanyAccessDomain,
+            tenantRevision: Long = 1L,
+        ): AuthorizedTenantContext =
+            AuthorizedTenantContext(
+                userId = userId,
+                companyId = domain.companyId,
+                companyName = domain.companyName,
+                tenantRevision = tenantRevision,
+                accessRevision = domain.revision,
+                companyStatus = domain.companyStatus,
+                accessStatus = domain.accessStatus,
+                activeOrigins = domain.activeOrigins,
+                rawTenantPermissions = domain.tenantPermissions,
+                rawSupportPermissions = domain.supportPermissions,
+                permissionSources = domain.permissionSources,
+                supportGrant = domain.supportGrant,
+                restriction = domain.restriction,
+            )
+    }
 }

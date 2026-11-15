@@ -41,7 +41,7 @@ fun AppScaffold(
     val destination = backStackEntry?.destination
 
     val isLoginDestination = destination?.hasRoute<LoginRoute>() == true
-    val showNavigation = sessionState == SessionState.Authenticated && !isLoginDestination
+    val showNavigation = sessionState == SessionState.Authenticated && destination != null && !isLoginDestination
     val currentContent by rememberUpdatedState(content)
     val movableContent = remember { movableContentOf { currentContent() } }
 

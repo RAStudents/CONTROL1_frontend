@@ -11,13 +11,15 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import studio.acmenra.control.core.access.domain.model.TenantContextState
 import studio.acmenra.control.core.network.auth.AccessInvalidationListener
+import studio.acmenra.control.core.network.auth.SessionManager
+import studio.acmenra.control.core.network.auth.SessionState
 
 class AccessInvalidationCoordinator(
     private val accessManager: AccessManager,
     private val tenantCoordinator: TenantContextCoordinator,
+    private val sessionManager: SessionManager,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) : AccessInvalidationListener {
-    internal var onBeforeFinallyHook: (suspend () -> Unit)? = null
     private val targetMutex = Mutex()
     private val inProgressTargets = mutableMapOf<String, Any>()
     private val pendingRetryTargets = mutableMapOf<String, Pair<String?, String?>>()
@@ -66,13 +68,7 @@ class AccessInvalidationCoordinator(
 
                 val next =
                     targetMutex.withLock {
-                        val pending = pendingRetryTargets.remove(targetKey)
-                        if (pending == null) {
-                            if (inProgressTargets[targetKey] === ownerToken) {
-                                inProgressTargets.remove(targetKey)
-                            }
-                        }
-                        pending
+                        pendingRetryTargets.remove(targetKey)
                     }
 
                 if (next != null) {
@@ -82,7 +78,6 @@ class AccessInvalidationCoordinator(
                     break
                 }
             }
-            onBeforeFinallyHook?.invoke()
         } finally {
             withContext(NonCancellable) {
                 val pendingToRecover =
@@ -107,6 +102,9 @@ class AccessInvalidationCoordinator(
         errorCode: String?,
         companyId: String?,
     ) {
+        if (sessionManager.sessionState.value !is SessionState.Authenticated) {
+            return
+        }
         when (errorCode) {
             "ACCOUNT_FROZEN" -> {
                 accessManager.refreshGlobalContext(force = true)

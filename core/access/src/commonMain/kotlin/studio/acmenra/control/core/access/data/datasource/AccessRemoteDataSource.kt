@@ -14,6 +14,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerializationException
 import studio.acmenra.control.core.access.data.model.CompanyAccessResponseDto
 import studio.acmenra.control.core.access.data.model.GlobalContextResponseDto
+import studio.acmenra.control.core.network.client.SkipAccessInvalidationAttributeKey
 import studio.acmenra.control.core.network.client.isConnectivityError
 import studio.acmenra.control.core.network.client.safeRequest
 import studio.acmenra.control.core.network.model.NetworkError
@@ -33,7 +34,9 @@ class KtorAccessRemoteDataSource(
 ) : AccessRemoteDataSource {
     override suspend fun getGlobalContext(): NetworkResult<GlobalContextResponseDto> =
         httpClient.safeRequest {
-            get("api/v1/auth/context")
+            get("api/v1/auth/context") {
+                attributes.put(SkipAccessInvalidationAttributeKey, true)
+            }
         }
 
     override suspend fun getCompanyAccess(
@@ -44,6 +47,7 @@ class KtorAccessRemoteDataSource(
             val encodedCompanyId = companyId.encodeURLPathPart()
             val response =
                 httpClient.get("api/v1/companies/$encodedCompanyId/access") {
+                    attributes.put(SkipAccessInvalidationAttributeKey, true)
                     if (!ifNoneMatch.isNullOrBlank()) {
                         header(HttpHeaders.IfNoneMatch, ifNoneMatch)
                     }

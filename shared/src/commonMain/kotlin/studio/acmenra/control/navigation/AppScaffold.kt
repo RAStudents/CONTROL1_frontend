@@ -20,14 +20,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
-import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
@@ -37,7 +35,6 @@ import studio.acmenra.control.core.access.domain.model.GlobalAccessState
 import studio.acmenra.control.core.access.domain.model.TenantContextState
 import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveTenantContextUseCase
-import studio.acmenra.control.core.access.domain.usecase.SelectTenantUseCase
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.core.ui.components.AmberNavigationBar
 import studio.acmenra.control.core.ui.components.AmberNavigationBarItem
@@ -62,7 +59,6 @@ fun AppScaffold(
     items: List<AppNavigationItem> = AppNavigationItem.DEFAULT_ITEMS,
     observeTenantContextUseCase: ObserveTenantContextUseCase = koinInject(),
     observeGlobalAccessUseCase: ObserveGlobalAccessUseCase = koinInject(),
-    selectTenantUseCase: SelectTenantUseCase = koinInject(),
     content: @Composable () -> Unit,
 ) {
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -75,7 +71,6 @@ fun AppScaffold(
 
     val globalState by observeGlobalAccessUseCase().collectAsState()
     val tenantState by observeTenantContextUseCase().collectAsState()
-    val scope = rememberCoroutineScope()
 
     val topBarState = remember { TopBarState() }
     var isCompanyDialogOpen by remember { mutableStateOf(false) }
@@ -198,7 +193,6 @@ fun AppScaffold(
                                             selectedCompanyId = effectiveSelectedCompanyId,
                                             canBrowseAllCompanies = globalContext.canBrowseAllCompanies,
                                             onSelectCompany = { companyId ->
-                                                scope.launch { selectTenantUseCase(companyId) }
                                                 navController.navigateToEvents(companyId)
                                             },
                                             onSelectAllCompanies = {
@@ -310,7 +304,6 @@ fun AppScaffold(
                     canBrowseAllCompanies = globalContext.canBrowseAllCompanies,
                     onSelectCompany = { companyId ->
                         isCompanyDialogOpen = false
-                        scope.launch { selectTenantUseCase(companyId) }
                         navController.navigateToEvents(companyId)
                     },
                     onSelectAllCompanies = {

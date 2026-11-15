@@ -163,4 +163,47 @@ class TenantAccessResolverTest {
             )
         assertEquals("c1", fallback)
     }
+
+    @Test
+    fun testResolveFallbackWithExcludedDefaultCompanySelectsAlternativeMemberCompany() {
+        val user = createUserContext(defaultCompanyId = "c1")
+
+        val fallback =
+            TenantAccessResolver.resolveFallbackCompanyId(
+                userContext = user,
+                previousAuthorizedCompanyId = null,
+                excludedCompanyId = "c1",
+            )
+        assertEquals("c2", fallback)
+    }
+
+    @Test
+    fun testResolveFallbackWithExcludedPreviousCompanySelectsDefaultCompany() {
+        val user = createUserContext(defaultCompanyId = "c1")
+
+        val fallback =
+            TenantAccessResolver.resolveFallbackCompanyId(
+                userContext = user,
+                previousAuthorizedCompanyId = "c2",
+                excludedCompanyId = "c2",
+            )
+        assertEquals("c1", fallback)
+    }
+
+    @Test
+    fun testResolveFallbackWithAllMemberCompaniesExcludedReturnsNull() {
+        val user =
+            createUserContext(
+                memberCompanies = listOf(CompanyBrief("c1", "Acme", CompanyStatus.ACTIVE)),
+                defaultCompanyId = "c1",
+            )
+
+        val fallback =
+            TenantAccessResolver.resolveFallbackCompanyId(
+                userContext = user,
+                previousAuthorizedCompanyId = null,
+                excludedCompanyId = "c1",
+            )
+        assertNull(fallback)
+    }
 }

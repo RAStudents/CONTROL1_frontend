@@ -19,9 +19,11 @@ object TenantAccessResolver {
     fun resolveFallbackCompanyId(
         userContext: GlobalUserContext,
         previousAuthorizedCompanyId: String?,
+        excludedCompanyId: String? = null,
     ): String? {
         val isPreviousValid =
             previousAuthorizedCompanyId != null &&
+                previousAuthorizedCompanyId != excludedCompanyId &&
                 (
                     isVendorAdmin(userContext) ||
                         userContext.memberCompanies.any { it.id == previousAuthorizedCompanyId }
@@ -32,9 +34,11 @@ object TenantAccessResolver {
 
         val defaultAccessible =
             userContext.defaultCompanyId?.takeIf { defId ->
-                isVendorAdmin(userContext) || userContext.memberCompanies.any { it.id == defId }
+                defId != excludedCompanyId &&
+                    (isVendorAdmin(userContext) || userContext.memberCompanies.any { it.id == defId })
             }
 
-        return defaultAccessible ?: userContext.memberCompanies.firstOrNull()?.id
+        return defaultAccessible
+            ?: userContext.memberCompanies.firstOrNull { it.id != excludedCompanyId }?.id
     }
 }

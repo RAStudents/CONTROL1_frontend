@@ -7,6 +7,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -14,6 +15,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import kotlinx.coroutines.launch
+import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
 import studio.acmenra.control.core.access.domain.model.AuthorizedTenantContext
 import studio.acmenra.control.core.access.domain.model.GlobalAccessState
@@ -23,6 +25,9 @@ import studio.acmenra.control.core.access.domain.usecase.EnsureTenantContextUseC
 import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveTenantContextUseCase
 import studio.acmenra.control.core.network.auth.SessionManager
+import studio.acmenra.control.core.ui.generated.resources.Res
+import studio.acmenra.control.core.ui.generated.resources.restricted_no_companies_desc
+import studio.acmenra.control.core.ui.generated.resources.restricted_no_companies_title
 import studio.acmenra.control.navigation.components.CompanySelectionDialog
 import studio.acmenra.control.navigation.screen.AccessDeniedScreen
 import studio.acmenra.control.navigation.screen.CompanyFrozenScreen
@@ -109,6 +114,8 @@ fun TenantRouteGuard(
                 companyName = null,
                 canSwitchCompany = false,
                 onLogout = onLogoutAction,
+                title = stringResource(Res.string.restricted_no_companies_title),
+                description = stringResource(Res.string.restricted_no_companies_desc),
                 modifier = modifier,
             )
             return
@@ -162,7 +169,12 @@ fun TenantRouteGuard(
     val hasAccessToRequested = TenantAccessResolver.hasAccess(userContext, requestedCompanyId)
     if (!hasAccessToRequested) {
         val previousAuthorizedCompanyId = (tenantState as? TenantContextState.Authorized)?.context?.companyId
-        val fallbackCompanyId = TenantAccessResolver.resolveFallbackCompanyId(userContext, previousAuthorizedCompanyId)
+        val fallbackCompanyId =
+            TenantAccessResolver.resolveFallbackCompanyId(
+                userContext = userContext,
+                previousAuthorizedCompanyId = previousAuthorizedCompanyId,
+                excludedCompanyId = requestedCompanyId,
+            )
         if (fallbackCompanyId != null) {
             LaunchedEffect(requestedCompanyId, fallbackCompanyId) {
                 onNavigateToCompany(fallbackCompanyId)
@@ -246,7 +258,11 @@ fun TenantRouteGuard(
                 LoadingPlaceholder(modifier)
             } else {
                 val fallbackCompanyId =
-                    TenantAccessResolver.resolveFallbackCompanyId(userContext, null)
+                    TenantAccessResolver.resolveFallbackCompanyId(
+                        userContext = userContext,
+                        previousAuthorizedCompanyId = null,
+                        excludedCompanyId = requestedCompanyId,
+                    )
                 if (fallbackCompanyId != null && fallbackCompanyId != requestedCompanyId) {
                     LaunchedEffect(requestedCompanyId, fallbackCompanyId) {
                         onNavigateToCompany(fallbackCompanyId)
@@ -281,7 +297,9 @@ fun TenantRouteGuard(
                     modifier = modifier,
                 )
             } else {
-                content(state.context)
+                key(state.context.companyId) {
+                    content(state.context)
+                }
             }
         }
     }

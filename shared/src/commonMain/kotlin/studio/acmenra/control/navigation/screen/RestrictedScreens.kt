@@ -38,6 +38,7 @@ import studio.acmenra.control.core.ui.generated.resources.ic_lock
 import studio.acmenra.control.core.ui.generated.resources.ic_warning
 import studio.acmenra.control.core.ui.generated.resources.restricted_access_denied_desc
 import studio.acmenra.control.core.ui.generated.resources.restricted_access_denied_title
+import studio.acmenra.control.core.ui.generated.resources.restricted_account_frozen_desc
 import studio.acmenra.control.core.ui.generated.resources.restricted_account_frozen_title
 import studio.acmenra.control.core.ui.generated.resources.restricted_company_frozen_title
 import studio.acmenra.control.core.ui.generated.resources.restricted_no_permissions_desc
@@ -84,6 +85,12 @@ fun CompanyFrozenScreen(
                 stringResource(Res.string.restricted_company_frozen_title)
             },
         subtitle = companyName,
+        description =
+            if (isAccountLevel) {
+                stringResource(Res.string.restricted_account_frozen_desc)
+            } else {
+                null
+            },
         canSwitchCompany = canSwitchCompany,
         onSwitchCompany = onSwitchCompany,
         onLogout = onLogout,
@@ -164,14 +171,16 @@ fun AccessDeniedScreen(
     canSwitchCompany: Boolean,
     onLogout: () -> Unit,
     modifier: Modifier = Modifier,
+    title: String = stringResource(Res.string.restricted_access_denied_title),
+    description: String = stringResource(Res.string.restricted_access_denied_desc),
     onSwitchCompany: (() -> Unit)? = null,
 ) {
     RestrictedScreenScaffold(
         iconRes = Res.drawable.ic_error,
         iconTint = MaterialTheme.colorScheme.error,
-        title = stringResource(Res.string.restricted_access_denied_title),
+        title = title,
         subtitle = companyName,
-        description = stringResource(Res.string.restricted_access_denied_desc),
+        description = description,
         canSwitchCompany = canSwitchCompany,
         onSwitchCompany = onSwitchCompany,
         onLogout = onLogout,

@@ -13,6 +13,9 @@ fun NavController.navigateToLogin() {
 
 fun NavController.navigateToEvents(companyId: String = "") {
     navigate(EventsRoute(companyId = companyId)) {
+        popUpTo<EventsRoute> {
+            inclusive = true
+        }
         popUpTo<LoginRoute> {
             inclusive = true
         }
@@ -22,6 +25,9 @@ fun NavController.navigateToEvents(companyId: String = "") {
 
 fun NavController.navigateToCompaniesDashboard() {
     navigate(CompaniesDashboardRoute) {
+        popUpTo<CompaniesDashboardRoute> {
+            inclusive = true
+        }
         popUpTo<LoginRoute> {
             inclusive = true
         }

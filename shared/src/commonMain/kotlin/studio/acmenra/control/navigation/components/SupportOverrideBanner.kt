@@ -3,6 +3,7 @@ package studio.acmenra.control.navigation.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -20,6 +21,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import org.jetbrains.compose.resources.painterResource
@@ -97,6 +99,13 @@ fun SupportOverrideBanner(
                 .defaultMinSize(minHeight = AmberDimens.SupportBannerMinHeight),
         contentAlignment = Alignment.CenterStart,
     ) {
+        val detailsText =
+            if (ticketText != null) {
+                "$modeText • $ticketText"
+            } else {
+                modeText
+            }
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -105,7 +114,10 @@ fun SupportOverrideBanner(
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(AmberDimens.GapSmall),
-                modifier = Modifier.weight(1f),
+                modifier =
+                    Modifier
+                        .weight(1f)
+                        .padding(end = AmberDimens.GapSmall),
             ) {
                 Icon(
                     painter = painterResource(Res.drawable.ic_timer),
@@ -113,31 +125,20 @@ fun SupportOverrideBanner(
                     tint = MaterialTheme.colorScheme.onTertiaryContainer,
                     modifier = Modifier.size(AmberDimens.ListIcon),
                 )
-                Text(
-                    text = stringResource(Res.string.support_banner_title),
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer,
-                )
-                Text(
-                    text = "•",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer,
-                )
-                Text(
-                    text = modeText,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer,
-                )
-                if (ticketText != null) {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "•",
+                        text = stringResource(Res.string.support_banner_title),
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        text = ticketText,
-                        style = MaterialTheme.typography.bodyMedium,
+                        text = detailsText,
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }

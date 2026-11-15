@@ -106,7 +106,6 @@ fun CompanySelectionDialog(
                     val vendorShape = RoundedCornerShape(AmberCorners.Small)
                     Surface(
                         onClick = {
-                            onDismiss()
                             onSelectAllCompanies()
                         },
                         modifier = Modifier.fillMaxWidth().clip(vendorShape),
@@ -170,7 +169,7 @@ fun CompanySelectionDialog(
                     val total = filteredCompanies.size
                     LazyColumn(
                         verticalArrangement = Arrangement.spacedBy(AmberDimens.ListGap),
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
                     ) {
                         itemsIndexed(filteredCompanies, key = { _, company -> company.id }) { index, company ->
                             val isSelected = company.id == selectedCompanyId
@@ -197,7 +196,6 @@ fun CompanySelectionDialog(
 
                             Surface(
                                 onClick = {
-                                    onDismiss()
                                     onSelectCompany(company.id)
                                 },
                                 modifier = Modifier.fillMaxWidth().clip(shape),

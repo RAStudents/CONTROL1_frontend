@@ -91,7 +91,7 @@ fun AmberTopAppBar(
                 if (isDesktopOrTablet && desktopCompanyBox != null) {
                     Surface(
                         modifier = Modifier.fillMaxHeight(),
-                        color = containerColor,
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
                         contentColor = contentColor,
                         shape = RectangleShape,
                     ) {

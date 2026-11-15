@@ -28,8 +28,9 @@ import studio.acmenra.control.core.ui.theme.AmberDimens
 
 @Composable
 fun EventsRouteContent(
+    companyId: String = "",
     modifier: Modifier = Modifier,
-    viewModel: EventsViewModel = koinViewModel(),
+    viewModel: EventsViewModel = koinViewModel(key = companyId),
 ) {
     val state by viewModel.state.collectAsState()
     EventsScreen(

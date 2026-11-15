@@ -75,8 +75,8 @@ fun AppNavHost(
                             launchSingleTop = true
                         }
                     },
-                ) { _ ->
-                    EventsRouteContent()
+                ) { tenantContext ->
+                    EventsRouteContent(companyId = tenantContext.companyId)
                 }
             } else {
                 Box(

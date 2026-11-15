@@ -17,28 +17,24 @@ class TopBarStateTest {
     }
 
     @Test
-    fun titleDisposalOnlyClearsIfMatchingCurrentTitle() {
+    fun titleDisposalOnlyClearsIfMatchingOwnerToken() {
         val state = TopBarState()
-        val titleA = "Screen A"
-        state.title = titleA
-        assertEquals("Screen A", state.title)
+        val ownerA = Any()
+        val ownerB = Any()
 
-        // Screen B enters before Screen A disposes
-        val titleB = "Screen B"
-        state.title = titleB
-        assertEquals("Screen B", state.title)
+        state.updateTitle("Events", ownerA)
+        assertEquals("Events", state.title)
 
-        // Screen A disposes (matching ProvideTopBar onDispose contract)
-        if (state.title == titleA) {
-            state.title = null
-        }
-        // Must remain Screen B
-        assertEquals("Screen B", state.title)
+        // Screen B enters with the SAME title "Events" but its own owner token
+        state.updateTitle("Events", ownerB)
+        assertEquals("Events", state.title)
 
-        // Screen B disposes
-        if (state.title == titleB) {
-            state.title = null
-        }
+        // Screen A disposes: must NOT clear Screen B's title even though titles are identical
+        state.clearTitle(ownerA)
+        assertEquals("Events", state.title)
+
+        // Screen B disposes: now title clears
+        state.clearTitle(ownerB)
         assertNull(state.title)
     }
 

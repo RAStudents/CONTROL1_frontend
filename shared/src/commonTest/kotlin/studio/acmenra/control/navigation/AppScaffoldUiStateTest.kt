@@ -108,6 +108,24 @@ class AppScaffoldUiStateTest {
     }
 
     @Test
+    fun testAppScaffoldUiStatePreservesVisibleItemsDuringLoading() {
+        val globalContext = createGlobalContext()
+        val tenantState = TenantContextState.Loading("c1")
+
+        val uiState =
+            calculateAppScaffoldUiState(
+                globalContext = globalContext,
+                tenantState = tenantState,
+                destination = null,
+                items = AppNavigationItem.DEFAULT_ITEMS,
+            )
+
+        assertEquals("c1", uiState.selectedCompanyId)
+        assertEquals("Acme Corp", uiState.currentCompanyName)
+        assertEquals(1, uiState.visibleItems.size)
+    }
+
+    @Test
     fun testAppScaffoldUiStateForVendorDashboard() {
         val globalContext =
             createGlobalContext(

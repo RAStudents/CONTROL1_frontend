@@ -177,7 +177,9 @@ fun AppScaffold(
                                             selectedCompanyId = effectiveSelectedCompanyId,
                                             canBrowseAllCompanies = TenantAccessResolver.canBrowseAll(globalContext),
                                             onSelectCompany = { companyId ->
-                                                navController.navigateToEvents(companyId)
+                                                if (companyId != effectiveSelectedCompanyId) {
+                                                    navController.navigateToEvents(companyId)
+                                                }
                                             },
                                             onSelectAllCompanies = {
                                                 navController.navigateToCompaniesDashboard()
@@ -291,7 +293,9 @@ fun AppScaffold(
                     canBrowseAllCompanies = TenantAccessResolver.canBrowseAll(globalContext),
                     onSelectCompany = { companyId ->
                         isCompanyDialogOpen = false
-                        navController.navigateToEvents(companyId)
+                        if (companyId != effectiveSelectedCompanyId) {
+                            navController.navigateToEvents(companyId)
+                        }
                     },
                     onSelectAllCompanies = {
                         isCompanyDialogOpen = false

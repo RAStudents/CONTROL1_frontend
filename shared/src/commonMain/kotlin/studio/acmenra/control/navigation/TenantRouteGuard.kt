@@ -11,7 +11,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
 import studio.acmenra.control.core.access.domain.model.AuthorizedTenantContext
@@ -99,21 +101,14 @@ fun TenantRouteGuard(
             requirement = requirement,
         )
 
-    val currentTenantCompanyId =
-        when (val state = tenantState) {
-            is TenantContextState.Authorized -> state.context.companyId
-            is TenantContextState.Restricted -> state.companyId
-            is TenantContextState.Error -> state.companyId
-            is TenantContextState.Loading -> state.requestedCompanyId
-            is TenantContextState.NotSelected -> null
-        }
+    val hasAccess = readyContext?.let { TenantAccessResolver.hasAccess(it, requestedCompanyId) } == true
+    val isTenantNotSelected = tenantState is TenantContextState.NotSelected
 
-    LaunchedEffect(requestedCompanyId, globalState, currentTenantCompanyId) {
-        if (!requestedCompanyId.isNullOrBlank() &&
-            globalState is GlobalAccessState.Ready &&
-            TenantAccessResolver.hasAccess((globalState as GlobalAccessState.Ready).context, requestedCompanyId)
-        ) {
-            ensureTenantContextUseCase(requestedCompanyId)
+    LaunchedEffect(requestedCompanyId, hasAccess, isTenantNotSelected) {
+        if (hasAccess && !requestedCompanyId.isNullOrBlank()) {
+            withContext(NonCancellable) {
+                ensureTenantContextUseCase(requestedCompanyId)
+            }
         }
     }
 

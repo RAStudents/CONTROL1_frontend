@@ -45,6 +45,9 @@ import studio.acmenra.control.core.ui.generated.resources.ic_company
 import studio.acmenra.control.core.ui.theme.AmberCorners
 import studio.acmenra.control.core.ui.theme.AmberDimens
 
+const val COMPANY_SEARCH_THRESHOLD = 3
+const val DROPDOWN_MAX_ITEMS = 5
+
 @Composable
 fun DesktopCompanySelector(
     currentCompanyName: String,
@@ -152,7 +155,7 @@ fun DesktopCompanySelector(
                 )
             }
 
-            if (onOpenFullDialog != null && (companies.size > 5 || canBrowseAllCompanies)) {
+            if (onOpenFullDialog != null && (companies.size > DROPDOWN_MAX_ITEMS || canBrowseAllCompanies)) {
                 DropdownMenuItem(
                     text = {
                         Text(
@@ -169,8 +172,8 @@ fun DesktopCompanySelector(
             }
 
             val displayCompanies =
-                if (onOpenFullDialog != null && companies.size > 5) {
-                    companies.take(5)
+                if (onOpenFullDialog != null && companies.size > DROPDOWN_MAX_ITEMS) {
+                    companies.take(DROPDOWN_MAX_ITEMS)
                 } else {
                     companies
                 }

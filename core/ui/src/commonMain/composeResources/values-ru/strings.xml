@@ -15,7 +15,7 @@
     <string name="support_mode_unknown">Поддержка</string>
     <string name="support_banner_details_format">%1$s • %2$s</string>
     <string name="support_remaining_time">Осталось: %1$s</string>
-    <string name="support_grant_expired">Срок действия истек</string>
+    <string name="support_grant_expired">Срок действия истёк</string>
 
     <!-- Company Switcher -->
     <string name="company_switcher_select">Выбрать компанию</string>
@@ -62,6 +62,8 @@
     <string name="error_network_connection">Отсутствует подключение к сети</string>
     <string name="error_server_unavailable">Сервер временно недоступен</string>
     <string name="error_unknown_occurred">Произошла непредвиденная ошибка</string>
+    <string name="error_access_denied">Доступ запрещён</string>
+    <string name="error_company_not_found">Компания не найдена</string>
 
     <!-- Vendor Dashboard -->
     <string name="vendor_dashboard_title">Дашборд компаний</string>

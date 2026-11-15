@@ -43,6 +43,8 @@ import studio.acmenra.control.core.ui.generated.resources.action_copy
 import studio.acmenra.control.core.ui.generated.resources.action_logout
 import studio.acmenra.control.core.ui.generated.resources.action_retry
 import studio.acmenra.control.core.ui.generated.resources.action_switch_company
+import studio.acmenra.control.core.ui.generated.resources.error_access_denied
+import studio.acmenra.control.core.ui.generated.resources.error_company_not_found
 import studio.acmenra.control.core.ui.generated.resources.error_network_connection
 import studio.acmenra.control.core.ui.generated.resources.error_server_unavailable
 import studio.acmenra.control.core.ui.generated.resources.error_unknown_occurred
@@ -257,7 +259,14 @@ fun TenantErrorScreen(
     val errorMessage =
         when (error) {
             is NetworkError.Connectivity -> stringResource(Res.string.error_network_connection)
-            is NetworkError.Http -> stringResource(Res.string.error_server_unavailable)
+            is NetworkError.Http -> {
+                when (error.statusCode) {
+                    401, 403 -> stringResource(Res.string.error_access_denied)
+                    404 -> stringResource(Res.string.error_company_not_found)
+                    else -> stringResource(Res.string.error_server_unavailable)
+                }
+            }
+
             is NetworkError.Serialization, is NetworkError.Unknown ->
                 stringResource(Res.string.error_unknown_occurred)
         }

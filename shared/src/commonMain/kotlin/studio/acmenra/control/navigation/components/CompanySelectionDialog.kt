@@ -85,7 +85,7 @@ fun CompanySelectionDialog(
                     color = MaterialTheme.colorScheme.onSurface,
                 )
 
-                if (companies.size > 3) {
+                if (companies.size > COMPANY_SEARCH_THRESHOLD) {
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },

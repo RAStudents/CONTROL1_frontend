@@ -35,12 +35,25 @@ fun calculateAppScaffoldUiState(
             ?: globalContext?.let { TenantAccessResolver.resolveFallbackCompanyId(it) }
 
     val visibleItems =
-        AppNavigationItem.filterVisibleNavigationItems(
-            items = items,
-            authorizedContext = authorizedContext,
-            globalContext = globalContext,
-            effectiveCompanyId = effectiveCompanyId,
-        )
+        if (tenantState is TenantContextState.Restricted.NoPermissions) {
+            emptyList()
+        } else if (authorizedContext != null) {
+            AppNavigationItem.filterVisibleNavigationItems(
+                items = items,
+                authorizedContext = authorizedContext,
+                globalContext = globalContext,
+                effectiveCompanyId = effectiveCompanyId,
+            )
+        } else if (tenantState is TenantContextState.Loading && globalContext != null) {
+            items
+        } else {
+            AppNavigationItem.filterVisibleNavigationItems(
+                items = items,
+                authorizedContext = authorizedContext,
+                globalContext = globalContext,
+                effectiveCompanyId = effectiveCompanyId,
+            )
+        }
 
     val pendingCompanyId =
         (tenantState as? TenantContextState.Loading)?.requestedCompanyId

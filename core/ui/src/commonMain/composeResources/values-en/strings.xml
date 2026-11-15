@@ -62,6 +62,8 @@
     <string name="error_network_connection">No internet connection</string>
     <string name="error_server_unavailable">Server is temporarily unavailable</string>
     <string name="error_unknown_occurred">An unexpected error occurred</string>
+    <string name="error_access_denied">Access denied</string>
+    <string name="error_company_not_found">Company not found</string>
 
     <!-- Vendor Dashboard -->
     <string name="vendor_dashboard_title">Companies Dashboard</string>

@@ -26,7 +26,7 @@ import studio.acmenra.control.core.ui.theme.AmberDimens
 /**
  * Переиспользуемый TopAppBar дизайн-системы Amber.
  * На широких экранах (Desktop / Tablet) отображает справа выделенный контейнер [desktopCompanyBox]
- * (селектор компании на фоне surfaceContainerHigh).
+ * (селектор компании на фоне containerColor).
  * На мобильных экранах действие выбора компании передаётся через [mobileCompanyAction] и отображается
  * в блоке действий справа от заголовка. При наличии [subtitle] отображает его под заголовком.
  * Учитывает [windowInsets] (по умолчанию [WindowInsets.statusBars]) для корректного edge-to-edge отображения.
@@ -107,7 +107,7 @@ fun AmberTopAppBar(
             if (desktopCompanyBox != null) {
                 Surface(
                     modifier = Modifier.fillMaxHeight(),
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    color = containerColor,
                     contentColor = contentColor,
                     shape = RectangleShape,
                 ) {

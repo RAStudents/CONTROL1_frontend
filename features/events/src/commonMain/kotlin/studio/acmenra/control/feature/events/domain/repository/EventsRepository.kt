@@ -16,6 +16,7 @@ interface EventsRepository {
         companyId: String,
         query: EventsQuery,
         accessCapabilities: EventsAccessCapabilities,
+        parentScope: kotlinx.coroutines.CoroutineScope? = null,
     ): EventsFeedSession
 
     suspend fun bootstrap(
@@ -59,4 +60,6 @@ interface EventsRepository {
         expectedClassificationVersion: Long,
         idempotencyKey: String,
     ): EventsOperationResult<Event>
+
+    fun invalidateFilterCache(companyId: String)
 }

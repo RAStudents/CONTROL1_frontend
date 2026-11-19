@@ -28,11 +28,25 @@ import studio.acmenra.control.feature.events.domain.repository.EventsRepository
 
 class EventsRepositoryImpl(
     private val remoteDataSource: EventsRemoteDataSource,
-    private val webSocketDataSource: EventsWebSocketDataSource,
+    private val webSocketDataSourceFactory: () -> EventsWebSocketDataSource,
     private val sessionManager: SessionManager,
     private val connectivityProvider: EventsConnectivityProvider,
     private val accessInvalidationListener: AccessInvalidationListener? = null,
 ) : EventsRepository {
+    constructor(
+        remoteDataSource: EventsRemoteDataSource,
+        webSocketDataSource: EventsWebSocketDataSource,
+        sessionManager: SessionManager,
+        connectivityProvider: EventsConnectivityProvider,
+        accessInvalidationListener: AccessInvalidationListener? = null,
+    ) : this(
+        remoteDataSource = remoteDataSource,
+        webSocketDataSourceFactory = { webSocketDataSource },
+        sessionManager = sessionManager,
+        connectivityProvider = connectivityProvider,
+        accessInvalidationListener = accessInvalidationListener,
+    )
+
     private val filterOptionsMutex = Mutex()
     private val filterCache = mutableMapOf<String, CachedFilterOptions>()
 
@@ -41,21 +55,30 @@ class EventsRepositoryImpl(
         val etag: String?,
     )
 
+    override fun invalidateFilterCache(companyId: String) {
+        filterCache.remove(companyId)
+    }
+
     override fun openFeedSession(
         companyId: String,
         query: EventsQuery,
         accessCapabilities: EventsAccessCapabilities,
-    ): EventsFeedSession =
-        EventsFeedSessionImpl(
+        parentScope: kotlinx.coroutines.CoroutineScope?,
+    ): EventsFeedSession {
+        val dedicatedWs = webSocketDataSourceFactory()
+        return EventsFeedSessionImpl(
             companyId = companyId,
             query = query,
             initialAccess = accessCapabilities,
             remoteDataSource = remoteDataSource,
-            webSocketDataSource = webSocketDataSource,
+            webSocketDataSource = dedicatedWs,
             sessionManager = sessionManager,
             connectivityProvider = connectivityProvider,
             accessInvalidationListener = accessInvalidationListener,
+            onFilterOptionsInvalidated = { invalidateFilterCache(companyId) },
+            parentScope = parentScope,
         )
+    }
 
     override suspend fun bootstrap(
         companyId: String,

@@ -195,7 +195,10 @@ class KtorEventsRemoteDataSource(
         val details = parsedError?.details
 
         when {
-            code == "SNAPSHOT_EXPIRED" || response.status == HttpStatusCode.Gone -> {
+            code == "EXPORT_EXPIRED" -> {
+                throw EventsApiException.ExportExpired()
+            }
+            code == "SNAPSHOT_EXPIRED" -> {
                 throw EventsApiException.SnapshotExpired()
             }
             code == "FILTER_INVALID" -> {
@@ -208,7 +211,7 @@ class KtorEventsRemoteDataSource(
                     suggestedTo = details?.suggestedTo,
                 )
             }
-            code == "STATE_CONFLICT" || response.status == HttpStatusCode.Conflict -> {
+            code == "STATE_CONFLICT" -> {
                 throw EventsApiException.StateConflict(latestEvent = details?.latestEvent)
             }
             code == "IDEMPOTENCY_KEY_PAYLOAD_MISMATCH" -> {
@@ -217,10 +220,23 @@ class KtorEventsRemoteDataSource(
             code == "EXPORT_NOT_READY" -> {
                 throw EventsApiException.ExportNotReady()
             }
-            code == "EXPORT_EXPIRED" -> {
-                throw EventsApiException.ExportExpired()
+            code in
+                setOf(
+                    "PERMISSION_DENIED",
+                    "COMPANY_RESTRICTED",
+                    "SUPPORT_GRANT_EXPIRED",
+                    "SUPPORT_GRANT_REVOKED",
+                )
+            -> {
+                throw EventsApiException.PermissionDenied()
             }
-            code == "PERMISSION_DENIED" || response.status == HttpStatusCode.Forbidden -> {
+            response.status == HttpStatusCode.Gone -> {
+                throw EventsApiException.SnapshotExpired()
+            }
+            response.status == HttpStatusCode.Conflict -> {
+                throw EventsApiException.StateConflict(latestEvent = details?.latestEvent)
+            }
+            response.status == HttpStatusCode.Forbidden -> {
                 throw EventsApiException.PermissionDenied()
             }
             else -> {

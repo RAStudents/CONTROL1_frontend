@@ -44,7 +44,7 @@ val eventsModule =
             )
         }
 
-        single<EventsWebSocketDataSource> {
+        factory<EventsWebSocketDataSource> {
             val config = get<ApiConfig>()
             KtorEventsWebSocketDataSource(
                 realtimeClient = get(named("realtime")),
@@ -61,7 +61,7 @@ val eventsModule =
         single<EventsRepository> {
             EventsRepositoryImpl(
                 remoteDataSource = get(),
-                webSocketDataSource = get(),
+                webSocketDataSourceFactory = { get() },
                 sessionManager = get(),
                 connectivityProvider = get(),
                 accessInvalidationListener = getOrNull<AccessInvalidationDispatcher>(),

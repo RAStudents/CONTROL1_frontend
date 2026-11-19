@@ -63,6 +63,14 @@ sealed interface IncomingWsFrame {
     ) : IncomingWsFrame
 }
 
+enum class WsCloseReason {
+    REMOTE_CLOSE,
+    NETWORK_ERROR,
+    HEARTBEAT_TIMEOUT,
+    REPLACED,
+    SESSION_CLOSED,
+}
+
 interface EventsWebSocketDataSource {
     val incomingFrames: Flow<IncomingWsFrame>
 
@@ -73,7 +81,7 @@ interface EventsWebSocketDataSource {
         afterSequence: Long,
         scope: CoroutineScope,
         getClientConfirmedSeq: () -> Long = { afterSequence },
-        onDisconnected: (closeReason: String?) -> Unit,
+        onDisconnected: (reason: WsCloseReason, message: String?) -> Unit,
     )
 
     suspend fun sendReplayRequest(
@@ -98,6 +106,7 @@ class KtorEventsWebSocketDataSource(
     private var heartbeatJob: Job? = null
     private var outgoingChannel: Channel<Frame>? = null
     private var lastConfirmedSeq: Long = 0L
+    private var explicitCloseReason: WsCloseReason? = null
 
     private fun drainFramesChannel() {
         while (framesChannel.tryReceive().isSuccess) {
@@ -112,9 +121,15 @@ class KtorEventsWebSocketDataSource(
         afterSequence: Long,
         scope: CoroutineScope,
         getClientConfirmedSeq: () -> Long,
-        onDisconnected: (closeReason: String?) -> Unit,
+        onDisconnected: (reason: WsCloseReason, message: String?) -> Unit,
     ) {
-        sessionJob?.cancel()
+        val oldJob = sessionJob
+        if (oldJob != null && oldJob.isActive) {
+            explicitCloseReason = WsCloseReason.REPLACED
+            oldJob.cancel()
+        }
+        heartbeatJob?.cancel()
+        outgoingChannel?.close()
         drainFramesChannel()
         lastConfirmedSeq = afterSequence
         val outChan = Channel<Frame>(Channel.BUFFERED)
@@ -123,7 +138,8 @@ class KtorEventsWebSocketDataSource(
         sessionJob =
             scope.launch {
                 val url = buildWsUrl(companyId)
-                var disconnectReason: String? = null
+                var disconnectReason = WsCloseReason.REMOTE_CLOSE
+                var disconnectMessage: String? = null
                 try {
                     realtimeClient.webSocket(urlString = url) {
                         // Send AUTH frame as the very first client message
@@ -154,7 +170,8 @@ class KtorEventsWebSocketDataSource(
                                     missedAcks++
                                     if (missedAcks >= 2) {
                                         // 2 missed ACKs -> reconnect
-                                        disconnectReason = "Heartbeat timeout (2 missed ACKs)"
+                                        disconnectReason = WsCloseReason.HEARTBEAT_TIMEOUT
+                                        disconnectMessage = "Heartbeat timeout (2 missed ACKs)"
                                         close()
                                         break
                                     }
@@ -211,13 +228,18 @@ class KtorEventsWebSocketDataSource(
                         heartbeatJob?.cancel()
                     }
                 } catch (e: CancellationException) {
-                    disconnectReason = "Cancelled"
+                    disconnectReason = explicitCloseReason ?: WsCloseReason.SESSION_CLOSED
+                    disconnectMessage = "Connection cancelled: $disconnectReason"
                     throw e
-                } catch (e: Exception) {
-                    disconnectReason = e.message ?: "Socket closed"
+                } catch (e: Throwable) {
+                    disconnectReason = WsCloseReason.NETWORK_ERROR
+                    disconnectMessage = e.message ?: "Socket error"
                 } finally {
                     heartbeatJob?.cancel()
-                    onDisconnected(disconnectReason)
+                    outChan.close()
+                    val finalReason = explicitCloseReason ?: disconnectReason
+                    explicitCloseReason = null
+                    onDisconnected(finalReason, disconnectMessage)
                 }
             }
     }
@@ -237,11 +259,13 @@ class KtorEventsWebSocketDataSource(
     }
 
     override suspend fun disconnect() {
+        explicitCloseReason = WsCloseReason.SESSION_CLOSED
         heartbeatJob?.cancel()
         sessionJob?.cancel()
         sessionJob = null
         outgoingChannel?.close()
         outgoingChannel = null
+        drainFramesChannel()
     }
 
     private fun buildWsUrl(companyId: String): String {

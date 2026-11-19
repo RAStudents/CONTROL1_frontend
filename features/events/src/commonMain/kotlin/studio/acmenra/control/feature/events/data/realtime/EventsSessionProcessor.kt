@@ -29,10 +29,21 @@ import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 
+sealed interface BootstrapApplyResult {
+    data class Applied(
+        val replayId: Long,
+    ) : BootstrapApplyResult
+
+    data object RetryRequired : BootstrapApplyResult
+
+    data object Stale : BootstrapApplyResult
+}
+
 sealed interface SessionCommand {
-    data class BootstrapLoaded(
+    data class InstallBootstrap(
         val bootstrap: EventsBootstrap,
         val generation: Long = 0L,
+        val response: CompletableDeferred<BootstrapApplyResult>,
     ) : SessionCommand
 
     data class NextPageLoaded(
@@ -126,6 +137,7 @@ class EventsSessionProcessor(
     private var isAccessInvalidated = false
     private var currentBootstrapGeneration: Long = 0L
     private var isRebootstrapping = false
+    private var bufferReplayId: Long? = null
     private val rebootstrapBuffer = mutableListOf<BufferedCommit>()
     private val closedReplayGenerations = mutableSetOf<Long>()
     private var nextCursor: String? = null
@@ -167,6 +179,15 @@ class EventsSessionProcessor(
         return deferred.await()
     }
 
+    suspend fun installBootstrap(
+        bootstrap: EventsBootstrap,
+        generation: Long,
+    ): BootstrapApplyResult {
+        val deferred = CompletableDeferred<BootstrapApplyResult>()
+        dispatch(SessionCommand.InstallBootstrap(bootstrap, generation, deferred))
+        return deferred.await()
+    }
+
     private suspend fun processCommand(command: SessionCommand) {
         if (isAccessInvalidated && command !is SessionCommand.Close) {
             // Terminal state: ignore all frames and updates
@@ -174,7 +195,9 @@ class EventsSessionProcessor(
         }
 
         when (command) {
-            is SessionCommand.BootstrapLoaded -> handleBootstrap(command.bootstrap, command.generation)
+            is SessionCommand.InstallBootstrap -> {
+                handleBootstrap(command.bootstrap, command.generation, command.response)
+            }
             is SessionCommand.NextPageLoaded -> handleNextPage(command.page, command.snapshotId)
             is SessionCommand.InitialLoadFailed -> {
                 if (command.generation >= currentBootstrapGeneration) {
@@ -223,13 +246,18 @@ class EventsSessionProcessor(
                 sequenceProcessor.startReplay(command.replayId, command.afterSequence)
                 _state.update {
                     it.copy(
-                        replayId = command.replayId,
                         asOfSequence = sequenceProcessor.currentSequence,
+                        replayId = command.replayId,
                     )
                 }
             }
             is SessionCommand.NextReplayGeneration -> {
+                closedReplayGenerations.add(sequenceProcessor.currentReplayId)
                 val gen = sequenceProcessor.nextReplayGeneration()
+                if (isRebootstrapping) {
+                    bufferReplayId = gen
+                    rebootstrapBuffer.clear()
+                }
                 _state.update { it.copy(replayId = gen) }
                 command.response.complete(gen)
             }
@@ -260,9 +288,10 @@ class EventsSessionProcessor(
     private suspend fun handleBootstrap(
         bootstrap: EventsBootstrap,
         generation: Long,
+        response: CompletableDeferred<BootstrapApplyResult>,
     ) {
         if (generation < currentBootstrapGeneration) {
-            // Discard stale bootstrap response
+            response.complete(BootstrapApplyResult.Stale)
             return
         }
         currentBootstrapGeneration = generation
@@ -276,6 +305,7 @@ class EventsSessionProcessor(
         // If we were buffering commits during rebootstrap, apply them now with strict continuity and deduplication
         if (isRebootstrapping) {
             isRebootstrapping = false
+            bufferReplayId = null
             val validCommits =
                 rebootstrapBuffer
                     .filter {
@@ -310,7 +340,8 @@ class EventsSessionProcessor(
 
             if (deduplicationError) {
                 isRebootstrapping = true
-                onTriggerRebootstrap()
+                bufferReplayId = sequenceProcessor.currentReplayId
+                response.complete(BootstrapApplyResult.RetryRequired)
                 return
             }
 
@@ -326,21 +357,28 @@ class EventsSessionProcessor(
             }
 
             if (hasGap) {
-                // Gap detected in rebootstrap buffer: trigger clean resync
+                // Gap detected in rebootstrap buffer: retry bootstrap
                 isRebootstrapping = true
-                onTriggerRebootstrap()
+                bufferReplayId = sequenceProcessor.currentReplayId
+                response.complete(BootstrapApplyResult.RetryRequired)
                 return
             }
 
             for (commit in deduplicatedCommits) {
                 applyCommit(commit)
             }
-
-            closedReplayGenerations.add(sequenceProcessor.currentReplayId)
-            val newReplayId = sequenceProcessor.nextReplayGeneration()
-            _state.update { it.copy(replayId = newReplayId) }
-            onSendReplayRequest(newReplayId, sequenceProcessor.currentSequence)
         }
+
+        closedReplayGenerations.add(sequenceProcessor.currentReplayId)
+        val newReplayId = sequenceProcessor.nextReplayGeneration()
+
+        val currentSummary = _state.value.summary
+        val nextSummary =
+            when {
+                currentSummary == null -> bootstrap.summary
+                bootstrap.summary.summaryAsOfSequence >= currentSummary.summaryAsOfSequence -> bootstrap.summary
+                else -> currentSummary
+            }
 
         val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
         val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
@@ -350,16 +388,18 @@ class EventsSessionProcessor(
                 realtimeOverlay = currentOverlay,
                 snapshotId = bootstrap.page.asOfSequence.toString(),
                 asOfSequence = sequenceProcessor.currentSequence,
-                replayId = sequenceProcessor.currentReplayId,
+                replayId = newReplayId,
                 snapshotTotalCount = bootstrap.page.totalCount,
                 hasMore = bootstrap.page.hasMore,
                 isInitialLoading = false,
                 initialLoadError = null,
-                summary = _state.value.summary ?: bootstrap.summary,
+                summary = nextSummary,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
             )
         }
+
+        response.complete(BootstrapApplyResult.Applied(newReplayId))
     }
 
     private fun handleNextPage(
@@ -440,6 +480,9 @@ class EventsSessionProcessor(
                 }
 
                 if (isRebootstrapping) {
+                    if (bufferReplayId != null && commit.replayId != bufferReplayId) {
+                        return
+                    }
                     if (rebootstrapBuffer.size < 10_000) {
                         rebootstrapBuffer.add(BufferedCommit(commit = commit, receivedAt = timeSource.markNow()))
                     } else {
@@ -470,6 +513,7 @@ class EventsSessionProcessor(
                     is SequenceValidationResult.InvalidSequence,
                     -> {
                         isRebootstrapping = true
+                        bufferReplayId = sequenceProcessor.currentReplayId
                         rebootstrapBuffer.clear()
                         onTriggerRebootstrap()
                     }
@@ -481,6 +525,7 @@ class EventsSessionProcessor(
                     return // Ignore stale ResyncRequired from previous generation
                 }
                 isRebootstrapping = true
+                bufferReplayId = sequenceProcessor.currentReplayId
                 rebootstrapBuffer.clear()
                 onTriggerRebootstrap()
             }
@@ -533,6 +578,8 @@ class EventsSessionProcessor(
             }
             is IncomingWsFrame.AccessInvalidated -> {
                 isAccessInvalidated = true
+                isRebootstrapping = false
+                bufferReplayId = null
                 snapshotItems.clear()
                 rebootstrapBuffer.clear()
                 currentOverlay = RealtimeOverlay()

@@ -4,14 +4,24 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.auth.SessionManager
+import studio.acmenra.control.core.ui.generated.resources.Res
+import studio.acmenra.control.core.ui.generated.resources.events_connection_failed_3_attempts
+import studio.acmenra.control.core.ui.generated.resources.events_connection_failed_title
+import studio.acmenra.control.core.ui.generated.resources.events_http_failed_3_attempts
+import studio.acmenra.control.core.ui.generated.resources.events_http_failed_title
+import studio.acmenra.control.core.ui.notice.Notice
 import studio.acmenra.control.feature.events.data.datasource.EventsApiException
 import studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.EventsWebSocketDataSource
@@ -41,12 +51,18 @@ class EventsFeedSessionImpl(
     private val onFilterOptionsInvalidated: (() -> Unit)? = null,
     parentScope: CoroutineScope? = null,
 ) : EventsFeedSession {
+    private val sessionJob = SupervisorJob(parentScope?.coroutineContext?.get(Job))
     private val sessionScope =
-        parentScope ?: CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        if (parentScope != null) {
+            CoroutineScope(parentScope.coroutineContext + sessionJob)
+        } else {
+            CoroutineScope(sessionJob + Dispatchers.Default)
+        }
 
     private var connectJob: Job? = null
     private var wsFramesJob: Job? = null
     private var connectivityJob: Job? = null
+    private var connectionStateJob: Job? = null
     private var bootstrapJob: Job? = null
     private var rebootstrapJob: Job? = null
 
@@ -56,6 +72,15 @@ class EventsFeedSessionImpl(
     private var lastUsedAccessToken: String? = null
     private var isClosed = false
     private var isOnline = true
+
+    private var consecutiveWsFailures = 0
+    private var consecutiveHttpFailures = 0
+
+    private val _connectionNotice = MutableSharedFlow<Notice>(extraBufferCapacity = 16)
+    override val connectionNotice: Flow<Notice> = _connectionNotice.asSharedFlow()
+
+    private val _filterOptionsInvalidated = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
+    override val filterOptionsInvalidated: Flow<Unit> = _filterOptionsInvalidated.asSharedFlow()
 
     private val processor =
         EventsSessionProcessor(
@@ -76,6 +101,7 @@ class EventsFeedSessionImpl(
             },
             onFilterOptionsUpdated = {
                 onFilterOptionsInvalidated?.invoke()
+                _filterOptionsInvalidated.tryEmit(Unit)
             },
         )
 
@@ -88,7 +114,20 @@ class EventsFeedSessionImpl(
     private fun startSession() {
         listenToWsFrames()
         listenToConnectivity()
+        listenToConnectionState()
         triggerBootstrap()
+    }
+
+    private fun listenToConnectionState() {
+        connectionStateJob?.cancel()
+        connectionStateJob =
+            sessionScope.launch {
+                processor.state.collect { feedState ->
+                    if (feedState.connectionState == RealtimeConnectionState.CONNECTED) {
+                        consecutiveWsFailures = 0
+                    }
+                }
+            }
     }
 
     private fun listenToWsFrames() {
@@ -134,14 +173,16 @@ class EventsFeedSessionImpl(
                 try {
                     val bootstrapDto = remoteDataSource.getBootstrap(companyId, query, limit = 50)
                     val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
-                    processor.dispatch(SessionCommand.BootstrapLoaded(bootstrap, generation = generation))
-
-                    // Start WebSocket generation with replay_id = 1
-                    processor.startReplay(replayId = 1L, afterSequence = bootstrap.streamCursor)
-                    connectWebSocket(bootstrap.streamCursor)
+                    consecutiveHttpFailures = 0
+                    val applyResult = processor.installBootstrap(bootstrap, generation)
+                    if (applyResult is BootstrapApplyResult.Applied) {
+                        connectWebSocket(afterSequence = bootstrap.streamCursor, replayId = applyResult.replayId)
+                    }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: EventsApiException.SnapshotTooLarge) {
+                    consecutiveHttpFailures++
+                    checkHttpFailuresNotice()
                     val err =
                         EventsInitialLoadError.SnapshotTooLarge(
                             maxItems = e.maxItems,
@@ -160,6 +201,8 @@ class EventsFeedSessionImpl(
                         )
                     processor.dispatch(SessionCommand.InitialLoadFailed(err, generation = generation))
                 } catch (e: EventsApiException.FilterInvalid) {
+                    consecutiveHttpFailures++
+                    checkHttpFailuresNotice()
                     processor.dispatch(
                         SessionCommand.InitialLoadFailed(
                             EventsInitialLoadError.InvalidFilter(e.invalidFields),
@@ -167,6 +210,8 @@ class EventsFeedSessionImpl(
                         ),
                     )
                 } catch (e: Throwable) {
+                    consecutiveHttpFailures++
+                    checkHttpFailuresNotice()
                     val err =
                         if (e.message?.contains("403") == true || e.message?.contains("AccessDenied") == true) {
                             EventsInitialLoadError.AccessDenied
@@ -193,14 +238,43 @@ class EventsFeedSessionImpl(
                     try {
                         val bootstrapDto = remoteDataSource.getBootstrap(companyId, query, limit = 50)
                         val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
-                        processor.dispatch(SessionCommand.RebootstrapStateChanged(RebootstrapState.Idle))
-                        processor.dispatch(
-                            SessionCommand.BootstrapLoaded(bootstrap, generation = ++bootstrapGeneration),
-                        )
-                        return@launch
+                        consecutiveHttpFailures = 0
+                        val applyResult = processor.installBootstrap(bootstrap, ++bootstrapGeneration)
+                        when (applyResult) {
+                            is BootstrapApplyResult.Applied -> {
+                                processor.dispatch(SessionCommand.RebootstrapStateChanged(RebootstrapState.Idle))
+                                return@launch
+                            }
+                            is BootstrapApplyResult.RetryRequired -> {
+                                attempt++
+                                if (attempt > maxAttempts) {
+                                    processor.dispatch(
+                                        SessionCommand.RebootstrapStateChanged(
+                                            RebootstrapState.Failed(IllegalStateException("Rebootstrap buffer gap")),
+                                        ),
+                                    )
+                                    processor.dispatch(
+                                        SessionCommand.ConnectionStateChanged(RealtimeConnectionState.FAILED),
+                                    )
+                                    return@launch
+                                }
+                                val backoffMs = (1L shl (attempt - 1)) * 500L + Random.nextLong(50, 200)
+                                processor.dispatch(
+                                    SessionCommand.RebootstrapStateChanged(
+                                        RebootstrapState.RetryWaiting(attempt, backoffMs),
+                                    ),
+                                )
+                                delay(backoffMs)
+                            }
+                            is BootstrapApplyResult.Stale -> {
+                                return@launch
+                            }
+                        }
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Throwable) {
+                        consecutiveHttpFailures++
+                        checkHttpFailuresNotice()
                         attempt++
                         if (attempt > maxAttempts) {
                             processor.dispatch(SessionCommand.RebootstrapStateChanged(RebootstrapState.Failed(e)))
@@ -223,7 +297,10 @@ class EventsFeedSessionImpl(
         }
     }
 
-    private fun connectWebSocket(afterSequence: Long) {
+    private fun connectWebSocket(
+        afterSequence: Long,
+        replayId: Long,
+    ) {
         connectJob?.cancel()
         val generation = ++connectionGeneration
 
@@ -240,7 +317,6 @@ class EventsFeedSessionImpl(
                 lastUsedAccessToken = token
 
                 processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.CONNECTING))
-                val replayId = processor.currentReplayId
 
                 webSocketDataSource.connect(
                     companyId = companyId,
@@ -263,11 +339,31 @@ class EventsFeedSessionImpl(
             // Replaced by a newer connection or closed intentionally: do NOT reconnect
             return
         }
+        consecutiveWsFailures++
+        if (consecutiveWsFailures >= 3) {
+            _connectionNotice.tryEmit(
+                Notice.error(
+                    title = Res.string.events_connection_failed_title,
+                    message = Res.string.events_connection_failed_3_attempts,
+                ),
+            )
+        }
         if (!isOnline) {
             processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.DISCONNECTED))
             return
         }
         reconnectWithBackoff(resetAttempt = false)
+    }
+
+    private fun checkHttpFailuresNotice() {
+        if (consecutiveHttpFailures >= 3) {
+            _connectionNotice.tryEmit(
+                Notice.error(
+                    title = Res.string.events_http_failed_title,
+                    message = Res.string.events_http_failed_3_attempts,
+                ),
+            )
+        }
     }
 
     private var reconnectAttempt = 0
@@ -288,7 +384,8 @@ class EventsFeedSessionImpl(
 
                 if (!isActive || isClosed) return@launch
                 val currentSeq = processor.getAsOfSequence()
-                connectWebSocket(currentSeq)
+                val currentReplayId = processor.currentReplayId
+                connectWebSocket(afterSequence = currentSeq, replayId = currentReplayId)
             }
     }
 
@@ -300,7 +397,7 @@ class EventsFeedSessionImpl(
                 if (!newToken.isNullOrBlank() && newToken != lastUsedAccessToken) {
                     lastUsedAccessToken = newToken
                     val nextReplay = processor.nextReplayGeneration()
-                    connectWebSocket(processor.getAsOfSequence())
+                    connectWebSocket(afterSequence = processor.getAsOfSequence(), replayId = nextReplay)
                     return@launch
                 }
             } catch (e: CancellationException) {
@@ -320,6 +417,7 @@ class EventsFeedSessionImpl(
         connectJob?.cancel()
         wsFramesJob?.cancel()
         connectivityJob?.cancel()
+        connectionStateJob?.cancel()
         bootstrapJob?.cancel()
         rebootstrapJob?.cancel()
         sessionScope.launch {
@@ -339,6 +437,7 @@ class EventsFeedSessionImpl(
             try {
                 val pageDto = remoteDataSource.getEventsPage(companyId, cursor, limit = 50)
                 val page = EventsDtoMapper.mapPage(pageDto)
+                consecutiveHttpFailures = 0
                 processor.dispatch(SessionCommand.NextPageLoaded(page, snapshotId = currentSnapshotId))
             } catch (e: CancellationException) {
                 throw e
@@ -346,6 +445,8 @@ class EventsFeedSessionImpl(
                 processor.dispatch(SessionCommand.PaginationFailed(EventsPaginationError.SnapshotExpired))
                 triggerRebootstrap()
             } catch (e: Throwable) {
+                consecutiveHttpFailures++
+                checkHttpFailuresNotice()
                 val err =
                     if (e.message?.contains("Network") == true || !isOnline) {
                         EventsPaginationError.Network
@@ -390,11 +491,12 @@ class EventsFeedSessionImpl(
         connectJob?.cancel()
         wsFramesJob?.cancel()
         connectivityJob?.cancel()
+        connectionStateJob?.cancel()
         bootstrapJob?.cancel()
         rebootstrapJob?.cancel()
-        sessionScope.launch {
+        CoroutineScope(Dispatchers.Default + NonCancellable).launch {
             webSocketDataSource.disconnect()
         }
-        sessionScope.cancel()
+        sessionJob.cancel()
     }
 }

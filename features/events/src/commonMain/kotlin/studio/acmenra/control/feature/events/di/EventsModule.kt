@@ -4,6 +4,7 @@ import org.koin.core.module.dsl.viewModel
 import org.koin.core.qualifier.named
 import org.koin.dsl.module
 import studio.acmenra.control.core.network.auth.AccessInvalidationDispatcher
+import studio.acmenra.control.core.network.client.ApiConfig
 import studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.EventsWebSocketDataSource
 import studio.acmenra.control.feature.events.data.datasource.KtorEventsRemoteDataSource
@@ -31,10 +32,11 @@ import studio.acmenra.control.feature.events.domain.usecase.impl.ObserveEventsEx
 import studio.acmenra.control.feature.events.domain.usecase.impl.ObserveEventsFeedUseCaseImpl
 import studio.acmenra.control.feature.events.presentation.EventsViewModel
 import studio.acmenra.control.feature.events.presentation.platform.exportFileSaverModule
+import studio.acmenra.control.feature.events.presentation.platform.externalMediaOpenerModule
 
 val eventsModule =
     module {
-        includes(exportFileSaverModule)
+        includes(exportFileSaverModule, externalMediaOpenerModule)
 
         single<EventsRemoteDataSource> {
             KtorEventsRemoteDataSource(
@@ -43,8 +45,10 @@ val eventsModule =
         }
 
         single<EventsWebSocketDataSource> {
+            val config = get<ApiConfig>()
             KtorEventsWebSocketDataSource(
                 realtimeClient = get(named("realtime")),
+                wsEndpointBase = config.apiBaseUrl,
             )
         }
 

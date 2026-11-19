@@ -69,15 +69,16 @@ fun AppNavHost(
                     },
                 ) { tenantContext ->
                     val perms = tenantContext.effectiveTenantPermissions
-                    val hasSupportOverride =
-                        tenantContext.accessStatus == AccessStatus.ACTIVE_SUPPORT_OVERRIDE ||
-                            tenantContext.supportGrant != null
+                    val isSupportOverride = tenantContext.accessStatus == AccessStatus.ACTIVE_SUPPORT_OVERRIDE
                     val accessCapabilities =
                         EventsAccessCapabilities(
-                            eventsRead = !hasSupportOverride && perms.contains(TenantPermission.EVENTS_READ),
-                            eventsReview = !hasSupportOverride && perms.contains(TenantPermission.EVENTS_REVIEW),
+                            eventsRead = perms.contains(TenantPermission.EVENTS_READ),
+                            eventsReview =
+                                !isSupportOverride &&
+                                    perms.contains(TenantPermission.EVENTS_READ) &&
+                                    perms.contains(TenantPermission.EVENTS_REVIEW),
                             reportsExport =
-                                !hasSupportOverride &&
+                                !isSupportOverride &&
                                     perms.contains(TenantPermission.EVENTS_READ) &&
                                     perms.contains(TenantPermission.REPORTS_EXPORT),
                         )

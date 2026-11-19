@@ -18,7 +18,7 @@ import studio.acmenra.control.feature.events.domain.model.EventsInitialLoadError
 import studio.acmenra.control.feature.events.domain.model.EventsPage
 import studio.acmenra.control.feature.events.domain.model.EventsPaginationError
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
-import studio.acmenra.control.feature.events.domain.model.OverlayMembership
+import studio.acmenra.control.feature.events.domain.model.EventsSummary
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
@@ -69,6 +69,11 @@ sealed interface SessionCommand {
     data object Close : SessionCommand
 }
 
+private data class BufferedCommit(
+    val commit: TenantCommitFrameDto,
+    val receivedAtMs: Long,
+)
+
 class EventsSessionProcessor(
     private val query: EventsQuery,
     initialAccess: EventsAccessCapabilities,
@@ -76,7 +81,12 @@ class EventsSessionProcessor(
     private val onSendReplayRequest: suspend (replayId: Long, afterSequence: Long) -> Unit,
     private val onTriggerRebootstrap: suspend () -> Unit,
     private val onTokenRefreshNeeded: suspend () -> Unit,
-    private val onAccessInvalidated: (companyId: String?) -> Unit,
+    private val onAccessInvalidated: (reason: String, companyId: String?) -> Unit,
+    private val currentTimeProvider: () -> Long = {
+        kotlin.time.Clock.System
+            .now()
+            .toEpochMilliseconds()
+    },
 ) {
     private val _state = MutableStateFlow(EventsFeedState(access = initialAccess))
     val state: StateFlow<EventsFeedState> = _state.asStateFlow()
@@ -87,14 +97,25 @@ class EventsSessionProcessor(
     private var currentOverlay = RealtimeOverlay()
 
     private var isRebootstrapping = false
-    private val rebootstrapBuffer = mutableListOf<TenantCommitFrameDto>()
+    private val rebootstrapBuffer = mutableListOf<BufferedCommit>()
+    private val closedReplayGenerations = mutableSetOf<Long>()
     private var nextCursor: String? = null
+
+    val currentReplayId: Long get() = sequenceProcessor.currentReplayId
 
     init {
         scope.launch {
             for (command in commandChannel) {
                 if (!isActive) break
-                processCommand(command)
+                try {
+                    processCommand(command)
+                } catch (e: Throwable) {
+                    if (command is SessionCommand.Close) break
+                    // Prevent uncaught exceptions from killing the command processing loop
+                    isRebootstrapping = true
+                    rebootstrapBuffer.clear()
+                    onTriggerRebootstrap()
+                }
                 if (command is SessionCommand.Close) break
             }
         }
@@ -103,6 +124,15 @@ class EventsSessionProcessor(
     fun dispatch(command: SessionCommand) {
         commandChannel.trySend(command)
     }
+
+    fun startReplay(
+        replayId: Long,
+        afterSequence: Long,
+    ) {
+        sequenceProcessor.startReplay(replayId, afterSequence)
+    }
+
+    fun nextReplayGeneration(): Long = sequenceProcessor.nextReplayGeneration()
 
     private suspend fun processCommand(command: SessionCommand) {
         when (command) {
@@ -145,8 +175,18 @@ class EventsSessionProcessor(
                 _state.update { it.copy(access = command.access) }
             }
             is SessionCommand.ViewportAtTop -> {
-                // User scrolled to top, reset pending newer count
-                _state.update { it.copy(pendingNewerCount = 0) }
+                // User navigated to top: integrate all pending newer events into visible feed
+                currentOverlay = RealtimeOverlayReducer.integratePendingNewer(currentOverlay)
+                val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
+                val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
+                _state.update {
+                    it.copy(
+                        visibleEvents = visible,
+                        realtimeOverlay = currentOverlay,
+                        pendingNewerCount = newerCount,
+                        pendingHistoryCount = historyCount,
+                    )
+                }
             }
             is SessionCommand.Close -> {
                 commandChannel.close()
@@ -161,19 +201,48 @@ class EventsSessionProcessor(
         sequenceProcessor.resetSequence(bootstrap.streamCursor)
         nextCursor = bootstrap.page.nextCursor
 
-        // If we were buffering commits during rebootstrap, apply them now
+        // If we were buffering commits during rebootstrap, apply them now with strict continuity checks
         if (isRebootstrapping) {
             isRebootstrapping = false
-            val commitsToApply = rebootstrapBuffer.filter { it.tenantSequence > bootstrap.streamCursor }
+            val now = currentTimeProvider()
+            val validCommits =
+                rebootstrapBuffer
+                    .filter {
+                        it.commit.tenantSequence > bootstrap.streamCursor &&
+                            it.commit.replayId !in closedReplayGenerations &&
+                            (now - it.receivedAtMs) <= 30_000L
+                    }.sortedBy { it.commit.tenantSequence }
+
             rebootstrapBuffer.clear()
-            for (commit in commitsToApply.sortedBy { it.tenantSequence }) {
-                applyCommit(commit)
+
+            // Verify strict sequence continuity: streamCursor + 1, + 2, ...
+            var expectedSeq = bootstrap.streamCursor + 1L
+            var hasGap = false
+            for (item in validCommits) {
+                if (item.commit.tenantSequence != expectedSeq) {
+                    hasGap = true
+                    break
+                }
+                expectedSeq++
             }
-            val newReplayId = sequenceProcessor.nextReplayId()
+
+            if (hasGap) {
+                // Gap detected in rebootstrap buffer: trigger clean resync instead of dying with assertion
+                isRebootstrapping = true
+                onTriggerRebootstrap()
+                return
+            }
+
+            for (item in validCommits) {
+                applyCommit(item.commit)
+            }
+
+            val newReplayId = sequenceProcessor.nextReplayGeneration()
             onSendReplayRequest(newReplayId, sequenceProcessor.currentSequence)
         }
 
         val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
+        val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
         _state.update {
             it.copy(
                 visibleEvents = visible,
@@ -184,6 +253,8 @@ class EventsSessionProcessor(
                 isInitialLoading = false,
                 initialLoadError = null,
                 summary = bootstrap.summary,
+                pendingNewerCount = newerCount,
+                pendingHistoryCount = historyCount,
             )
         }
     }
@@ -195,12 +266,15 @@ class EventsSessionProcessor(
         nextCursor = page.nextCursor
 
         val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
+        val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
         _state.update {
             it.copy(
                 visibleEvents = visible,
                 hasMore = page.hasMore,
                 isLoadingNextPage = false,
                 paginationError = null,
+                pendingNewerCount = newerCount,
+                pendingHistoryCount = historyCount,
             )
         }
     }
@@ -209,9 +283,14 @@ class EventsSessionProcessor(
         when (frame) {
             is IncomingWsFrame.TenantCommit -> {
                 val commit = frame.frame
+                if (commit.replayId in closedReplayGenerations) {
+                    return
+                }
+
                 if (isRebootstrapping) {
+                    val now = currentTimeProvider()
                     if (rebootstrapBuffer.size < 10_000) {
-                        rebootstrapBuffer.add(commit)
+                        rebootstrapBuffer.add(BufferedCommit(commit = commit, receivedAtMs = now))
                     } else {
                         // Buffer exceeded -> restart rebootstrap safely
                         rebootstrapBuffer.clear()
@@ -220,19 +299,26 @@ class EventsSessionProcessor(
                     return
                 }
 
-                val validation = sequenceProcessor.checkIncomingSequence(commit.replayId, commit.tenantSequence)
+                val validation =
+                    sequenceProcessor.checkIncomingSequence(
+                        incomingReplayId = commit.replayId,
+                        incomingSequence = commit.tenantSequence,
+                        payloadSha256 = commit.payloadSha256,
+                    )
                 when (validation) {
                     SequenceValidationResult.InOrder -> {
                         applyCommit(commit)
                     }
                     SequenceValidationResult.Duplicate -> {
-                        // Ignore duplicate frame
+                        // Verified duplicate frame -> safely drop
                     }
                     is SequenceValidationResult.GapDetected -> {
                         onSendReplayRequest(sequenceProcessor.currentReplayId, sequenceProcessor.currentSequence)
                     }
-                    is SequenceValidationResult.InvalidSequence -> {
-                        // Protocol or replay integrity error -> trigger rebootstrap
+                    is SequenceValidationResult.IntegrityViolation,
+                    is SequenceValidationResult.InvalidSequence,
+                    -> {
+                        closedReplayGenerations.add(commit.replayId)
                         isRebootstrapping = true
                         rebootstrapBuffer.clear()
                         onTriggerRebootstrap()
@@ -240,21 +326,46 @@ class EventsSessionProcessor(
                 }
             }
             is IncomingWsFrame.ResyncRequired -> {
+                val replayId = frame.frame.replayId
+                if (replayId in closedReplayGenerations || replayId != sequenceProcessor.currentReplayId) {
+                    return // Ignore stale ResyncRequired from previous generation
+                }
+                closedReplayGenerations.add(replayId)
                 isRebootstrapping = true
                 rebootstrapBuffer.clear()
                 onTriggerRebootstrap()
             }
             is IncomingWsFrame.Subscribed -> {
+                if (frame.frame.replayId != sequenceProcessor.currentReplayId ||
+                    frame.frame.replayId in closedReplayGenerations
+                ) {
+                    return
+                }
                 _state.update { it.copy(connectionState = RealtimeConnectionState.CONNECTED) }
             }
             is IncomingWsFrame.ReplayCompleted -> {
+                if (frame.frame.replayId != sequenceProcessor.currentReplayId ||
+                    frame.frame.replayId in closedReplayGenerations
+                ) {
+                    return
+                }
                 _state.update { it.copy(connectionState = RealtimeConnectionState.CONNECTED) }
             }
             is IncomingWsFrame.HeartbeatAck -> {
-                // Heartbeat liveness confirmed
+                if (frame.frame.replayId != sequenceProcessor.currentReplayId ||
+                    frame.frame.replayId in closedReplayGenerations
+                ) {
+                    return
+                }
+                // Heartbeat liveness confirmed for active generation
             }
             is IncomingWsFrame.AccessCheckUnavailable -> {
-                // Transient: do not invalidate cache
+                // Transient: do not invalidate cache, check generation
+                if (frame.frame.replayId != sequenceProcessor.currentReplayId ||
+                    frame.frame.replayId in closedReplayGenerations
+                ) {
+                    return
+                }
             }
             is IncomingWsFrame.AuthRequired -> {
                 if (frame.frame.reason == "TOKEN_EXPIRED") {
@@ -264,7 +375,7 @@ class EventsSessionProcessor(
                 }
             }
             is IncomingWsFrame.AccessInvalidated -> {
-                onAccessInvalidated(frame.frame.companyId)
+                onAccessInvalidated(frame.frame.reason ?: "UNKNOWN", frame.frame.companyId)
                 _state.update {
                     it.copy(
                         connectionState = RealtimeConnectionState.FAILED,
@@ -277,65 +388,58 @@ class EventsSessionProcessor(
     }
 
     private fun applyCommit(commit: TenantCommitFrameDto) {
-        var overlayChanged = false
-        var updatedSummary = _state.value.summary
-        var pendingNewer = _state.value.pendingNewerCount
-        var pendingHistory = _state.value.pendingHistoryCount
-
+        // Two-phase atomic commit application:
+        // 1. Calculate tentative new overlay and summary
+        var tentativeOverlay = currentOverlay
         val createdDto = commit.eventCreated
         val updatedDto = commit.eventUpdated
 
         if (createdDto != null) {
             val event = EventsDtoMapper.mapEvent(createdDto)
-            val (newOverlay, membership) =
+            val (newOverlay, _) =
                 RealtimeOverlayReducer.applyEventCommit(
-                    currentOverlay = currentOverlay,
+                    currentOverlay = tentativeOverlay,
                     event = event,
                     query = query,
                     snapshotItems = snapshotItems,
                     isCreated = true,
                 )
-            currentOverlay = newOverlay
-            overlayChanged = true
-            if (membership == OverlayMembership.PENDING_NEWER) pendingNewer++
-            if (membership == OverlayMembership.PENDING_HISTORY) pendingHistory++
+            tentativeOverlay = newOverlay
         }
 
         if (updatedDto != null) {
             val event = EventsDtoMapper.mapEvent(updatedDto)
-            val (newOverlay, membership) =
+            val (newOverlay, _) =
                 RealtimeOverlayReducer.applyEventCommit(
-                    currentOverlay = currentOverlay,
+                    currentOverlay = tentativeOverlay,
                     event = event,
                     query = query,
                     snapshotItems = snapshotItems,
                     isCreated = false,
                 )
-            currentOverlay = newOverlay
-            overlayChanged = true
-            if (membership == OverlayMembership.PENDING_HISTORY) pendingHistory++
+            tentativeOverlay = newOverlay
         }
 
-        commit.summaryUpdated?.let {
-            updatedSummary = EventsDtoMapper.mapSummary(it)
-        }
+        val updatedSummary: EventsSummary? =
+            commit.summaryUpdated?.let {
+                EventsDtoMapper.mapSummary(it)
+            } ?: _state.value.summary
 
-        sequenceProcessor.advanceSequence(commit.tenantSequence)
+        // 2. Advance sequence counter with SHA256 caching
+        sequenceProcessor.advanceSequence(commit.tenantSequence, commit.payloadSha256)
 
-        val visible =
-            if (overlayChanged) {
-                RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
-            } else {
-                _state.value.visibleEvents
-            }
+        // 3. Atomically publish state
+        currentOverlay = tentativeOverlay
+        val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
+        val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
 
         _state.update {
             it.copy(
                 visibleEvents = visible,
                 realtimeOverlay = currentOverlay,
                 summary = updatedSummary,
-                pendingNewerCount = pendingNewer,
-                pendingHistoryCount = pendingHistory,
+                pendingNewerCount = newerCount,
+                pendingHistoryCount = historyCount,
             )
         }
     }

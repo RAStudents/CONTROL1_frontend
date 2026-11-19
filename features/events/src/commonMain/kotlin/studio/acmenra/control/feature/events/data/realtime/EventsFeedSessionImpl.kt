@@ -26,6 +26,23 @@ import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
 import kotlin.random.Random
 
+sealed interface RebootstrapState {
+    data object Idle : RebootstrapState
+
+    data class Loading(
+        val attempt: Int,
+    ) : RebootstrapState
+
+    data class RetryWaiting(
+        val attempt: Int,
+        val delayMs: Long,
+    ) : RebootstrapState
+
+    data class Failed(
+        val error: Throwable,
+    ) : RebootstrapState
+}
+
 class EventsFeedSessionImpl(
     override val companyId: String,
     override val query: EventsQuery,
@@ -37,12 +54,16 @@ class EventsFeedSessionImpl(
     private val accessInvalidationListener: AccessInvalidationListener? = null,
     parentScope: CoroutineScope? = null,
 ) : EventsFeedSession {
-    private val sessionScope = parentScope ?: CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val sessionScope =
+        parentScope?.let { CoroutineScope(SupervisorJob(it.coroutineContext[Job]) + Dispatchers.Default) }
+            ?: CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private var connectJob: Job? = null
     private var wsFramesJob: Job? = null
     private var connectivityJob: Job? = null
-    private var currentReplayId: Long = 1L
+    private var rebootstrapJob: Job? = null
+    private var rebootstrapState: RebootstrapState = RebootstrapState.Idle
+    private var lastUsedAccessToken: String? = null
     private var isClosed = false
     private var isOnline = true
 
@@ -60,9 +81,9 @@ class EventsFeedSessionImpl(
             onTokenRefreshNeeded = {
                 handleTokenRefreshNeeded()
             },
-            onAccessInvalidated = { targetCompanyId ->
+            onAccessInvalidated = { reason, targetCompanyId ->
                 sessionScope.launch {
-                    accessInvalidationListener?.onAccessInvalidated("PERMISSION_DENIED", targetCompanyId ?: companyId)
+                    accessInvalidationListener?.onAccessInvalidated(reason, targetCompanyId ?: companyId)
                 }
             },
         )
@@ -116,7 +137,8 @@ class EventsFeedSessionImpl(
                 val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
                 processor.dispatch(SessionCommand.BootstrapLoaded(bootstrap))
 
-                // Verify stream invariant and start WebSocket
+                // Start WebSocket generation with replay_id = 1
+                processor.startReplay(replayId = 1L, afterSequence = bootstrap.streamCursor)
                 connectWebSocket(bootstrap.streamCursor)
             } catch (e: CancellationException) {
                 throw e
@@ -161,17 +183,35 @@ class EventsFeedSessionImpl(
     }
 
     private fun triggerRebootstrap() {
-        sessionScope.launch {
-            try {
-                val bootstrapDto = remoteDataSource.getBootstrap(companyId, query, limit = 50)
-                val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
-                processor.dispatch(SessionCommand.BootstrapLoaded(bootstrap))
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                // Keep existing items, but reflect state
+        if (rebootstrapJob?.isActive == true) return
+
+        rebootstrapJob =
+            sessionScope.launch {
+                var attempt = 1
+                val maxAttempts = 4
+                while (isActive && attempt <= maxAttempts && !isClosed) {
+                    rebootstrapState = RebootstrapState.Loading(attempt)
+                    try {
+                        val bootstrapDto = remoteDataSource.getBootstrap(companyId, query, limit = 50)
+                        val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
+                        rebootstrapState = RebootstrapState.Idle
+                        processor.dispatch(SessionCommand.BootstrapLoaded(bootstrap))
+                        return@launch
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        attempt++
+                        if (attempt > maxAttempts) {
+                            rebootstrapState = RebootstrapState.Failed(e)
+                            processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.FAILED))
+                            return@launch
+                        }
+                        val backoffMs = (1L shl (attempt - 1)) * 500L + Random.nextLong(50, 200)
+                        rebootstrapState = RebootstrapState.RetryWaiting(attempt, backoffMs)
+                        delay(backoffMs)
+                    }
+                }
             }
-        }
     }
 
     private fun connectWebSocket(afterSequence: Long) {
@@ -186,14 +226,15 @@ class EventsFeedSessionImpl(
                     processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.FAILED))
                     return@launch
                 }
+                lastUsedAccessToken = token
 
                 processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.CONNECTING))
-                currentReplayId++
+                val replayId = processor.currentReplayId
 
                 webSocketDataSource.connect(
                     companyId = companyId,
                     accessToken = token,
-                    replayId = currentReplayId,
+                    replayId = replayId,
                     afterSequence = afterSequence,
                     scope = sessionScope,
                     getClientConfirmedSeq = { processor.getAsOfSequence() },
@@ -238,13 +279,30 @@ class EventsFeedSessionImpl(
 
     private fun handleTokenRefreshNeeded() {
         sessionScope.launch {
-            val snapshot = sessionManager.getSnapshot()
-            val token = snapshot?.tokens?.accessToken
-            if (!token.isNullOrBlank()) {
-                connectWebSocket(processor.getAsOfSequence())
-            } else {
-                processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.FAILED))
+            try {
+                var snapshot = sessionManager.getSnapshot()
+                if (snapshot?.tokens?.accessToken == lastUsedAccessToken) {
+                    try {
+                        remoteDataSource.getFilterOptions(companyId, ifNoneMatchEtag = null)
+                    } catch (e: Throwable) {
+                        // ignore, will verify snapshot next
+                    }
+                    snapshot = sessionManager.getSnapshot()
+                }
+
+                val newToken = snapshot?.tokens?.accessToken
+                if (!newToken.isNullOrBlank() && newToken != lastUsedAccessToken) {
+                    lastUsedAccessToken = newToken
+                    processor.nextReplayGeneration()
+                    connectWebSocket(processor.getAsOfSequence())
+                    return@launch
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // Refresh failure falls through to FAILED connection state
             }
+            processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.FAILED))
         }
     }
 
@@ -303,6 +361,7 @@ class EventsFeedSessionImpl(
         connectJob?.cancel()
         wsFramesJob?.cancel()
         connectivityJob?.cancel()
+        rebootstrapJob?.cancel()
         sessionScope.launch {
             webSocketDataSource.disconnect()
         }

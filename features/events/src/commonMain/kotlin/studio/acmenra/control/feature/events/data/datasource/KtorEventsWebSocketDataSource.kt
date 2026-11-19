@@ -99,6 +99,12 @@ class KtorEventsWebSocketDataSource(
     private var outgoingChannel: Channel<Frame>? = null
     private var lastConfirmedSeq: Long = 0L
 
+    private fun drainFramesChannel() {
+        while (framesChannel.tryReceive().isSuccess) {
+            // Drop stale frames from previous connection
+        }
+    }
+
     override fun connect(
         companyId: String,
         accessToken: String,
@@ -109,6 +115,7 @@ class KtorEventsWebSocketDataSource(
         onDisconnected: (closeReason: String?) -> Unit,
     ) {
         sessionJob?.cancel()
+        drainFramesChannel()
         lastConfirmedSeq = afterSequence
         val outChan = Channel<Frame>(Channel.BUFFERED)
         outgoingChannel = outChan
@@ -245,12 +252,12 @@ class KtorEventsWebSocketDataSource(
             } else {
                 "${wsEndpointBase.trimEnd('/')}/$path"
             }
-        return if (fullUrl.startsWith("http://")) {
-            "ws://" + fullUrl.removePrefix("http://")
-        } else if (fullUrl.startsWith("https://")) {
-            "wss://" + fullUrl.removePrefix("https://")
-        } else {
-            fullUrl
+        return when {
+            fullUrl.startsWith("http://", ignoreCase = true) ->
+                "ws://" + fullUrl.substring("http://".length)
+            fullUrl.startsWith("https://", ignoreCase = true) ->
+                "wss://" + fullUrl.substring("https://".length)
+            else -> fullUrl
         }
     }
 }

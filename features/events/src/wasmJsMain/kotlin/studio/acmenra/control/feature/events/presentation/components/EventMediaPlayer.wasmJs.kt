@@ -27,63 +27,62 @@ import studio.acmenra.control.core.ui.theme.AmberCorners
 import studio.acmenra.control.core.ui.theme.AmberDimens
 
 @OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
-private fun createAndPlayVideo(videoUrl: String): String =
-    js(
-        """(() => {
-        var id = 'control-events-video-' + Date.now();
-        var video = document.createElement('video');
-        video.id = id;
-        video.src = videoUrl;
-        video.controls = true;
-        video.autoplay = true;
-        video.style.position = 'fixed';
-        video.style.top = '50%';
-        video.style.left = '50%';
-        video.style.transform = 'translate(-50%, -50%)';
-        video.style.maxWidth = '90vw';
-        video.style.maxHeight = '80vh';
-        video.style.zIndex = '99999';
-        video.style.borderRadius = '16px';
-        video.style.boxShadow = '0 8px 32px rgba(0,0,0,0.5)';
-        video.style.backgroundColor = '#000';
-        
-        var backdrop = document.createElement('div');
-        backdrop.id = id + '-backdrop';
-        backdrop.style.position = 'fixed';
-        backdrop.style.top = '0';
-        backdrop.style.left = '0';
-        backdrop.style.width = '100vw';
-        backdrop.style.height = '100vh';
-        backdrop.style.backgroundColor = 'rgba(0,0,0,0.6)';
-        backdrop.style.zIndex = '99998';
-        backdrop.onclick = function() {
-            try { video.pause(); } catch(e) {}
-            if (video.parentNode) video.parentNode.removeChild(video);
-            if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
-        };
+@JsFun(
+    """(videoUrl) => {
+    var id = 'control-events-video-' + Date.now();
+    var video = document.createElement('video');
+    video.id = id;
+    video.src = videoUrl;
+    video.controls = true;
+    video.autoplay = true;
+    video.style.position = 'fixed';
+    video.style.top = '50%';
+    video.style.left = '50%';
+    video.style.transform = 'translate(-50%, -50%)';
+    video.style.maxWidth = '90vw';
+    video.style.maxHeight = '80vh';
+    video.style.zIndex = '99999';
+    video.style.borderRadius = '16px';
+    video.style.boxShadow = '0 8px 32px rgba(0,0,0,0.5)';
+    video.style.backgroundColor = '#000';
+    
+    var backdrop = document.createElement('div');
+    backdrop.id = id + '-backdrop';
+    backdrop.style.position = 'fixed';
+    backdrop.style.top = '0';
+    backdrop.style.left = '0';
+    backdrop.style.width = '100vw';
+    backdrop.style.height = '100vh';
+    backdrop.style.backgroundColor = 'rgba(0,0,0,0.6)';
+    backdrop.style.zIndex = '99998';
+    backdrop.onclick = function() {
+        try { video.pause(); } catch(e) {}
+        if (video.parentNode) video.parentNode.removeChild(video);
+        if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
+    };
 
-        document.body.appendChild(backdrop);
-        document.body.appendChild(video);
-        return id;
-        })()""",
-    )
+    document.body.appendChild(backdrop);
+    document.body.appendChild(video);
+    return id;
+}""",
+)
+private external fun createAndPlayVideo(videoUrl: String): String
 
 @OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
-private fun removeVideo(elementId: String) {
-    js(
-        """(() => {
-        var video = document.getElementById(elementId);
-        if (video) {
-            try { video.pause(); } catch(e) {}
-            if (video.parentNode) video.parentNode.removeChild(video);
-        }
-        var backdrop = document.getElementById(elementId + '-backdrop');
-        if (backdrop && backdrop.parentNode) {
-            backdrop.parentNode.removeChild(backdrop);
-        }
-        })()""",
-    )
-}
+@JsFun(
+    """(elementId) => {
+    var video = document.getElementById(elementId);
+    if (video) {
+        try { video.pause(); } catch(e) {}
+        if (video.parentNode) video.parentNode.removeChild(video);
+    }
+    var backdrop = document.getElementById(elementId + '-backdrop');
+    if (backdrop && backdrop.parentNode) {
+        backdrop.parentNode.removeChild(backdrop);
+    }
+}""",
+)
+private external fun removeVideo(elementId: String)
 
 @Composable
 actual fun EventMediaPlayer(

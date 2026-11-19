@@ -16,24 +16,35 @@ class AndroidExportFileSaver(
     private val context: Context,
 ) : ExportFileSaver {
     override suspend fun saveExportFile(download: EventsExportDownload): Boolean {
+        val safeFilename = sanitizeFilename(download.filename)
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val contentValues =
                     ContentValues().apply {
-                        put(MediaStore.MediaColumns.DISPLAY_NAME, download.filename)
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, safeFilename)
                         put(MediaStore.MediaColumns.MIME_TYPE, download.contentType.ifBlank { "text/csv" })
                         put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                     }
                 val resolver = context.contentResolver
                 val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues) ?: return false
-                resolver.openOutputStream(uri)?.use { out ->
-                    out.write(download.bytes)
-                    out.flush()
+                try {
+                    val stream = resolver.openOutputStream(uri)
+                    if (stream == null) {
+                        resolver.delete(uri, null, null)
+                        return false
+                    }
+                    stream.use { out ->
+                        out.write(download.bytes)
+                        out.flush()
+                    }
+                    true
+                } catch (e: Throwable) {
+                    resolver.delete(uri, null, null)
+                    throw e
                 }
-                true
             } else {
                 val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                val targetFile = File(downloadsDir, download.filename)
+                val targetFile = File(downloadsDir, safeFilename)
                 FileOutputStream(targetFile).use { out ->
                     out.write(download.bytes)
                     out.flush()
@@ -42,7 +53,7 @@ class AndroidExportFileSaver(
             }
         } catch (e: Throwable) {
             runCatching {
-                val fallbackFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), download.filename)
+                val fallbackFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), safeFilename)
                 FileOutputStream(fallbackFile).use { out ->
                     out.write(download.bytes)
                     out.flush()
@@ -50,6 +61,11 @@ class AndroidExportFileSaver(
                 true
             }.getOrDefault(false)
         }
+    }
+
+    private fun sanitizeFilename(filename: String): String {
+        val clean = filename.replace(Regex("[/\\\\:*?\"<>|\u0000-\u001F]"), "_").trim()
+        return clean.ifBlank { "events_export.csv" }
     }
 }
 

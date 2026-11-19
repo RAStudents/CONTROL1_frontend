@@ -10,6 +10,8 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import studio.acmenra.control.core.ui.generated.resources.Res
+import studio.acmenra.control.core.ui.generated.resources.events_mutation_network_error
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementStatus
 import studio.acmenra.control.feature.events.domain.model.EventIconKey
@@ -61,8 +63,9 @@ class EventsViewModelTest {
         override val companyId: String,
         override val query: EventsQuery,
         initialAccess: EventsAccessCapabilities,
+        initialFeedState: EventsFeedState = EventsFeedState(access = initialAccess),
     ) : EventsFeedSession {
-        private val _state = MutableStateFlow(EventsFeedState(access = initialAccess))
+        private val _state = MutableStateFlow(initialFeedState)
         override val state: StateFlow<EventsFeedState> = _state.asStateFlow()
 
         var loadNextPageCalled = false
@@ -308,7 +311,83 @@ class EventsViewModelTest {
             assertTrue(feed.pendingAcks.contains("ev-100"))
             advanceUntilIdle()
             assertFalse(feed.pendingAcks.contains("ev-100"))
-            assertEquals("Network error", vm.state.value.mutationErrorNotice)
+            assertEquals(Res.string.events_mutation_network_error, vm.state.value.mutationErrorNotice)
+        }
+
+    @Test
+    fun testSelectEventAutoAcknowledgesNewEvent() =
+        runTest(testDispatcher) {
+            val event = createSampleEvent("ev-new")
+            val feed =
+                FakeFeedSession(
+                    "comp-1",
+                    EventsQuery(),
+                    EventsAccessCapabilities(eventsRead = true, eventsReview = true),
+                    initialFeedState =
+                        EventsFeedState(
+                            visibleEvents = listOf(event),
+                            access = EventsAccessCapabilities(eventsRead = true, eventsReview = true),
+                        ),
+                )
+            var acknowledgedEventId: String? = null
+            val ackUseCase =
+                object : AcknowledgeEventUseCase {
+                    override suspend fun invoke(
+                        companyId: String,
+                        eventId: String,
+                    ): EventsOperationResult<Event> {
+                        acknowledgedEventId = eventId
+                        return EventsOperationResult.Success(
+                            event.copy(status = EventAcknowledgementStatus.ACKNOWLEDGED),
+                        )
+                    }
+                }
+            val vm = createViewModel(feedSession = feed, ackUseCase = ackUseCase)
+            vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true, eventsReview = true))
+            advanceUntilIdle()
+
+            vm.selectEvent("ev-new")
+            advanceUntilIdle()
+
+            assertEquals("ev-new", acknowledgedEventId)
+            assertTrue(feed.pendingAcks.contains("ev-new"))
+        }
+
+    @Test
+    fun testSelectEventDoesNotAcknowledgeAlreadyAcknowledged() =
+        runTest(testDispatcher) {
+            val event = createSampleEvent("ev-ack").copy(status = EventAcknowledgementStatus.ACKNOWLEDGED)
+            val feed =
+                FakeFeedSession(
+                    "comp-1",
+                    EventsQuery(),
+                    EventsAccessCapabilities(eventsRead = true, eventsReview = true),
+                    initialFeedState =
+                        EventsFeedState(
+                            visibleEvents = listOf(event),
+                            access = EventsAccessCapabilities(eventsRead = true, eventsReview = true),
+                        ),
+                )
+            var acknowledgedEventId: String? = null
+            val ackUseCase =
+                object : AcknowledgeEventUseCase {
+                    override suspend fun invoke(
+                        companyId: String,
+                        eventId: String,
+                    ): EventsOperationResult<Event> {
+                        acknowledgedEventId = eventId
+                        return EventsOperationResult.Success(event)
+                    }
+                }
+            val vm = createViewModel(feedSession = feed, ackUseCase = ackUseCase)
+            vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true, eventsReview = true))
+            advanceUntilIdle()
+
+            vm.selectEvent("ev-ack")
+            advanceUntilIdle()
+
+            assertNull(acknowledgedEventId)
+            assertFalse(feed.pendingAcks.contains("ev-ack"))
         }
 
     @Test

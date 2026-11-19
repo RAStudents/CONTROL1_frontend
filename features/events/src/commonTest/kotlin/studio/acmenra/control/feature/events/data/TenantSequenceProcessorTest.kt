@@ -53,6 +53,51 @@ class TenantSequenceProcessorTest {
     }
 
     @Test
+    fun testReplayIdMismatchTriggersInvalidSequence() {
+        val processor = TenantSequenceProcessor()
+        processor.startReplay(replayId = 1L, afterSequence = 100L)
+
+        val mismatch = processor.checkIncomingSequence(incomingReplayId = 2L, incomingSequence = 101L)
+        assertTrue(mismatch is SequenceValidationResult.InvalidSequence)
+    }
+
+    @Test
+    fun testStartReplaySyncsReplayIdAndSequence() {
+        val processor = TenantSequenceProcessor()
+        processor.startReplay(replayId = 5L, afterSequence = 200L)
+        assertEquals(5L, processor.currentReplayId)
+        assertEquals(200L, processor.currentSequence)
+
+        val inOrder = processor.checkIncomingSequence(incomingReplayId = 5L, incomingSequence = 201L)
+        assertEquals(SequenceValidationResult.InOrder, inOrder)
+    }
+
+    @Test
+    fun testPayloadSha256IntegrityViolationOnDuplicateMismatch() {
+        val processor = TenantSequenceProcessor()
+        processor.startReplay(replayId = 1L, afterSequence = 100L)
+
+        processor.advanceSequence(101L, payloadSha256 = "hash-original")
+        assertEquals(101L, processor.currentSequence)
+
+        val dupIdentical =
+            processor.checkIncomingSequence(
+                incomingReplayId = 1L,
+                incomingSequence = 101L,
+                payloadSha256 = "hash-original",
+            )
+        assertEquals(SequenceValidationResult.Duplicate, dupIdentical)
+
+        val dupCorrupted =
+            processor.checkIncomingSequence(
+                incomingReplayId = 1L,
+                incomingSequence = 101L,
+                payloadSha256 = "hash-altered",
+            )
+        assertTrue(dupCorrupted is SequenceValidationResult.IntegrityViolation)
+    }
+
+    @Test
     fun testSafe53BitBoundary() {
         val processor = TenantSequenceProcessor()
         val maxSafe = 9_007_199_254_740_991L

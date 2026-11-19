@@ -15,8 +15,10 @@ import studio.acmenra.control.core.access.domain.model.RoutePermissionRequiremen
 import studio.acmenra.control.core.access.domain.model.TenantContextState
 import studio.acmenra.control.core.access.domain.model.TenantPermission
 import studio.acmenra.control.core.network.model.NetworkError
+import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.time.Instant
 
@@ -295,5 +297,59 @@ class TenantRouteGuardTest {
                 requirement = RoutePermissionRequirement.Tenant(TenantPermission.DEVICES_DELETE),
             )
         assertEquals(TenantGuardDecision.NoPermissions("c1", "Acme Corp"), decision)
+    }
+
+    @Test
+    fun testEventsAccessCapabilitiesUnderActiveSupportOverride() {
+        val perms =
+            setOf(
+                TenantPermission.EVENTS_READ,
+                TenantPermission.EVENTS_REVIEW,
+                TenantPermission.REPORTS_EXPORT,
+            )
+        val isSupportOverride = true
+        val accessCapabilities =
+            EventsAccessCapabilities(
+                eventsRead = perms.contains(TenantPermission.EVENTS_READ),
+                eventsReview =
+                    !isSupportOverride &&
+                        perms.contains(TenantPermission.EVENTS_READ) &&
+                        perms.contains(TenantPermission.EVENTS_REVIEW),
+                reportsExport =
+                    !isSupportOverride &&
+                        perms.contains(TenantPermission.EVENTS_READ) &&
+                        perms.contains(TenantPermission.REPORTS_EXPORT),
+            )
+        assertTrue(accessCapabilities.eventsRead)
+        assertFalse(accessCapabilities.eventsReview)
+        assertFalse(accessCapabilities.reportsExport)
+        assertFalse(accessCapabilities.canAcknowledge)
+    }
+
+    @Test
+    fun testEventsAccessCapabilitiesUnderNormalActive() {
+        val perms =
+            setOf(
+                TenantPermission.EVENTS_READ,
+                TenantPermission.EVENTS_REVIEW,
+                TenantPermission.REPORTS_EXPORT,
+            )
+        val isSupportOverride = false
+        val accessCapabilities =
+            EventsAccessCapabilities(
+                eventsRead = perms.contains(TenantPermission.EVENTS_READ),
+                eventsReview =
+                    !isSupportOverride &&
+                        perms.contains(TenantPermission.EVENTS_READ) &&
+                        perms.contains(TenantPermission.EVENTS_REVIEW),
+                reportsExport =
+                    !isSupportOverride &&
+                        perms.contains(TenantPermission.EVENTS_READ) &&
+                        perms.contains(TenantPermission.REPORTS_EXPORT),
+            )
+        assertTrue(accessCapabilities.eventsRead)
+        assertTrue(accessCapabilities.eventsReview)
+        assertTrue(accessCapabilities.reportsExport)
+        assertTrue(accessCapabilities.canAcknowledge)
     }
 }

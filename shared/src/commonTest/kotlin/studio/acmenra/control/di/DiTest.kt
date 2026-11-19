@@ -1,6 +1,7 @@
 package studio.acmenra.control.di
 
 import io.ktor.client.HttpClient
+import kotlinx.coroutines.flow.flowOf
 import org.koin.core.KoinApplication
 import org.koin.core.qualifier.named
 import org.koin.dsl.koinApplication
@@ -20,6 +21,7 @@ import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.TokenStorage
 import studio.acmenra.control.core.network.client.ApiConfig
 import studio.acmenra.control.core.network.model.TokenPair
+import studio.acmenra.control.core.ui.notice.ConnectivityMonitor
 import studio.acmenra.control.feature.auth.presentation.LoginViewModel
 import studio.acmenra.control.feature.events.presentation.EventsViewModel
 import kotlin.test.AfterTest
@@ -56,6 +58,11 @@ class DiTest {
                     appModule,
                     module {
                         single<TokenStorage> { FakeTokenStorage() }
+                        single<ConnectivityMonitor> {
+                            object : ConnectivityMonitor {
+                                override val isOnline = flowOf(true)
+                            }
+                        }
                         single {
                             ApiConfig(
                                 apiBaseUrl = "https://api.example.com",

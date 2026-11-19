@@ -224,14 +224,23 @@ fun MobileCompanyIconButton(
     isRestricted: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    companyName: String? = null,
 ) {
+    val baseDescription = stringResource(Res.string.company_switcher_open)
+    val contentDesc =
+        if (!companyName.isNullOrBlank()) {
+            "$companyName, $baseDescription"
+        } else {
+            baseDescription
+        }
+
     IconButton(
         onClick = onClick,
         modifier = modifier,
     ) {
         Icon(
             painter = painterResource(Res.drawable.ic_company),
-            contentDescription = stringResource(Res.string.company_switcher_open),
+            contentDescription = contentDesc,
             modifier = Modifier.size(AmberDimens.ListIcon),
             tint =
                 if (isRestricted) {

@@ -216,7 +216,7 @@ fun AppScaffold(
                     topBar = {
                         AmberTopAppBar(
                             title = title,
-                            subtitle = if (displayCompanyName.isNotBlank()) displayCompanyName else null,
+                            subtitle = null,
                             leadingAction = topBarState.leadingAction,
                             actions = topBarState.actions,
                             desktopCompanyBox = null,
@@ -224,6 +224,7 @@ fun AppScaffold(
                                 if (globalContext != null && uiState.canSwitch) {
                                     {
                                         MobileCompanyIconButton(
+                                            companyName = displayCompanyName,
                                             isRestricted = displayIsRestricted,
                                             onClick = { isCompanyDialogOpen = true },
                                         )

@@ -11,10 +11,12 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.toRoute
+import studio.acmenra.control.core.access.domain.model.AccessStatus
 import studio.acmenra.control.core.access.domain.model.RoutePermissionRequirement
 import studio.acmenra.control.core.access.domain.model.TenantPermission
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.feature.auth.presentation.LoginRouteContent
+import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
 import studio.acmenra.control.feature.events.presentation.EventsRouteContent
 import studio.acmenra.control.navigation.components.LoadingPlaceholder
 import studio.acmenra.control.navigation.screen.CompaniesDashboardScreen
@@ -66,7 +68,23 @@ fun AppNavHost(
                         navController.navigateToCompaniesDashboard()
                     },
                 ) { tenantContext ->
-                    EventsRouteContent(companyId = tenantContext.companyId)
+                    val perms = tenantContext.effectiveTenantPermissions
+                    val hasSupportOverride =
+                        tenantContext.accessStatus == AccessStatus.ACTIVE_SUPPORT_OVERRIDE ||
+                            tenantContext.supportGrant != null
+                    val accessCapabilities =
+                        EventsAccessCapabilities(
+                            eventsRead = !hasSupportOverride && perms.contains(TenantPermission.EVENTS_READ),
+                            eventsReview = !hasSupportOverride && perms.contains(TenantPermission.EVENTS_REVIEW),
+                            reportsExport =
+                                !hasSupportOverride &&
+                                    perms.contains(TenantPermission.EVENTS_READ) &&
+                                    perms.contains(TenantPermission.REPORTS_EXPORT),
+                        )
+                    EventsRouteContent(
+                        companyId = tenantContext.companyId,
+                        accessCapabilities = accessCapabilities,
+                    )
                 }
             } else {
                 LoadingPlaceholder(modifier = Modifier.fillMaxSize())

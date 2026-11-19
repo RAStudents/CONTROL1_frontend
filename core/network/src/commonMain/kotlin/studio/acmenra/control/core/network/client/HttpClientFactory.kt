@@ -13,6 +13,7 @@ import io.ktor.client.plugins.defaultRequest
 import io.ktor.client.plugins.logging.LogLevel
 import io.ktor.client.plugins.logging.Logger
 import io.ktor.client.plugins.logging.Logging
+import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -205,6 +206,101 @@ object HttpClientFactory {
                 }
             }
         }
+
+    /**
+     * Creates an [HttpClient] intended for WebSocket realtime connections.
+     * WebSockets plugin is installed. Auth plugin is NOT installed on handshake
+     * to prevent Bearer token or cookie leakage during HTTP upgrade.
+     * Authentication is performed via first-frame AUTH message.
+     */
+    fun createRealtimeClient(
+        apiBaseUrl: String = NetworkConfig.BASE_URL,
+        enableLogs: Boolean = NetworkConfig.ENABLE_LOGS,
+        debugMode: Boolean = NetworkConfig.DEBUG_MODE,
+        allowInsecureTransport: Boolean = NetworkConfig.ALLOW_INSECURE_TRANSPORT,
+        customLogger: Logger? = null,
+        engine: HttpClientEngine? = null,
+    ): HttpClient {
+        require(apiBaseUrl.isNotBlank()) { "API base URL must not be blank" }
+        val expectedOrigin =
+            requireNotNull(runCatching { Url(apiBaseUrl) }.getOrNull()) {
+                "Invalid API base URL: $apiBaseUrl"
+            }
+        if (!allowInsecureTransport) {
+            val proto = expectedOrigin.protocol.name
+            require(proto.equals("https", ignoreCase = true) || proto.equals("wss", ignoreCase = true)) {
+                "HTTPS/WSS is required for Realtime client in production"
+            }
+        }
+
+        val originGuardPlugin =
+            createClientPlugin("RealtimeOriginGuard") {
+                onRequest { request, _ ->
+                    val requestUrl = request.url.build()
+                    val reqPort =
+                        if (requestUrl.port == 0) {
+                            requestUrl.protocol.defaultPort
+                        } else {
+                            requestUrl.port
+                        }
+                    val expPort =
+                        if (expectedOrigin.port == 0) {
+                            expectedOrigin.protocol.defaultPort
+                        } else {
+                            expectedOrigin.port
+                        }
+                    val sameHost = requestUrl.host.equals(expectedOrigin.host, ignoreCase = true)
+                    val sameHostAndPort = sameHost && reqPort == expPort
+                    val reqProto = requestUrl.protocol.name.lowercase()
+                    val validProto =
+                        if (!allowInsecureTransport) {
+                            reqProto == "wss" || reqProto == "https"
+                        } else {
+                            reqProto in setOf("wss", "ws", "https", "http")
+                        }
+                    if (!sameHostAndPort || !validProto) {
+                        throw IllegalArgumentException(
+                            "Realtime client must only connect to $expectedOrigin, got $requestUrl",
+                        )
+                    }
+                }
+            }
+
+        return buildClient(engine) {
+            installNetworkTimeouts()
+
+            install(WebSockets) {
+                pingIntervalMillis = 0
+            }
+
+            install(originGuardPlugin)
+
+            install(ContentNegotiation) {
+                json(
+                    Json {
+                        prettyPrint = debugMode
+                        isLenient = true
+                        ignoreUnknownKeys = true
+                        encodeDefaults = false
+                    },
+                )
+            }
+
+            if (enableLogs) {
+                install(Logging) {
+                    if (customLogger != null) {
+                        logger = customLogger
+                    }
+                    level = LogLevel.HEADERS
+                    sanitizeHeader { header ->
+                        header.equals(HttpHeaders.Authorization, ignoreCase = true) ||
+                            header.equals(HttpHeaders.Cookie, ignoreCase = true) ||
+                            header.equals(HttpHeaders.SetCookie, ignoreCase = true)
+                    }
+                }
+            }
+        }
+    }
 
     private fun buildClient(
         engine: HttpClientEngine?,

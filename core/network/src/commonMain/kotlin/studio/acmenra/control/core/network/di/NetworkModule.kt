@@ -53,4 +53,14 @@ val networkModule =
                 enableLogs = config.enableLogs,
             )
         }
+
+        single(named("realtime")) {
+            val config = get<ApiConfig>()
+            HttpClientFactory.createRealtimeClient(
+                apiBaseUrl = config.apiBaseUrl,
+                enableLogs = config.enableLogs,
+                debugMode = config.debugMode,
+                allowInsecureTransport = config.allowInsecureTransport,
+            )
+        }
     }

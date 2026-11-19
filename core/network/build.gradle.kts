@@ -21,6 +21,7 @@ kotlin {
     sourceSets {
         commonMain.dependencies {
             api(libs.ktor.client.core)
+            api(libs.ktor.client.websockets)
             implementation(libs.ktor.client.auth)
             implementation(libs.ktor.client.contentNegotiation)
             implementation(libs.ktor.client.logging)

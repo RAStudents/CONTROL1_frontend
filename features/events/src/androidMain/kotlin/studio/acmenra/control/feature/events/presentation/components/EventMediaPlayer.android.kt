@@ -50,6 +50,7 @@ actual fun EventMediaPlayer(
         contentAlignment = Alignment.Center,
     ) {
         if (isPlaying && !videoUrl.isNullOrBlank()) {
+            var videoViewRef by remember(videoUrl) { mutableStateOf<VideoView?>(null) }
             AndroidView(
                 factory = { context ->
                     VideoView(context).apply {
@@ -61,12 +62,15 @@ actual fun EventMediaPlayer(
                             mp.isLooping = true
                             start()
                         }
+                        videoViewRef = this
                     }
                 },
                 modifier = Modifier.fillMaxSize(),
             )
             DisposableEffect(videoUrl) {
                 onDispose {
+                    videoViewRef?.stopPlayback()
+                    videoViewRef = null
                     isPlaying = false
                 }
             }

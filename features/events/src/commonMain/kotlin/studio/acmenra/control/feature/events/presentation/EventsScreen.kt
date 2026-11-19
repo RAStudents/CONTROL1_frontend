@@ -34,7 +34,6 @@ import studio.acmenra.control.core.ui.generated.resources.events_export_csv
 import studio.acmenra.control.core.ui.generated.resources.events_filter_tune
 import studio.acmenra.control.core.ui.generated.resources.events_show_statistics
 import studio.acmenra.control.core.ui.generated.resources.events_viewer_id_copied
-import studio.acmenra.control.core.ui.generated.resources.events_viewer_mark_erroneous_error
 import studio.acmenra.control.core.ui.generated.resources.ic_bar_chart
 import studio.acmenra.control.core.ui.generated.resources.ic_download
 import studio.acmenra.control.core.ui.generated.resources.ic_tune
@@ -56,6 +55,7 @@ import studio.acmenra.control.feature.events.presentation.components.EventsExpor
 import studio.acmenra.control.feature.events.presentation.components.EventsFilters
 import studio.acmenra.control.feature.events.presentation.components.EventsList
 import studio.acmenra.control.feature.events.presentation.components.EventsSummaryCard
+import studio.acmenra.control.feature.events.presentation.platform.ExternalMediaOpener
 
 @Composable
 fun EventsRouteContent(
@@ -70,6 +70,7 @@ fun EventsRouteContent(
 
     val state by viewModel.state.collectAsState()
     val noticeController = koinInject<NoticeController>()
+    val mediaOpener = koinInject<ExternalMediaOpener>()
 
     LaunchedEffect(state.clipboardNotice) {
         state.clipboardNotice?.let {
@@ -79,8 +80,8 @@ fun EventsRouteContent(
     }
 
     LaunchedEffect(state.mutationErrorNotice) {
-        state.mutationErrorNotice?.let {
-            noticeController.show(Notice.error(title = Res.string.events_viewer_mark_erroneous_error))
+        state.mutationErrorNotice?.let { res ->
+            noticeController.show(Notice.error(title = res))
             viewModel.dismissMutationNotice()
         }
     }
@@ -113,6 +114,7 @@ fun EventsRouteContent(
         onDownloadExport = viewModel::downloadExport,
         onOpenFilterDialog = viewModel::openFilterDialog,
         onCloseFilterDialog = viewModel::closeFilterDialog,
+        onOpenVideo = mediaOpener::openMedia,
         modifier = modifier,
     )
 }
@@ -147,6 +149,7 @@ fun EventsScreen(
     onDownloadExport: (String) -> Unit,
     onOpenFilterDialog: () -> Unit,
     onCloseFilterDialog: () -> Unit,
+    onOpenVideo: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val currentToggleExportMode by rememberUpdatedState(onToggleExportMode)
@@ -269,6 +272,7 @@ fun EventsScreen(
                         onConfirmMarkErroneous = onConfirmMarkErroneous,
                         onCancelMarkErroneous = onCancelMarkErroneous,
                         onCloseCompact = onCloseViewerCompact,
+                        onOpenVideo = onOpenVideo,
                     )
                 }
             }
@@ -365,6 +369,7 @@ fun EventsScreen(
                         onRequestMarkErroneous = onRequestMarkErroneous,
                         onConfirmMarkErroneous = onConfirmMarkErroneous,
                         onCancelMarkErroneous = onCancelMarkErroneous,
+                        onOpenVideo = onOpenVideo,
                     )
                 }
             }

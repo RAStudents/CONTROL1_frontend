@@ -70,6 +70,7 @@ fun EventViewer(
     onConfirmMarkErroneous: (String, Long) -> Unit,
     onCancelMarkErroneous: () -> Unit,
     onCloseCompact: (() -> Unit)? = null,
+    onOpenVideo: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
     timeZone: TimeZone = TimeZone.currentSystemDefault(),
 ) {
@@ -152,7 +153,7 @@ fun EventViewer(
             // Video Download Button (if video available)
             if (!event.videoUrl.isNullOrBlank()) {
                 OutlinedButton(
-                    onClick = { /* trigger video download or open */ },
+                    onClick = { onOpenVideo?.invoke(event.videoUrl) },
                     modifier = Modifier.fillMaxWidth().height(AmberDimens.ButtonHeight),
                     shape = RoundedCornerShape(AmberCorners.Medium),
                 ) {

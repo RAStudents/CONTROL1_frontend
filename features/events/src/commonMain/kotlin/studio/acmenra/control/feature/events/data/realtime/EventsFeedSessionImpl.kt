@@ -15,7 +15,9 @@ import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.feature.events.data.datasource.EventsApiException
 import studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.EventsWebSocketDataSource
+import studio.acmenra.control.feature.events.data.datasource.WsCloseReason
 import studio.acmenra.control.feature.events.data.mapper.EventsDtoMapper
+import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
 import studio.acmenra.control.feature.events.domain.model.EventsInitialLoadError
 import studio.acmenra.control.feature.events.domain.model.EventsPaginationError
@@ -24,24 +26,8 @@ import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionStat
 import studio.acmenra.control.feature.events.domain.repository.EventsConnectivityProvider
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
+import studio.acmenra.control.feature.events.domain.repository.RebootstrapState
 import kotlin.random.Random
-
-sealed interface RebootstrapState {
-    data object Idle : RebootstrapState
-
-    data class Loading(
-        val attempt: Int,
-    ) : RebootstrapState
-
-    data class RetryWaiting(
-        val attempt: Int,
-        val delayMs: Long,
-    ) : RebootstrapState
-
-    data class Failed(
-        val error: Throwable,
-    ) : RebootstrapState
-}
 
 class EventsFeedSessionImpl(
     override val companyId: String,
@@ -52,17 +38,21 @@ class EventsFeedSessionImpl(
     private val sessionManager: SessionManager,
     private val connectivityProvider: EventsConnectivityProvider,
     private val accessInvalidationListener: AccessInvalidationListener? = null,
+    private val onFilterOptionsInvalidated: (() -> Unit)? = null,
     parentScope: CoroutineScope? = null,
 ) : EventsFeedSession {
     private val sessionScope =
-        parentScope?.let { CoroutineScope(SupervisorJob(it.coroutineContext[Job]) + Dispatchers.Default) }
-            ?: CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        parentScope ?: CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private var connectJob: Job? = null
     private var wsFramesJob: Job? = null
     private var connectivityJob: Job? = null
+    private var bootstrapJob: Job? = null
     private var rebootstrapJob: Job? = null
-    private var rebootstrapState: RebootstrapState = RebootstrapState.Idle
+
+    private var connectionGeneration: Long = 0L
+    private var bootstrapGeneration: Long = 0L
+
     private var lastUsedAccessToken: String? = null
     private var isClosed = false
     private var isOnline = true
@@ -82,9 +72,10 @@ class EventsFeedSessionImpl(
                 handleTokenRefreshNeeded()
             },
             onAccessInvalidated = { reason, targetCompanyId ->
-                sessionScope.launch {
-                    accessInvalidationListener?.onAccessInvalidated(reason, targetCompanyId ?: companyId)
-                }
+                handleTerminalAccessInvalidated(reason, targetCompanyId)
+            },
+            onFilterOptionsUpdated = {
+                onFilterOptionsInvalidated?.invoke()
             },
         )
 
@@ -119,6 +110,9 @@ class EventsFeedSessionImpl(
                     if (!online) {
                         processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.DISCONNECTED))
                     } else {
+                        if (state.value.rebootstrapState is RebootstrapState.Failed) {
+                            triggerRebootstrap()
+                        }
                         val currentConn = state.value.connectionState
                         if (currentConn == RealtimeConnectionState.DISCONNECTED ||
                             currentConn == RealtimeConnectionState.FAILED
@@ -131,91 +125,108 @@ class EventsFeedSessionImpl(
     }
 
     private fun triggerBootstrap() {
-        sessionScope.launch {
-            try {
-                val bootstrapDto = remoteDataSource.getBootstrap(companyId, query, limit = 50)
-                val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
-                processor.dispatch(SessionCommand.BootstrapLoaded(bootstrap))
+        if (isClosed) return
+        bootstrapJob?.cancel()
+        val generation = ++bootstrapGeneration
 
-                // Start WebSocket generation with replay_id = 1
-                processor.startReplay(replayId = 1L, afterSequence = bootstrap.streamCursor)
-                connectWebSocket(bootstrap.streamCursor)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: EventsApiException.SnapshotTooLarge) {
-                val err =
-                    EventsInitialLoadError.SnapshotTooLarge(
-                        maxItems = e.maxItems,
-                        suggestedFrom =
-                            e.suggestedFrom?.let {
-                                runCatching {
-                                    kotlin.time.Instant.parse(
-                                        it,
-                                    )
-                                }.getOrNull()
-                            },
-                        suggestedTo =
-                            e.suggestedTo?.let {
-                                runCatching {
-                                    kotlin.time.Instant.parse(
-                                        it,
-                                    )
-                                }.getOrNull()
-                            },
+        bootstrapJob =
+            sessionScope.launch {
+                try {
+                    val bootstrapDto = remoteDataSource.getBootstrap(companyId, query, limit = 50)
+                    val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
+                    processor.dispatch(SessionCommand.BootstrapLoaded(bootstrap, generation = generation))
+
+                    // Start WebSocket generation with replay_id = 1
+                    processor.startReplay(replayId = 1L, afterSequence = bootstrap.streamCursor)
+                    connectWebSocket(bootstrap.streamCursor)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: EventsApiException.SnapshotTooLarge) {
+                    val err =
+                        EventsInitialLoadError.SnapshotTooLarge(
+                            maxItems = e.maxItems,
+                            suggestedFrom =
+                                e.suggestedFrom?.let {
+                                    runCatching {
+                                        kotlin.time.Instant.parse(it)
+                                    }.getOrNull()
+                                },
+                            suggestedTo =
+                                e.suggestedTo?.let {
+                                    runCatching {
+                                        kotlin.time.Instant.parse(it)
+                                    }.getOrNull()
+                                },
+                        )
+                    processor.dispatch(SessionCommand.InitialLoadFailed(err, generation = generation))
+                } catch (e: EventsApiException.FilterInvalid) {
+                    processor.dispatch(
+                        SessionCommand.InitialLoadFailed(
+                            EventsInitialLoadError.InvalidFilter(e.invalidFields),
+                            generation = generation,
+                        ),
                     )
-                processor.dispatch(SessionCommand.InitialLoadFailed(err))
-            } catch (e: EventsApiException.FilterInvalid) {
-                processor.dispatch(
-                    SessionCommand.InitialLoadFailed(EventsInitialLoadError.InvalidFilter(e.invalidFields)),
-                )
-            } catch (e: Throwable) {
-                val err =
-                    if (e.message?.contains("403") == true || e.message?.contains("AccessDenied") == true) {
-                        EventsInitialLoadError.AccessDenied
-                    } else if (e.message?.contains("Network") == true || !isOnline) {
-                        EventsInitialLoadError.Network
-                    } else {
-                        EventsInitialLoadError.Server(e.message)
-                    }
-                processor.dispatch(SessionCommand.InitialLoadFailed(err))
+                } catch (e: Throwable) {
+                    val err =
+                        if (e.message?.contains("403") == true || e.message?.contains("AccessDenied") == true) {
+                            EventsInitialLoadError.AccessDenied
+                        } else if (e.message?.contains("Network") == true || !isOnline) {
+                            EventsInitialLoadError.Network
+                        } else {
+                            EventsInitialLoadError.Server(e.message)
+                        }
+                    processor.dispatch(SessionCommand.InitialLoadFailed(err, generation = generation))
+                }
             }
-        }
     }
 
     private fun triggerRebootstrap() {
-        if (rebootstrapJob?.isActive == true) return
+        if (rebootstrapJob?.isActive == true || isClosed) return
 
         rebootstrapJob =
             sessionScope.launch {
                 var attempt = 1
                 val maxAttempts = 4
                 while (isActive && attempt <= maxAttempts && !isClosed) {
-                    rebootstrapState = RebootstrapState.Loading(attempt)
+                    val currentAttempt = attempt
+                    processor.dispatch(SessionCommand.RebootstrapStateChanged(RebootstrapState.Loading(currentAttempt)))
                     try {
                         val bootstrapDto = remoteDataSource.getBootstrap(companyId, query, limit = 50)
                         val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
-                        rebootstrapState = RebootstrapState.Idle
-                        processor.dispatch(SessionCommand.BootstrapLoaded(bootstrap))
+                        processor.dispatch(SessionCommand.RebootstrapStateChanged(RebootstrapState.Idle))
+                        processor.dispatch(
+                            SessionCommand.BootstrapLoaded(bootstrap, generation = ++bootstrapGeneration),
+                        )
                         return@launch
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Throwable) {
                         attempt++
                         if (attempt > maxAttempts) {
-                            rebootstrapState = RebootstrapState.Failed(e)
+                            processor.dispatch(SessionCommand.RebootstrapStateChanged(RebootstrapState.Failed(e)))
                             processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.FAILED))
                             return@launch
                         }
                         val backoffMs = (1L shl (attempt - 1)) * 500L + Random.nextLong(50, 200)
-                        rebootstrapState = RebootstrapState.RetryWaiting(attempt, backoffMs)
+                        processor.dispatch(
+                            SessionCommand.RebootstrapStateChanged(RebootstrapState.RetryWaiting(attempt, backoffMs)),
+                        )
                         delay(backoffMs)
                     }
                 }
             }
     }
 
+    override fun retryRebootstrap() {
+        if (!isClosed) {
+            triggerRebootstrap()
+        }
+    }
+
     private fun connectWebSocket(afterSequence: Long) {
         connectJob?.cancel()
+        val generation = ++connectionGeneration
+
         connectJob =
             sessionScope.launch {
                 if (isClosed) return@launch
@@ -238,8 +249,8 @@ class EventsFeedSessionImpl(
                     afterSequence = afterSequence,
                     scope = sessionScope,
                     getClientConfirmedSeq = { processor.getAsOfSequence() },
-                    onDisconnected = { reason ->
-                        if (!isClosed) {
+                    onDisconnected = { reason, _ ->
+                        if (!isClosed && generation == connectionGeneration) {
                             handleDisconnect(reason)
                         }
                     },
@@ -247,7 +258,11 @@ class EventsFeedSessionImpl(
             }
     }
 
-    private fun handleDisconnect(reason: String?) {
+    private fun handleDisconnect(reason: WsCloseReason) {
+        if (reason == WsCloseReason.REPLACED || reason == WsCloseReason.SESSION_CLOSED) {
+            // Replaced by a newer connection or closed intentionally: do NOT reconnect
+            return
+        }
         if (!isOnline) {
             processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.DISCONNECTED))
             return
@@ -280,43 +295,51 @@ class EventsFeedSessionImpl(
     private fun handleTokenRefreshNeeded() {
         sessionScope.launch {
             try {
-                var snapshot = sessionManager.getSnapshot()
-                if (snapshot?.tokens?.accessToken == lastUsedAccessToken) {
-                    try {
-                        remoteDataSource.getFilterOptions(companyId, ifNoneMatchEtag = null)
-                    } catch (e: Throwable) {
-                        // ignore, will verify snapshot next
-                    }
-                    snapshot = sessionManager.getSnapshot()
-                }
-
-                val newToken = snapshot?.tokens?.accessToken
+                val refreshed = sessionManager.refreshActiveSession(failedAccessToken = lastUsedAccessToken)
+                val newToken = refreshed?.tokens?.accessToken
                 if (!newToken.isNullOrBlank() && newToken != lastUsedAccessToken) {
                     lastUsedAccessToken = newToken
-                    processor.nextReplayGeneration()
+                    val nextReplay = processor.nextReplayGeneration()
                     connectWebSocket(processor.getAsOfSequence())
                     return@launch
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                // Refresh failure falls through to FAILED connection state
+                // Refresh failure falls through to FAILED
             }
             processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.FAILED))
         }
     }
 
+    private fun handleTerminalAccessInvalidated(
+        reason: String,
+        targetCompanyId: String?,
+    ) {
+        isClosed = true
+        connectJob?.cancel()
+        wsFramesJob?.cancel()
+        connectivityJob?.cancel()
+        bootstrapJob?.cancel()
+        rebootstrapJob?.cancel()
+        sessionScope.launch {
+            webSocketDataSource.disconnect()
+            accessInvalidationListener?.onAccessInvalidated(reason, targetCompanyId ?: companyId)
+        }
+    }
+
     override fun loadNextPage() {
         val currentState = state.value
-        if (currentState.isLoadingNextPage || !currentState.hasMore) return
+        if (currentState.isLoadingNextPage || !currentState.hasMore || isClosed) return
         val cursor = processor.getNextCursor() ?: return
+        val currentSnapshotId = currentState.snapshotId
 
         processor.dispatch(SessionCommand.SetLoadingNextPage(true))
         sessionScope.launch {
             try {
                 val pageDto = remoteDataSource.getEventsPage(companyId, cursor, limit = 50)
                 val page = EventsDtoMapper.mapPage(pageDto)
-                processor.dispatch(SessionCommand.NextPageLoaded(page))
+                processor.dispatch(SessionCommand.NextPageLoaded(page, snapshotId = currentSnapshotId))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: EventsApiException.SnapshotExpired) {
@@ -335,7 +358,9 @@ class EventsFeedSessionImpl(
     }
 
     override fun refresh() {
-        triggerBootstrap()
+        if (!isClosed) {
+            triggerBootstrap()
+        }
     }
 
     override fun onViewportAtTop() {
@@ -350,6 +375,10 @@ class EventsFeedSessionImpl(
         processor.dispatch(SessionCommand.ClearOptimisticAckPending(eventId))
     }
 
+    override fun applyAcknowledged(event: Event) {
+        processor.dispatch(SessionCommand.AcknowledgeSucceeded(event))
+    }
+
     override fun updateAccessCapabilities(access: EventsAccessCapabilities) {
         processor.dispatch(SessionCommand.AccessUpdated(access))
     }
@@ -361,6 +390,7 @@ class EventsFeedSessionImpl(
         connectJob?.cancel()
         wsFramesJob?.cancel()
         connectivityJob?.cancel()
+        bootstrapJob?.cancel()
         rebootstrapJob?.cancel()
         sessionScope.launch {
             webSocketDataSource.disconnect()

@@ -1,6 +1,7 @@
 package studio.acmenra.control.feature.events.domain.repository
 
 import kotlinx.coroutines.flow.StateFlow
+import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
 
@@ -18,6 +19,10 @@ interface EventsFeedSession {
     fun markOptimisticAckPending(eventId: String)
 
     fun clearOptimisticAckPending(eventId: String)
+
+    fun applyAcknowledged(event: Event)
+
+    fun retryRebootstrap()
 
     fun updateAccessCapabilities(access: EventsAccessCapabilities)
 

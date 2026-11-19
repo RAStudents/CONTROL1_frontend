@@ -177,6 +177,7 @@ object AmberDimens {
     val ButtonHeight = 56.dp
     val TopBarHeight = 64.dp
     val NavBarHeight = 80.dp
+    val NavigationBarHeight = NavBarHeight
     val RailCollapsed = 96.dp
     val RailExpanded = 220.dp
     val RailTopPadding = 24.dp
@@ -186,6 +187,12 @@ object AmberDimens {
     val SliderTrack = 16.dp
     val SliderHandleWidth = 4.dp
     val SliderHandleHeight = 44.dp
+
+    // Events screen workspace and detail layout dimensions
+    val EventsMediumWorkspaceMin = 760.dp
+    val EventsListWide = 360.dp
+    val EventsListMedium = 320.dp
+    val EventsDetailMin = 424.dp
 
     // Width at which the layout switches from phone to tablet/desktop
     val TabletBreakpoint = 840.dp
@@ -211,6 +218,12 @@ object AmberDimens {
     val OutlinedBorderWidth = 1.dp
     val StatusBadgePaddingHorizontal = 8.dp
     val StatusBadgePaddingVertical = 2.dp
+}
+
+object AmberBreakpoints {
+    val EventsCompact = 840.dp
+    val EventsMedium = EventsCompact
+    val EventsWide = 1120.dp
 }
 
 // FontFamily.Default is Roboto on Android only. On web bundle Roboto in composeResources/font

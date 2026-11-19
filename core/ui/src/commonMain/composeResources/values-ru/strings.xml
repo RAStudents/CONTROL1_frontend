@@ -33,6 +33,138 @@
     <string name="events_show_statistics">Показать статистику</string>
     <string name="events_filter_tune">Фильтры</string>
 
+    <!-- Events Screen -->
+    <!-- Filters -->
+    <string name="events_search_id_label">Поиск по ID</string>
+    <string name="events_search_id_placeholder">ID события...</string>
+    <string name="events_filter_date_label">Дата</string>
+    <string name="events_filter_date_all">Все даты</string>
+    <string name="events_filter_date_today">Сегодня</string>
+    <string name="events_filter_date_yesterday">Вчера</string>
+    <string name="events_filter_date_last_7_days">7 дней</string>
+    <string name="events_date_picker_title">Выбор даты</string>
+    <string name="events_date_mode_single">Один день</string>
+    <string name="events_date_mode_range">Период</string>
+    <string name="events_date_apply">Применить</string>
+    <string name="events_date_reset">Сбросить</string>
+    <string name="events_date_cancel">Отмена</string>
+    <string name="events_filter_types_label">Типы событий</string>
+    <string name="events_filter_types_all">Все типы событий</string>
+    <string name="events_filter_types_selected">Выбрано: %1$d</string>
+    <string name="events_filter_locations_label">Места и камеры</string>
+    <string name="events_filter_locations_all">Все места и камеры</string>
+    <string name="events_filter_locations_selected">Камер выбрано: %1$d</string>
+    <string name="events_validity_all">Все события</string>
+    <string name="events_validity_valid_only">Только верные</string>
+    <string name="events_validity_erroneous_only">Только ошибочные</string>
+    <string name="events_filters_reset">Сбросить фильтры</string>
+    <string name="events_filters_collapse">Свернуть фильтры</string>
+    <string name="events_filters_expand">Развернуть фильтры</string>
+    <string name="events_filters_active_count">Активно: %1$d</string>
+
+    <!-- Summary & Stats -->
+    <string name="events_summary_today_label">Событий за сегодня</string>
+    <string name="events_summary_devices_title">Устройства</string>
+    <string name="events_summary_devices_ok">В норме</string>
+    <string name="events_summary_devices_unknown">Неизвестно</string>
+    <string name="events_summary_devices_error">Ошибка</string>
+    <string name="events_summary_devices_total">Всего</string>
+    <string name="events_trend_improving">Улучшение</string>
+    <string name="events_trend_worsening">Ухудшение</string>
+    <string name="events_trend_stable">Стабильно</string>
+    <string name="events_trend_unknown">Без динамики</string>
+    <string name="events_summary_empty">Статистика недоступна</string>
+    <string name="events_summary_loading">Загрузка сводки...</string>
+
+    <!-- Feed & List -->
+    <string name="events_empty_no_events">Событий не зафиксировано</string>
+    <string name="events_empty_period_no_events">За выбранный период событий не зафиксировано</string>
+    <string name="events_empty_no_events_filtered">По заданным фильтрам событий не найдено</string>
+    <string name="events_list_loading">Загрузка событий...</string>
+    <string name="events_list_load_more">Загрузка следующих событий...</string>
+    <string name="events_list_pending_new_events">+%1$d новых событий ↑</string>
+    <string name="events_list_requires_refresh">Доступны новые события. Нажмите для обновления.</string>
+    <string name="events_refresh">Обновить</string>
+
+    <!-- Card Statuses -->
+    <string name="events_status_new">Новое</string>
+    <string name="events_status_acknowledged">Просмотрено</string>
+    <string name="events_status_erroneous">Ошибочное</string>
+    <string name="events_status_legacy">Архивное</string>
+
+    <!-- Viewer & Details -->
+    <string name="events_viewer_placeholder">Выберите событие в списке слева для просмотра деталей и видеозаписи</string>
+    <string name="events_viewer_details_title">Детали события</string>
+    <string name="events_viewer_occurred_at">Время фиксации</string>
+    <string name="events_viewer_location">Местоположение</string>
+    <string name="events_viewer_device">Камера / Устройство</string>
+    <string name="events_viewer_category">Категория</string>
+    <string name="events_viewer_id_label">Идентификатор события</string>
+    <string name="events_viewer_copy_id">Копировать ID</string>
+    <string name="events_viewer_id_copied">ID события скопирован в буфер обмена</string>
+    <string name="events_viewer_mark_erroneous">Пометить ошибочным</string>
+    <string name="events_viewer_mark_erroneous_title">Подтверждение ошибки распознавания</string>
+    <string name="events_viewer_mark_erroneous_warning">Используйте эту отметку только при фактической ошибке распознавания. Запрещено помечать реальные события для искусственного изменения показателей. Действие будет записано в журнал аудита с привязкой к вашему аккаунту. При выявлении злоупотребления информация будет отображена в управленческом дашборде, а статистика будет пересчитана.</string>
+    <string name="events_viewer_mark_erroneous_confirm">Да, событие ошибочное</string>
+    <string name="events_viewer_mark_erroneous_cancel">Отмена</string>
+    <string name="events_viewer_mark_erroneous_success">Событие успешно помечено ошибочным</string>
+    <string name="events_viewer_mark_erroneous_conflict">Конфликт версий события. Пожалуйста, проверьте обновлённые данные.</string>
+    <string name="events_viewer_mark_erroneous_error">Не удалось пометить событие ошибочным</string>
+    <string name="events_viewer_close">Закрыть просмотр</string>
+
+    <!-- Video & Media -->
+    <string name="events_video_play">Воспроизвести видео</string>
+    <string name="events_video_pause">Приостановить</string>
+    <string name="events_video_fullscreen">Полноэкранный режим</string>
+    <string name="events_video_loading">Загрузка видео...</string>
+    <string name="events_video_unavailable">Видео недоступно</string>
+    <string name="events_video_retry">Повторить попытку</string>
+    <string name="events_video_download">Скачать видео</string>
+    <string name="events_video_download_starting">Начало загрузки...</string>
+    <string name="events_video_download_success">Загрузка видео завершена</string>
+    <string name="events_video_download_error">Не удалось загрузить видео</string>
+    <string name="events_media_preview_desc">Превью события</string>
+
+    <!-- Export Panel -->
+    <string name="events_export_panel_title">Параметры экспорта CSV</string>
+    <string name="events_export_format_label">Формат файла</string>
+    <string name="events_export_format_excel">Excel (CSV, точка с запятой, UTF-8 с BOM)</string>
+    <string name="events_export_format_standard">Стандартный (CSV, запятая, UTF-8)</string>
+    <string name="events_export_include_media_links">Включить ссылки на медиафайлы</string>
+    <string name="events_export_media_links_warning">Внимание: ссылки на JPG/MP4 являются постоянными публичными URL. Платформа CONTROL не отзывает доступ к ссылкам после их экспорта.</string>
+    <string name="events_export_rows_count">Записей к выгрузке: %1$d</string>
+    <string name="events_export_rows_count_server">Количество будет рассчитано сервером</string>
+    <string name="events_export_start_btn">Сформировать экспорт</string>
+    <string name="events_export_status_queued">Задание ожидает в очереди...</string>
+    <string name="events_export_status_processing">Подготовка файла CSV (%1$d%%)...</string>
+    <string name="events_export_status_completed">Файл экспорта готов</string>
+    <string name="events_export_status_failed">Не удалось подготовить файл экспорта</string>
+    <string name="events_export_status_expired">Срок действия файла экспорта истёк</string>
+    <string name="events_export_download_btn">Скачать CSV</string>
+    <string name="events_export_expired_msg">Срок действия подготовленного файла истёк. Пожалуйста, запустите экспорт повторно.</string>
+    <string name="events_export_error_generic">Не удалось подготовить экспорт</string>
+    <string name="events_export_error_limit_exceeded">Превышен лимит строк для экспорта (максимум 250 000)</string>
+    <string name="events_export_error_queue_ttl">Истёк срок ожидания в очереди экспорта</string>
+    <string name="events_export_error_abandoned">Превышено максимальное время обработки экспорта</string>
+    <string name="events_export_error_storage_failed">Ошибка сохранения файла экспорта в хранилище</string>
+    <string name="events_export_error_worker_failed">Внутренняя ошибка сервиса обработки экспорта</string>
+    <string name="events_export_error_access_revoked">Доступ к операции экспорта был отозван</string>
+    <string name="events_export_downloading">Скачивание файла экспорта...</string>
+    <string name="events_export_download_success">Файл экспорта успешно сохранён</string>
+    <string name="events_export_download_error">Не удалось скачать файл экспорта</string>
+
+    <!-- Error States -->
+    <string name="events_error_snapshot_expired">Срок действия снимка истёк. Обновление данных...</string>
+    <string name="events_error_snapshot_too_large">Слишком много событий. Пожалуйста, сузьте фильтр или период.</string>
+    <string name="events_error_apply_suggested">Применить предложенный период</string>
+    <string name="events_error_filter_invalid">Недопустимые параметры фильтрации. Сброс некорректных параметров.</string>
+
+    <!-- Realtime Connection State -->
+    <string name="events_ws_connecting">Подключение к ленте...</string>
+    <string name="events_ws_reconnecting">Восстановление подключения...</string>
+    <string name="events_ws_offline">Автономный режим</string>
+    <string name="events_ws_connected">Прямой эфир активен</string>
+
     <!-- Restricted Screens -->
     <string name="restricted_company_frozen_title">Компания заблокирована</string>
     <string name="restriction_billing_debt">Задолженность по оплате</string>

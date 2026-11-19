@@ -73,6 +73,7 @@ object HttpClientFactory {
                 }
             }
 
+        val refreshClient = createExternalClient(enableLogs = enableLogs, customLogger = customLogger, engine = engine)
         return buildClient(engine) {
             installNetworkTimeouts()
 
@@ -171,6 +172,31 @@ object HttpClientFactory {
         }.also { client ->
             if (accessInvalidationListener != null) {
                 client.attributes.put(AccessInvalidationAttributeKey, accessInvalidationListener)
+            }
+            sessionManager.setRefreshDelegate { failedToken ->
+                val current = sessionManager.getSnapshot()
+                val targetToken = failedToken ?: current?.tokens?.accessToken
+                sessionManager.refreshSession(failedAccessToken = targetToken) { cur ->
+                    val refreshUrl =
+                        URLBuilder(expectedOrigin)
+                            .apply {
+                                val existing = pathSegments.filter { it.isNotEmpty() }
+                                val newSegments =
+                                    refreshPath
+                                        .trim('/')
+                                        .split('/')
+                                        .filter { it.isNotEmpty() }
+                                pathSegments = existing + newSegments
+                            }.buildString()
+
+                    val response =
+                        refreshClient.post(refreshUrl) {
+                            contentType(ContentType.Application.Json)
+                            setBody(RefreshTokenRequest(refreshToken = cur.tokens.refreshToken))
+                        }
+
+                    response.toRefreshedTokens(cur.tokens.refreshToken)
+                }
             }
         }
     }

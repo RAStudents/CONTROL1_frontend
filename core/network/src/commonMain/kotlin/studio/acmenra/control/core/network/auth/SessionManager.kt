@@ -19,6 +19,22 @@ class SessionManager(
     @kotlin.concurrent.Volatile
     private var currentRevision: Long = 0L
 
+    @kotlin.concurrent.Volatile
+    private var refreshDelegate: (suspend (failedAccessToken: String?) -> SessionSnapshot?)? = null
+
+    fun setRefreshDelegate(delegate: (suspend (failedAccessToken: String?) -> SessionSnapshot?)?) {
+        this.refreshDelegate = delegate
+    }
+
+    suspend fun refreshActiveSession(failedAccessToken: String? = null): SessionSnapshot? {
+        val delegate = refreshDelegate
+        return if (delegate != null) {
+            delegate(failedAccessToken)
+        } else {
+            getSnapshot()
+        }
+    }
+
     fun currentRevision(): Long = currentRevision
 
     private val _sessionState =

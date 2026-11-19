@@ -91,7 +91,18 @@ class EventsViewModelTest {
             pendingAcks.remove(eventId)
         }
 
-        override fun updateAccessCapabilities(access: EventsAccessCapabilities) {}
+        val appliedAcks = mutableListOf<Event>()
+
+        override fun applyAcknowledged(event: Event) {
+            appliedAcks.add(event)
+            pendingAcks.remove(event.id)
+        }
+
+        override fun retryRebootstrap() {}
+
+        override fun updateAccessCapabilities(access: EventsAccessCapabilities) {
+            _state.value = _state.value.copy(access = access)
+        }
 
         override fun close() {
             closed = true
@@ -124,7 +135,10 @@ class EventsViewModelTest {
                     companyId: String,
                     query: EventsQuery,
                     accessCapabilities: EventsAccessCapabilities,
-                ): EventsFeedSession = feedSession
+                ): EventsFeedSession {
+                    feedSession.updateAccessCapabilities(accessCapabilities)
+                    return feedSession
+                }
             }
         val loadOptions =
             object : LoadEventFilterOptionsUseCase {
@@ -196,6 +210,7 @@ class EventsViewModelTest {
     @Test
     fun testExportModeToggle() {
         val vm = createViewModel()
+        vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true, reportsExport = true))
         assertFalse(vm.state.value.isExportModeActive)
 
         vm.toggleExportMode()
@@ -265,7 +280,7 @@ class EventsViewModelTest {
         }
 
     @Test
-    fun testAcknowledgeEventSuccessRetainsOptimisticAck() =
+    fun testAcknowledgeEventSuccessUpdatesFeed() =
         runTest(testDispatcher) {
             val feed =
                 FakeFeedSession(
@@ -280,7 +295,8 @@ class EventsViewModelTest {
             vm.acknowledgeEvent(event)
             assertTrue(feed.pendingAcks.contains("ev-100"))
             advanceUntilIdle()
-            assertTrue(feed.pendingAcks.contains("ev-100"))
+            assertEquals(listOf(event), feed.appliedAcks)
+            assertFalse(feed.pendingAcks.contains("ev-100"))
             assertNull(vm.state.value.mutationErrorNotice)
         }
 
@@ -350,7 +366,8 @@ class EventsViewModelTest {
             advanceUntilIdle()
 
             assertEquals("ev-new", acknowledgedEventId)
-            assertTrue(feed.pendingAcks.contains("ev-new"))
+            assertEquals("ev-new", feed.appliedAcks.firstOrNull()?.id)
+            assertFalse(feed.pendingAcks.contains("ev-new"))
         }
 
     @Test

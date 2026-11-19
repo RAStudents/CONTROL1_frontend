@@ -1,6 +1,7 @@
 package studio.acmenra.control.feature.events.presentation
 
 import org.jetbrains.compose.resources.StringResource
+import studio.acmenra.control.core.ui.notice.Notice
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
 import studio.acmenra.control.feature.events.domain.model.EventsExportFormatPreset
@@ -52,6 +53,7 @@ data class EventsState(
     val isMarkingErroneous: Boolean = false,
     val mutationErrorNotice: StringResource? = null,
     val clipboardNotice: String? = null,
+    val errorNotice: Notice? = null,
 ) {
     val erroneousConfirmationEventId: String?
         get() = confirmationTarget?.eventId

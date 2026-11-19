@@ -24,6 +24,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import kotlinx.datetime.TimeZone
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
@@ -83,6 +84,13 @@ fun EventsRouteContent(
         state.mutationErrorNotice?.let { res ->
             noticeController.show(Notice.error(title = res))
             viewModel.dismissMutationNotice()
+        }
+    }
+
+    LaunchedEffect(state.errorNotice) {
+        state.errorNotice?.let { notice ->
+            noticeController.show(notice)
+            viewModel.dismissErrorNotice()
         }
     }
 
@@ -158,6 +166,13 @@ fun EventsScreen(
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val isCompact = maxWidth < AmberBreakpoints.EventsCompact || maxWidth < AmberDimens.EventsMediumWorkspaceMin
         val isWide = maxWidth >= AmberBreakpoints.EventsWide
+
+        val businessTimeZone =
+            remember(state.summary?.businessTimezone) {
+                state.summary?.businessTimezone?.let {
+                    runCatching { TimeZone.of(it) }.getOrNull()
+                } ?: TimeZone.currentSystemDefault()
+            }
 
         val topBarActions: @Composable RowScope.() -> Unit =
             remember(state.isExportModeActive, state.access.reportsExport, isCompact) {
@@ -247,6 +262,7 @@ fun EventsScreen(
                         pendingNewerCount = state.pendingNewerCount,
                         hasMore = state.hasMore,
                         isLoadingNextPage = state.isLoadingNextPage,
+                        timeZone = businessTimeZone,
                         onSelectEvent = onSelectEvent,
                         onAcknowledgeEvent = onAcknowledgeEvent,
                         onLoadNextPage = onLoadNextPage,
@@ -268,6 +284,7 @@ fun EventsScreen(
                         isMarkingErroneous = state.isMarkingErroneous,
                         isConfirmationOpen = state.erroneousConfirmationEventId != null,
                         confirmationTarget = state.confirmationTarget,
+                        timeZone = businessTimeZone,
                         onCopyId = onCopyEventId,
                         onRequestMarkErroneous = onRequestMarkErroneous,
                         onConfirmMarkErroneous = onConfirmMarkErroneous,
@@ -344,6 +361,7 @@ fun EventsScreen(
                             pendingNewerCount = state.pendingNewerCount,
                             hasMore = state.hasMore,
                             isLoadingNextPage = state.isLoadingNextPage,
+                            timeZone = businessTimeZone,
                             onSelectEvent = onSelectEvent,
                             onAcknowledgeEvent = onAcknowledgeEvent,
                             onLoadNextPage = onLoadNextPage,
@@ -367,6 +385,7 @@ fun EventsScreen(
                         isMarkingErroneous = state.isMarkingErroneous,
                         isConfirmationOpen = state.erroneousConfirmationEventId != null,
                         confirmationTarget = state.confirmationTarget,
+                        timeZone = businessTimeZone,
                         onCopyId = onCopyEventId,
                         onRequestMarkErroneous = onRequestMarkErroneous,
                         onConfirmMarkErroneous = onConfirmMarkErroneous,
@@ -381,6 +400,7 @@ fun EventsScreen(
         if (state.isDatePickerOpen) {
             EventsDatePickerDialog(
                 initialSelection = state.filter.dateSelection,
+                timeZone = businessTimeZone,
                 onDismissRequest = onCloseDatePicker,
                 onApply = onDateSelectionChanged,
                 onReset = { onDateSelectionChanged(DateSelection.All) },

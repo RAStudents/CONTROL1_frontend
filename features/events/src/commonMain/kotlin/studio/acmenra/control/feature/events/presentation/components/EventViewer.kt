@@ -35,7 +35,7 @@ import org.jetbrains.compose.resources.stringResource
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.events_status_acknowledged
 import studio.acmenra.control.core.ui.generated.resources.events_status_erroneous
-import studio.acmenra.control.core.ui.generated.resources.events_video_download
+import studio.acmenra.control.core.ui.generated.resources.events_video_open
 import studio.acmenra.control.core.ui.generated.resources.events_viewer_category
 import studio.acmenra.control.core.ui.generated.resources.events_viewer_close
 import studio.acmenra.control.core.ui.generated.resources.events_viewer_copy_id
@@ -165,7 +165,7 @@ fun EventViewer(
                         modifier = Modifier.size(AmberDimens.ListIcon),
                     )
                     Spacer(modifier = Modifier.width(AmberDimens.GapSmall))
-                    Text(text = stringResource(Res.string.events_video_download))
+                    Text(text = stringResource(Res.string.events_video_open))
                 }
             }
 

@@ -52,14 +52,7 @@ class AndroidExportFileSaver(
                 true
             }
         } catch (e: Throwable) {
-            runCatching {
-                val fallbackFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), safeFilename)
-                FileOutputStream(fallbackFile).use { out ->
-                    out.write(download.bytes)
-                    out.flush()
-                }
-                true
-            }.getOrDefault(false)
+            false
         }
     }
 

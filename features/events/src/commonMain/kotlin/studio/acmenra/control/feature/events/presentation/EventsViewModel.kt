@@ -19,6 +19,7 @@ import studio.acmenra.control.core.ui.generated.resources.events_export_error_ac
 import studio.acmenra.control.core.ui.generated.resources.events_export_error_generic
 import studio.acmenra.control.core.ui.generated.resources.events_export_error_limit_exceeded
 import studio.acmenra.control.core.ui.generated.resources.events_export_expired_msg
+import studio.acmenra.control.core.ui.generated.resources.events_export_polling_timeout
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_conflict
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_generic_error
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_network_error
@@ -65,9 +66,16 @@ class EventsViewModel(
 
     private var feedSession: EventsFeedSession? = null
     private var feedCollectJob: Job? = null
+    private var feedNoticeJob: Job? = null
+    private var feedFilterOptionsJob: Job? = null
     private var searchDebounceJob: Job? = null
     private var exportObservationJob: Job? = null
+    private var exportSubmissionJob: Job? = null
+    private var downloadExportJob: Job? = null
+    private var acknowledgeJob: Job? = null
+    private var markErroneousJob: Job? = null
     private var filterOptionsJob: Job? = null
+    private var companyGeneration: Long = 0L
     private var filterRequestGeneration: Long = 0L
     private var filterOptionsGeneration: Long = 0L
 
@@ -78,28 +86,56 @@ class EventsViewModel(
         val currentCompany = _state.value.companyId
         if (currentCompany == companyId && feedSession != null) {
             if (_state.value.access != accessCapabilities) {
-                _state.update { it.copy(access = accessCapabilities) }
-                feedSession?.updateAccessCapabilities(accessCapabilities)
-            }
-            if (!accessCapabilities.reportsExport) {
-                exportObservationJob?.cancel()
+                // Fail-closed updates when capabilities change
+                val shouldClearFeed = !accessCapabilities.eventsRead
+                val shouldClearReview = !accessCapabilities.eventsReview
+                val shouldClearExport = !accessCapabilities.reportsExport
+
+                if (shouldClearReview) {
+                    acknowledgeJob?.cancel()
+                    markErroneousJob?.cancel()
+                }
+                if (shouldClearExport) {
+                    exportObservationJob?.cancel()
+                    exportSubmissionJob?.cancel()
+                    downloadExportJob?.cancel()
+                }
+
                 _state.update {
                     it.copy(
-                        isExportModeActive = false,
-                        exportJobStatus = null,
-                        isExportSubmitting = false,
+                        access = accessCapabilities,
+                        visibleEvents = if (shouldClearFeed) emptyList() else it.visibleEvents,
+                        selectedEventId = if (shouldClearFeed) null else it.selectedEventId,
+                        isViewerOpenInCompact = if (shouldClearFeed) false else it.isViewerOpenInCompact,
+                        confirmationTarget = if (shouldClearReview) null else it.confirmationTarget,
+                        isMarkingErroneous = if (shouldClearReview) false else it.isMarkingErroneous,
+                        isExportModeActive = if (shouldClearExport) false else it.isExportModeActive,
+                        exportJobStatus = if (shouldClearExport) null else it.exportJobStatus,
+                        isExportSubmitting = if (shouldClearExport) false else it.isExportSubmitting,
                     )
                 }
+                feedSession?.updateAccessCapabilities(accessCapabilities)
             }
             return
         }
 
-        exportObservationJob?.cancel()
+        // Company changed: cancel all active jobs and increment generation
+        val currentGen = ++companyGeneration
+        feedCollectJob?.cancel()
+        feedNoticeJob?.cancel()
+        feedFilterOptionsJob?.cancel()
         searchDebounceJob?.cancel()
+        exportObservationJob?.cancel()
+        exportSubmissionJob?.cancel()
+        downloadExportJob?.cancel()
+        acknowledgeJob?.cancel()
+        markErroneousJob?.cancel()
         filterOptionsJob?.cancel()
+        feedSession?.close()
+        feedSession = null
 
         _state.update {
-            it.copy(
+            EventsState(
                 companyId = companyId,
                 access = accessCapabilities,
                 isInitialLoading = true,
@@ -121,6 +157,7 @@ class EventsViewModel(
 
     private fun loadFilterOptions(companyId: String) {
         filterOptionsJob?.cancel()
+        val sessionCompanyGen = companyGeneration
         val gen = ++filterOptionsGeneration
 
         filterOptionsJob =
@@ -128,7 +165,10 @@ class EventsViewModel(
                 _state.update { it.copy(isFilterOptionsLoading = true) }
                 try {
                     val options = loadEventFilterOptionsUseCase(companyId)
-                    if (gen == filterOptionsGeneration && _state.value.companyId == companyId) {
+                    if (sessionCompanyGen == companyGeneration &&
+                        gen == filterOptionsGeneration &&
+                        _state.value.companyId == companyId
+                    ) {
                         _state.update {
                             it.copy(
                                 filterOptions = options,
@@ -139,7 +179,7 @@ class EventsViewModel(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
-                    if (gen == filterOptionsGeneration) {
+                    if (sessionCompanyGen == companyGeneration && gen == filterOptionsGeneration) {
                         _state.update { it.copy(isFilterOptionsLoading = false) }
                     }
                 }
@@ -150,8 +190,11 @@ class EventsViewModel(
         val companyId = _state.value.companyId
         if (companyId.isBlank()) return
 
+        val sessionCompanyGen = companyGeneration
         val currentGen = ++filterRequestGeneration
         feedCollectJob?.cancel()
+        feedNoticeJob?.cancel()
+        feedFilterOptionsJob?.cancel()
         feedSession?.close()
 
         val query = EventsQuery(filter = _state.value.filter)
@@ -161,7 +204,7 @@ class EventsViewModel(
         feedCollectJob =
             viewModelScope.launch {
                 session.state.collect { feedState ->
-                    if (currentGen != filterRequestGeneration) return@collect
+                    if (currentGen != filterRequestGeneration || sessionCompanyGen != companyGeneration) return@collect
                     _state.update { current ->
                         current.copy(
                             visibleEvents = feedState.visibleEvents,
@@ -180,6 +223,22 @@ class EventsViewModel(
                             access = feedState.access,
                         )
                     }
+                }
+            }
+
+        feedNoticeJob =
+            viewModelScope.launch {
+                session.connectionNotice.collect { notice ->
+                    if (sessionCompanyGen != companyGeneration) return@collect
+                    _state.update { it.copy(errorNotice = notice) }
+                }
+            }
+
+        feedFilterOptionsJob =
+            viewModelScope.launch {
+                session.filterOptionsInvalidated.collect {
+                    if (sessionCompanyGen != companyGeneration) return@collect
+                    loadFilterOptions(companyId)
                 }
             }
     }
@@ -301,21 +360,28 @@ class EventsViewModel(
     fun acknowledgeEvent(event: Event) {
         if (!_state.value.access.canAcknowledge || !event.canAcknowledge(_state.value.access)) return
         if (_state.value.pendingAckIds.contains(event.id)) return
-        val companyId = _state.value.companyId
+        val currentCompanyGen = companyGeneration
+        val requestCompanyId = _state.value.companyId
+        val requestSession = feedSession ?: return
 
-        feedSession?.markOptimisticAckPending(event.id)
-        viewModelScope.launch {
-            val result = acknowledgeEventUseCase(companyId, event.id)
-            when (result) {
-                is EventsOperationResult.Success -> {
-                    feedSession?.applyAcknowledged(result.data)
+        requestSession.markOptimisticAckPending(event.id)
+        acknowledgeJob?.cancel()
+        acknowledgeJob =
+            viewModelScope.launch {
+                val result = acknowledgeEventUseCase(requestCompanyId, event.id)
+                if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
+                    return@launch
                 }
-                is EventsOperationResult.Failure -> {
-                    feedSession?.clearOptimisticAckPending(event.id)
-                    _state.update { it.copy(mutationErrorNotice = mapMutationErrorToResource(result.error)) }
+                when (result) {
+                    is EventsOperationResult.Success -> {
+                        requestSession.applyAcknowledged(result.data)
+                    }
+                    is EventsOperationResult.Failure -> {
+                        requestSession.clearOptimisticAckPending(event.id)
+                        _state.update { it.copy(mutationErrorNotice = mapMutationErrorToResource(result.error)) }
+                    }
                 }
             }
-        }
     }
 
     fun requestMarkErroneous(event: Event) {
@@ -360,10 +426,12 @@ class EventsViewModel(
         eventId: String? = null,
         expectedVersion: Long? = null,
     ) {
+        if (!_state.value.access.canAcknowledge) return
         val target = _state.value.confirmationTarget
         val targetEventId = eventId ?: target?.eventId ?: return
         val targetVersion = expectedVersion ?: target?.expectedClassificationVersion ?: return
-        val companyId = _state.value.companyId
+        val currentCompanyGen = companyGeneration
+        val requestCompanyId = _state.value.companyId
 
         _state.update {
             it.copy(
@@ -372,33 +440,38 @@ class EventsViewModel(
             )
         }
 
-        viewModelScope.launch {
-            val idempotencyKey =
-                kotlin.uuid.Uuid
-                    .random()
-                    .toString()
-            val result =
-                markEventErroneousUseCase(
-                    companyId = companyId,
-                    eventId = targetEventId,
-                    expectedClassificationVersion = targetVersion,
-                    idempotencyKey = idempotencyKey,
-                )
+        markErroneousJob?.cancel()
+        markErroneousJob =
+            viewModelScope.launch {
+                val idempotencyKey =
+                    kotlin.uuid.Uuid
+                        .random()
+                        .toString()
+                val result =
+                    markEventErroneousUseCase(
+                        companyId = requestCompanyId,
+                        eventId = targetEventId,
+                        expectedClassificationVersion = targetVersion,
+                        idempotencyKey = idempotencyKey,
+                    )
 
-            when (result) {
-                is EventsOperationResult.Success -> {
-                    _state.update { it.copy(isMarkingErroneous = false) }
+                if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
+                    return@launch
                 }
-                is EventsOperationResult.Failure -> {
-                    _state.update {
-                        it.copy(
-                            isMarkingErroneous = false,
-                            mutationErrorNotice = mapMutationErrorToResource(result.error),
-                        )
+                when (result) {
+                    is EventsOperationResult.Success -> {
+                        _state.update { it.copy(isMarkingErroneous = false) }
+                    }
+                    is EventsOperationResult.Failure -> {
+                        _state.update {
+                            it.copy(
+                                isMarkingErroneous = false,
+                                mutationErrorNotice = mapMutationErrorToResource(result.error),
+                            )
+                        }
                     }
                 }
             }
-        }
     }
 
     fun toggleExportMode() {
@@ -418,8 +491,11 @@ class EventsViewModel(
     fun startExport() {
         if (!_state.value.access.reportsExport) return
         if (_state.value.isExportSubmitting) return
-        val companyId = _state.value.companyId
-        if (companyId.isBlank()) return
+        val requestCompanyId = _state.value.companyId
+        if (requestCompanyId.isBlank()) return
+        val currentCompanyGen = companyGeneration
+
+        _state.update { it.copy(isExportSubmitting = true, exportError = null) }
 
         val request =
             EventsExportRequest(
@@ -432,41 +508,54 @@ class EventsViewModel(
                 .random()
                 .toString()
 
-        viewModelScope.launch {
-            _state.update { it.copy(isExportSubmitting = true, exportError = null) }
-            try {
-                val status = createEventsExportUseCase(companyId, request, idempotencyKey)
-                _state.update {
-                    it.copy(
-                        exportJobStatus = status,
-                        isExportSubmitting = false,
-                    )
-                }
+        exportSubmissionJob?.cancel()
+        exportSubmissionJob =
+            viewModelScope.launch {
+                try {
+                    val status = createEventsExportUseCase(requestCompanyId, request, idempotencyKey)
+                    if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
+                        return@launch
+                    }
+                    _state.update {
+                        it.copy(
+                            exportJobStatus = status,
+                            isExportSubmitting = false,
+                        )
+                    }
 
-                if (status.status == EventsExportStatusCode.QUEUED ||
-                    status.status == EventsExportStatusCode.PROCESSING
-                ) {
-                    observeExport(status.exportId)
-                }
-            } catch (e: Throwable) {
-                _state.update {
-                    it.copy(
-                        isExportSubmitting = false,
-                        exportError = mapExportErrorToResource(e),
-                    )
+                    if (status.status == EventsExportStatusCode.QUEUED ||
+                        status.status == EventsExportStatusCode.PROCESSING
+                    ) {
+                        observeExport(status.exportId, requestCompanyId, currentCompanyGen)
+                    }
+                } catch (e: Throwable) {
+                    if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
+                        return@launch
+                    }
+                    _state.update {
+                        it.copy(
+                            isExportSubmitting = false,
+                            exportError = mapExportErrorToResource(e),
+                        )
+                    }
                 }
             }
-        }
     }
 
-    private fun observeExport(exportId: String) {
-        val companyId = _state.value.companyId
+    private fun observeExport(
+        exportId: String,
+        requestCompanyId: String,
+        currentCompanyGen: Long,
+    ) {
         exportObservationJob?.cancel()
         exportObservationJob =
             viewModelScope.launch {
                 var attempt = 0
                 val maxAttempts = 60
                 while (isActive && attempt < maxAttempts) {
+                    if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
+                        return@launch
+                    }
                     if (!_state.value.access.reportsExport) {
                         _state.update {
                             it.copy(
@@ -480,7 +569,10 @@ class EventsViewModel(
                     val delayMs = (1500L + (attempt * 250L)).coerceAtMost(8000L)
                     delay(delayMs)
                     try {
-                        val status = observeEventsExportStatusUseCase(companyId, exportId)
+                        val status = observeEventsExportStatusUseCase(requestCompanyId, exportId)
+                        if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
+                            return@launch
+                        }
                         _state.update { it.copy(exportJobStatus = status) }
                         if (status.status == EventsExportStatusCode.COMPLETED ||
                             status.status == EventsExportStatusCode.FAILED ||
@@ -489,20 +581,24 @@ class EventsViewModel(
                             return@launch
                         }
                     } catch (e: EventsApiException.ExportExpired) {
-                        _state.update {
-                            it.copy(
-                                exportJobStatus = it.exportJobStatus?.copy(status = EventsExportStatusCode.EXPIRED),
-                                exportError = Res.string.events_export_expired_msg,
-                            )
+                        if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
+                            _state.update {
+                                it.copy(
+                                    exportJobStatus = it.exportJobStatus?.copy(status = EventsExportStatusCode.EXPIRED),
+                                    exportError = Res.string.events_export_expired_msg,
+                                )
+                            }
                         }
                         return@launch
                     } catch (e: EventsApiException.PermissionDenied) {
-                        _state.update {
-                            it.copy(
-                                isExportModeActive = false,
-                                exportJobStatus = null,
-                                exportError = Res.string.events_export_error_access_revoked,
-                            )
+                        if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
+                            _state.update {
+                                it.copy(
+                                    isExportModeActive = false,
+                                    exportJobStatus = null,
+                                    exportError = Res.string.events_export_error_access_revoked,
+                                )
+                            }
                         }
                         return@launch
                     } catch (e: Throwable) {
@@ -511,23 +607,43 @@ class EventsViewModel(
                         }
                     }
                 }
+                if (isActive && attempt >= maxAttempts) {
+                    if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
+                        _state.update {
+                            it.copy(
+                                exportError = Res.string.events_export_polling_timeout,
+                            )
+                        }
+                    }
+                }
             }
     }
 
     fun downloadExport(exportId: String) {
         if (!_state.value.access.reportsExport) return
-        val companyId = _state.value.companyId
-        viewModelScope.launch {
-            try {
-                val download = downloadEventsExportUseCase(companyId, exportId)
-                val saved = exportFileSaver.saveExportFile(download)
-                if (!saved) {
-                    _state.update { it.copy(exportError = Res.string.events_export_download_error) }
+        val requestCompanyId = _state.value.companyId
+        val currentCompanyGen = companyGeneration
+        downloadExportJob?.cancel()
+        downloadExportJob =
+            viewModelScope.launch {
+                try {
+                    val download = downloadEventsExportUseCase(requestCompanyId, exportId)
+                    if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
+                        return@launch
+                    }
+                    val saved = exportFileSaver.saveExportFile(download)
+                    if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
+                        return@launch
+                    }
+                    if (!saved) {
+                        _state.update { it.copy(exportError = Res.string.events_export_download_error) }
+                    }
+                } catch (e: Throwable) {
+                    if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
+                        _state.update { it.copy(exportError = mapExportErrorToResource(e)) }
+                    }
                 }
-            } catch (e: Throwable) {
-                _state.update { it.copy(exportError = mapExportErrorToResource(e)) }
             }
-        }
     }
 
     private fun mapMutationErrorToResource(error: EventsMutationError): StringResource =
@@ -559,6 +675,10 @@ class EventsViewModel(
         _state.update { it.copy(mutationErrorNotice = null) }
     }
 
+    fun dismissErrorNotice() {
+        _state.update { it.copy(errorNotice = null) }
+    }
+
     fun openFilterDialog() {
         _state.update { it.copy(isFilterDialogOpen = true) }
     }
@@ -579,7 +699,13 @@ class EventsViewModel(
         feedSession?.close()
         searchDebounceJob?.cancel()
         feedCollectJob?.cancel()
+        feedNoticeJob?.cancel()
+        feedFilterOptionsJob?.cancel()
         exportObservationJob?.cancel()
+        exportSubmissionJob?.cancel()
+        downloadExportJob?.cancel()
+        acknowledgeJob?.cancel()
+        markErroneousJob?.cancel()
         filterOptionsJob?.cancel()
         super.onCleared()
     }

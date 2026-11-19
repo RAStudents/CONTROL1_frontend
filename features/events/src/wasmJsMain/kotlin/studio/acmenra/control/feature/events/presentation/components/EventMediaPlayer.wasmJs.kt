@@ -93,6 +93,9 @@ actual fun EventMediaPlayer(
 ) {
     var activeVideoId by remember(videoUrl) { mutableStateOf<String?>(null) }
 
+    val isValidHttpsPreview = previewUrl?.startsWith("https://", ignoreCase = true) == true
+    val isValidHttpsVideo = videoUrl?.startsWith("https://", ignoreCase = true) == true
+
     DisposableEffect(videoUrl) {
         onDispose {
             activeVideoId?.let { removeVideo(it) }
@@ -116,7 +119,7 @@ actual fun EventMediaPlayer(
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        if (!videoUrl.isNullOrBlank()) {
+        if (isValidHttpsVideo && !videoUrl.isNullOrBlank()) {
             FilledIconButton(
                 onClick = {
                     activeVideoId?.let { removeVideo(it) }

@@ -25,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import org.jetbrains.compose.resources.StringResource
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
 import studio.acmenra.control.core.ui.generated.resources.Res
@@ -58,7 +59,7 @@ fun EventsExportPanel(
     totalRecords: Int?,
     jobStatus: EventsExportStatus?,
     isSubmitting: Boolean,
-    errorMessage: String?,
+    errorMessage: StringResource?,
     onFormatPresetChanged: (EventsExportFormatPreset) -> Unit,
     onIncludeMediaLinksChanged: (Boolean) -> Unit,
     onStartExport: () -> Unit,
@@ -277,7 +278,7 @@ fun EventsExportPanel(
             // Error display
             errorMessage?.let { err ->
                 Text(
-                    text = err,
+                    text = stringResource(err),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )

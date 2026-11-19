@@ -111,6 +111,11 @@
     <string name="events_viewer_mark_erroneous_conflict">Конфликт версий события. Пожалуйста, проверьте обновлённые данные.</string>
     <string name="events_viewer_mark_erroneous_error">Не удалось пометить событие ошибочным</string>
     <string name="events_viewer_close">Закрыть просмотр</string>
+    <string name="events_mutation_permission_denied">Недостаточно прав для выполнения действия</string>
+    <string name="events_mutation_conflict">Конфликт версий события. Пожалуйста, проверьте обновлённые данные.</string>
+    <string name="events_mutation_payload_mismatch">Ошибка запроса (несоответствие ключа идемпотентности)</string>
+    <string name="events_mutation_network_error">Ошибка сети</string>
+    <string name="events_mutation_generic_error">Не удалось выполнить действие</string>
 
     <!-- Video & Media -->
     <string name="events_video_play">Воспроизвести видео</string>

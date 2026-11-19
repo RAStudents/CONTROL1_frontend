@@ -66,7 +66,7 @@ object RealtimeOverlayReducer {
     ): Pair<RealtimeOverlay, OverlayMembership> {
         val existingEntry = currentOverlay.entries[event.id]
         if (existingEntry != null && existingEntry.eventVersion > event.eventVersion) {
-            // Out of order/older version ignored
+            // Out of order / older version ignored
             return currentOverlay to existingEntry.membership
         }
 
@@ -78,31 +78,24 @@ object RealtimeOverlayReducer {
         val matches = matchesFilter(event, query.filter)
         val membership =
             when {
-                !matches -> {
-                    if (existingInSnapshot != null || existingEntry?.membership == OverlayMembership.INCLUDED) {
-                        OverlayMembership.REMOVED
-                    } else {
-                        OverlayMembership.REMOVED
-                    }
+                !matches -> OverlayMembership.REMOVED
+                snapshotItems.isEmpty() -> OverlayMembership.INCLUDED
+                existingInSnapshot != null || existingEntry?.membership == OverlayMembership.INCLUDED -> {
+                    OverlayMembership.INCLUDED
                 }
                 else -> {
-                    // Fits the filter
-                    if (snapshotItems.isEmpty()) {
-                        OverlayMembership.INCLUDED
-                    } else {
-                        val oldestSnapshot = snapshotItems.last()
-                        val newestSnapshot = snapshotItems.first()
-                        val cmpNewest = compareEvents(event, newestSnapshot, query.filter.searchId)
-                        val cmpOldest = compareEvents(event, oldestSnapshot, query.filter.searchId)
+                    val oldestSnapshot = snapshotItems.last()
+                    val newestSnapshot = snapshotItems.first()
+                    val cmpNewest = compareEvents(event, newestSnapshot, query.filter.searchId)
+                    val cmpOldest = compareEvents(event, oldestSnapshot, query.filter.searchId)
 
-                        when {
-                            // Newer than newest visible item
-                            cmpNewest < 0 -> OverlayMembership.INCLUDED
-                            // Older than oldest snapshot item
-                            cmpOldest > 0 -> OverlayMembership.PENDING_HISTORY
-                            // In between or matches existing
-                            else -> OverlayMembership.INCLUDED
-                        }
+                    when {
+                        // Newer than newest visible item -> queue as pending newer
+                        cmpNewest < 0 -> OverlayMembership.PENDING_NEWER
+                        // Older than oldest snapshot item -> queue as pending history
+                        cmpOldest > 0 -> OverlayMembership.PENDING_HISTORY
+                        // Between existing snapshot range
+                        else -> OverlayMembership.INCLUDED
                     }
                 }
             }
@@ -118,6 +111,33 @@ object RealtimeOverlayReducer {
 
         val newOverlay = currentOverlay.copy(entries = newEntries)
         return newOverlay to membership
+    }
+
+    fun integratePendingNewer(overlay: RealtimeOverlay): RealtimeOverlay {
+        var changed = false
+        val updatedEntries =
+            overlay.entries.mapValues { (_, entry) ->
+                if (entry.membership == OverlayMembership.PENDING_NEWER) {
+                    changed = true
+                    entry.copy(membership = OverlayMembership.INCLUDED)
+                } else {
+                    entry
+                }
+            }
+        return if (changed) overlay.copy(entries = updatedEntries) else overlay
+    }
+
+    fun computePendingCounts(overlay: RealtimeOverlay): Pair<Int, Int> {
+        var newer = 0
+        var history = 0
+        for (entry in overlay.entries.values) {
+            when (entry.membership) {
+                OverlayMembership.PENDING_NEWER -> newer++
+                OverlayMembership.PENDING_HISTORY -> history++
+                else -> {}
+            }
+        }
+        return newer to history
     }
 
     fun computeVisibleEvents(

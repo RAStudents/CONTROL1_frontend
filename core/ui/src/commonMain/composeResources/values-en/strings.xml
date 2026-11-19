@@ -111,6 +111,11 @@
     <string name="events_viewer_mark_erroneous_conflict">Event version conflict. Please review the updated event.</string>
     <string name="events_viewer_mark_erroneous_error">Failed to mark event as erroneous</string>
     <string name="events_viewer_close">Close details</string>
+    <string name="events_mutation_permission_denied">Permission denied</string>
+    <string name="events_mutation_conflict">Event version conflict. Please review the updated event.</string>
+    <string name="events_mutation_payload_mismatch">Request error (idempotency mismatch)</string>
+    <string name="events_mutation_network_error">Network error</string>
+    <string name="events_mutation_generic_error">Failed to complete action</string>
 
     <!-- Video & Media -->
     <string name="events_video_play">Play video</string>

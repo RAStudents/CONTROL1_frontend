@@ -10,6 +10,19 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
+import org.jetbrains.compose.resources.StringResource
+import studio.acmenra.control.core.ui.generated.resources.Res
+import studio.acmenra.control.core.ui.generated.resources.events_export_download_error
+import studio.acmenra.control.core.ui.generated.resources.events_export_error_access_revoked
+import studio.acmenra.control.core.ui.generated.resources.events_export_error_generic
+import studio.acmenra.control.core.ui.generated.resources.events_export_error_limit_exceeded
+import studio.acmenra.control.core.ui.generated.resources.events_export_expired_msg
+import studio.acmenra.control.core.ui.generated.resources.events_mutation_conflict
+import studio.acmenra.control.core.ui.generated.resources.events_mutation_generic_error
+import studio.acmenra.control.core.ui.generated.resources.events_mutation_network_error
+import studio.acmenra.control.core.ui.generated.resources.events_mutation_payload_mismatch
+import studio.acmenra.control.core.ui.generated.resources.events_mutation_permission_denied
+import studio.acmenra.control.feature.events.data.datasource.EventsApiException
 import studio.acmenra.control.feature.events.domain.model.DateFilterUtils
 import studio.acmenra.control.feature.events.domain.model.DateSelection
 import studio.acmenra.control.feature.events.domain.model.Event
@@ -52,6 +65,7 @@ class EventsViewModel(
     private var feedCollectJob: Job? = null
     private var searchDebounceJob: Job? = null
     private var exportObservationJob: Job? = null
+    private var filterRequestGeneration: Long = 0L
 
     fun initialize(
         companyId: String,
@@ -102,6 +116,7 @@ class EventsViewModel(
         val companyId = _state.value.companyId
         if (companyId.isBlank()) return
 
+        val currentGen = ++filterRequestGeneration
         feedCollectJob?.cancel()
         feedSession?.close()
 
@@ -112,6 +127,7 @@ class EventsViewModel(
         feedCollectJob =
             viewModelScope.launch {
                 session.state.collect { feedState ->
+                    if (currentGen != filterRequestGeneration) return@collect
                     _state.update { current ->
                         current.copy(
                             visibleEvents = feedState.visibleEvents,
@@ -153,9 +169,15 @@ class EventsViewModel(
 
     fun onDateSelectionChanged(
         dateSelection: DateSelection,
-        businessTimeZone: TimeZone = TimeZone.currentSystemDefault(),
+        businessTimeZone: TimeZone? = null,
     ) {
-        val (from, to) = DateFilterUtils.dateSelectionToUtcBounds(dateSelection, businessTimeZone)
+        val tz =
+            businessTimeZone
+                ?: _state.value.summary
+                    ?.businessTimezone
+                    ?.let { runCatching { TimeZone.of(it) }.getOrNull() }
+                ?: TimeZone.currentSystemDefault()
+        val (from, to) = DateFilterUtils.dateSelectionToUtcBounds(dateSelection, tz)
         val newFilter =
             _state.value.filter.copy(
                 dateSelection = dateSelection,
@@ -224,6 +246,12 @@ class EventsViewModel(
                 isViewerOpenInCompact = eventId != null,
             )
         }
+        if (eventId != null) {
+            val event = _state.value.visibleEvents.firstOrNull { it.id == eventId }
+            if (event != null && event.canAcknowledge(_state.value.access)) {
+                acknowledgeEvent(event)
+            }
+        }
     }
 
     fun closeViewerCompact() {
@@ -239,14 +267,7 @@ class EventsViewModel(
             val result = acknowledgeEventUseCase(companyId, event.id)
             if (result is EventsOperationResult.Failure) {
                 feedSession?.clearOptimisticAckPending(event.id)
-                val msg =
-                    when (result.error) {
-                        is EventsMutationError.PermissionDenied -> "Permission denied"
-                        is EventsMutationError.StateConflict -> "Event version conflict"
-                        is EventsMutationError.Network -> "Network error"
-                        else -> "Failed to acknowledge event"
-                    }
-                _state.update { it.copy(mutationErrorNotice = msg) }
+                _state.update { it.copy(mutationErrorNotice = mapMutationErrorToResource(result.error)) }
             }
         }
     }
@@ -291,19 +312,10 @@ class EventsViewModel(
                     _state.update { it.copy(isMarkingErroneous = false) }
                 }
                 is EventsOperationResult.Failure -> {
-                    val msg =
-                        when (result.error) {
-                            is EventsMutationError.StateConflict ->
-                                "Event state conflict. Please review the updated event."
-                            is EventsMutationError.PermissionDenied -> "Permission denied to mark erroneous"
-                            is EventsMutationError.PayloadMismatch -> "Request error (idempotency mismatch)"
-                            is EventsMutationError.Network -> "Network error"
-                            else -> "Failed to mark event as erroneous"
-                        }
                     _state.update {
                         it.copy(
                             isMarkingErroneous = false,
-                            mutationErrorNotice = msg,
+                            mutationErrorNotice = mapMutationErrorToResource(result.error),
                         )
                     }
                 }
@@ -325,6 +337,7 @@ class EventsViewModel(
 
     @OptIn(kotlin.uuid.ExperimentalUuidApi::class)
     fun startExport() {
+        if (_state.value.isExportSubmitting) return
         val companyId = _state.value.companyId
         if (companyId.isBlank()) return
 
@@ -359,7 +372,7 @@ class EventsViewModel(
                 _state.update {
                     it.copy(
                         isExportSubmitting = false,
-                        exportError = e.message ?: "Failed to create export",
+                        exportError = mapExportErrorToResource(e),
                     )
                 }
             }
@@ -396,13 +409,30 @@ class EventsViewModel(
                 val download = downloadEventsExportUseCase(companyId, exportId)
                 val saved = exportFileSaver.saveExportFile(download)
                 if (!saved) {
-                    _state.update { it.copy(exportError = "Failed to save downloaded file") }
+                    _state.update { it.copy(exportError = Res.string.events_export_download_error) }
                 }
             } catch (e: Throwable) {
-                _state.update { it.copy(exportError = e.message ?: "Failed to download export") }
+                _state.update { it.copy(exportError = mapExportErrorToResource(e)) }
             }
         }
     }
+
+    private fun mapMutationErrorToResource(error: EventsMutationError): StringResource =
+        when (error) {
+            is EventsMutationError.PermissionDenied -> Res.string.events_mutation_permission_denied
+            is EventsMutationError.StateConflict -> Res.string.events_mutation_conflict
+            is EventsMutationError.PayloadMismatch -> Res.string.events_mutation_payload_mismatch
+            is EventsMutationError.Network -> Res.string.events_mutation_network_error
+            is EventsMutationError.Server -> Res.string.events_mutation_generic_error
+        }
+
+    private fun mapExportErrorToResource(throwable: Throwable): StringResource =
+        when (throwable) {
+            is EventsApiException.PermissionDenied -> Res.string.events_export_error_access_revoked
+            is EventsApiException.SnapshotTooLarge -> Res.string.events_export_error_limit_exceeded
+            is EventsApiException.ExportExpired -> Res.string.events_export_expired_msg
+            else -> Res.string.events_export_error_generic
+        }
 
     fun copyEventId(eventId: String) {
         _state.update { it.copy(clipboardNotice = eventId) }

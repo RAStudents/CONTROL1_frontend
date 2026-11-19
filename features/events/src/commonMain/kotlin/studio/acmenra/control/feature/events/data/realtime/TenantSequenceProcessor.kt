@@ -7,6 +7,10 @@ sealed interface SequenceValidationResult {
 
     data object Duplicate : SequenceValidationResult
 
+    data class IntegrityViolation(
+        val reason: String,
+    ) : SequenceValidationResult
+
     data class GapDetected(
         val expected: Long,
         val received: Long,
@@ -24,6 +28,35 @@ class TenantSequenceProcessor(
     val currentSequence: Long get() = lastProcessedSequence
     val currentReplayId: Long get() = activeReplayId
 
+    private val maxRecentHashes = 1000
+    private val recentHashes = LinkedHashMap<Long, String>()
+
+    private fun recordHash(
+        sequence: Long,
+        hash: String,
+    ) {
+        recentHashes.remove(sequence)
+        recentHashes[sequence] = hash
+        if (recentHashes.size > maxRecentHashes) {
+            val iterator = recentHashes.keys.iterator()
+            if (iterator.hasNext()) {
+                iterator.next()
+                iterator.remove()
+            }
+        }
+    }
+
+    fun startReplay(
+        replayId: Long,
+        afterSequence: Long,
+    ) {
+        require(isValidSafeInteger(replayId)) { "ReplayId $replayId exceeds safe integer bounds" }
+        require(isValidSafeInteger(afterSequence)) { "Sequence $afterSequence exceeds safe integer bounds" }
+        activeReplayId = replayId
+        lastProcessedSequence = afterSequence
+        recentHashes.clear()
+    }
+
     fun resetSequence(
         newSequence: Long,
         newReplayId: Long = activeReplayId,
@@ -32,17 +65,21 @@ class TenantSequenceProcessor(
         require(isValidSafeInteger(newReplayId)) { "ReplayId $newReplayId exceeds safe integer bounds" }
         lastProcessedSequence = newSequence
         activeReplayId = newReplayId
+        recentHashes.clear()
     }
 
-    fun nextReplayId(): Long {
+    fun nextReplayGeneration(): Long {
         val next = checkedAdd(activeReplayId, 1L)
         activeReplayId = next
         return next
     }
 
+    fun nextReplayId(): Long = nextReplayGeneration()
+
     fun checkIncomingSequence(
         incomingReplayId: Long,
         incomingSequence: Long,
+        payloadSha256: String? = null,
     ): SequenceValidationResult {
         if (!isValidSafeInteger(incomingReplayId) || !isValidSafeInteger(incomingSequence)) {
             return SequenceValidationResult.InvalidSequence("Value exceeds MAX_SAFE_JS_INTEGER or is negative")
@@ -61,17 +98,33 @@ class TenantSequenceProcessor(
             }
 
         return when {
-            incomingSequence <= lastProcessedSequence -> SequenceValidationResult.Duplicate
+            incomingSequence <= lastProcessedSequence -> {
+                if (payloadSha256 != null && recentHashes.containsKey(incomingSequence)) {
+                    val existingHash = recentHashes[incomingSequence]
+                    if (existingHash != null && existingHash != payloadSha256) {
+                        return SequenceValidationResult.IntegrityViolation(
+                            "Payload SHA256 mismatch for sequence $incomingSequence: expected $existingHash, got $payloadSha256",
+                        )
+                    }
+                }
+                SequenceValidationResult.Duplicate
+            }
             incomingSequence == expectedNext -> SequenceValidationResult.InOrder
             else -> SequenceValidationResult.GapDetected(expected = expectedNext, received = incomingSequence)
         }
     }
 
-    fun advanceSequence(appliedSequence: Long) {
+    fun advanceSequence(
+        appliedSequence: Long,
+        payloadSha256: String? = null,
+    ) {
         require(appliedSequence == checkedAdd(lastProcessedSequence, 1L)) {
             "Cannot advance to $appliedSequence: expected ${lastProcessedSequence + 1}"
         }
         lastProcessedSequence = appliedSequence
+        if (payloadSha256 != null) {
+            recordHash(appliedSequence, payloadSha256)
+        }
     }
 
     companion object {

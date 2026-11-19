@@ -1,5 +1,6 @@
 package studio.acmenra.control.feature.events.presentation
 
+import org.jetbrains.compose.resources.StringResource
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
 import studio.acmenra.control.feature.events.domain.model.EventsExportFormatPreset
@@ -38,12 +39,12 @@ data class EventsState(
     val exportIncludeMediaLinks: Boolean = false,
     val exportJobStatus: EventsExportStatus? = null,
     val isExportSubmitting: Boolean = false,
-    val exportError: String? = null,
+    val exportError: StringResource? = null,
     val isFilterDialogOpen: Boolean = false,
     val isDatePickerOpen: Boolean = false,
     val erroneousConfirmationEventId: String? = null,
     val isMarkingErroneous: Boolean = false,
-    val mutationErrorNotice: String? = null,
+    val mutationErrorNotice: StringResource? = null,
     val clipboardNotice: String? = null,
 ) {
     val selectedEvent: Event?

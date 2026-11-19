@@ -101,7 +101,9 @@ class EventsRepositoryImpl(
                             filterCache[companyId] = CachedFilterOptions(options = mapped, etag = freshResult.etag)
                             mapped
                         } else {
-                            EventsFilterOptions()
+                            throw IllegalStateException(
+                                "Server returned NotModified (304) on unconditional filter options request",
+                            )
                         }
                     }
                 }

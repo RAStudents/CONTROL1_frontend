@@ -2,12 +2,14 @@ package studio.acmenra.control.feature.events.presentation
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
 import org.jetbrains.compose.resources.StringResource
@@ -65,7 +67,9 @@ class EventsViewModel(
     private var feedCollectJob: Job? = null
     private var searchDebounceJob: Job? = null
     private var exportObservationJob: Job? = null
+    private var filterOptionsJob: Job? = null
     private var filterRequestGeneration: Long = 0L
+    private var filterOptionsGeneration: Long = 0L
 
     fun initialize(
         companyId: String,
@@ -77,8 +81,22 @@ class EventsViewModel(
                 _state.update { it.copy(access = accessCapabilities) }
                 feedSession?.updateAccessCapabilities(accessCapabilities)
             }
+            if (!accessCapabilities.reportsExport) {
+                exportObservationJob?.cancel()
+                _state.update {
+                    it.copy(
+                        isExportModeActive = false,
+                        exportJobStatus = null,
+                        isExportSubmitting = false,
+                    )
+                }
+            }
             return
         }
+
+        exportObservationJob?.cancel()
+        searchDebounceJob?.cancel()
+        filterOptionsJob?.cancel()
 
         _state.update {
             it.copy(
@@ -88,6 +106,12 @@ class EventsViewModel(
                 initialLoadError = null,
                 visibleEvents = emptyList(),
                 selectedEventId = null,
+                filter = EventsFilter(),
+                filterOptions = null,
+                isExportModeActive = false,
+                exportJobStatus = null,
+                isExportSubmitting = false,
+                confirmationTarget = null,
             )
         }
 
@@ -96,20 +120,30 @@ class EventsViewModel(
     }
 
     private fun loadFilterOptions(companyId: String) {
-        viewModelScope.launch {
-            _state.update { it.copy(isFilterOptionsLoading = true) }
-            try {
-                val options = loadEventFilterOptionsUseCase(companyId)
-                _state.update {
-                    it.copy(
-                        filterOptions = options,
-                        isFilterOptionsLoading = false,
-                    )
+        filterOptionsJob?.cancel()
+        val gen = ++filterOptionsGeneration
+
+        filterOptionsJob =
+            viewModelScope.launch {
+                _state.update { it.copy(isFilterOptionsLoading = true) }
+                try {
+                    val options = loadEventFilterOptionsUseCase(companyId)
+                    if (gen == filterOptionsGeneration && _state.value.companyId == companyId) {
+                        _state.update {
+                            it.copy(
+                                filterOptions = options,
+                                isFilterOptionsLoading = false,
+                            )
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    if (gen == filterOptionsGeneration) {
+                        _state.update { it.copy(isFilterOptionsLoading = false) }
+                    }
                 }
-            } catch (e: Throwable) {
-                _state.update { it.copy(isFilterOptionsLoading = false) }
             }
-        }
     }
 
     private fun restartFeedSession() {
@@ -171,12 +205,14 @@ class EventsViewModel(
         dateSelection: DateSelection,
         businessTimeZone: TimeZone? = null,
     ) {
-        val tz =
-            businessTimeZone
-                ?: _state.value.summary
-                    ?.businessTimezone
-                    ?.let { runCatching { TimeZone.of(it) }.getOrNull() }
-                ?: TimeZone.currentSystemDefault()
+        val tzId =
+            businessTimeZone?.id
+                ?: _state.value.summary?.businessTimezone
+        val tz = tzId?.let { runCatching { TimeZone.of(it) }.getOrNull() }
+        if (tz == null) {
+            // Strictly require business_timezone to avoid silently falling back to system timezone
+            return
+        }
         val (from, to) = DateFilterUtils.dateSelectionToUtcBounds(dateSelection, tz)
         val newFilter =
             _state.value.filter.copy(
@@ -235,6 +271,10 @@ class EventsViewModel(
         feedSession?.refresh()
     }
 
+    fun retryRebootstrap() {
+        feedSession?.retryRebootstrap()
+    }
+
     fun onViewportAtTop() {
         feedSession?.onViewportAtTop()
     }
@@ -260,36 +300,74 @@ class EventsViewModel(
 
     fun acknowledgeEvent(event: Event) {
         if (!_state.value.access.canAcknowledge || !event.canAcknowledge(_state.value.access)) return
+        if (_state.value.pendingAckIds.contains(event.id)) return
         val companyId = _state.value.companyId
 
         feedSession?.markOptimisticAckPending(event.id)
         viewModelScope.launch {
             val result = acknowledgeEventUseCase(companyId, event.id)
-            if (result is EventsOperationResult.Failure) {
-                feedSession?.clearOptimisticAckPending(event.id)
-                _state.update { it.copy(mutationErrorNotice = mapMutationErrorToResource(result.error)) }
+            when (result) {
+                is EventsOperationResult.Success -> {
+                    feedSession?.applyAcknowledged(result.data)
+                }
+                is EventsOperationResult.Failure -> {
+                    feedSession?.clearOptimisticAckPending(event.id)
+                    _state.update { it.copy(mutationErrorNotice = mapMutationErrorToResource(result.error)) }
+                }
             }
         }
     }
 
-    fun requestMarkErroneous(eventId: String) {
+    fun requestMarkErroneous(event: Event) {
         if (!_state.value.access.canAcknowledge) return
-        _state.update { it.copy(erroneousConfirmationEventId = eventId) }
+        _state.update {
+            it.copy(
+                confirmationTarget =
+                    ErroneousConfirmationTarget(
+                        eventId = event.id,
+                        expectedClassificationVersion = event.classificationVersion,
+                        eventTypeName = event.eventTypeName,
+                    ),
+            )
+        }
+    }
+
+    fun requestMarkErroneous(eventId: String) {
+        val event = _state.value.visibleEvents.firstOrNull { it.id == eventId }
+        if (event != null) {
+            requestMarkErroneous(event)
+        } else {
+            if (!_state.value.access.canAcknowledge) return
+            _state.update {
+                it.copy(
+                    confirmationTarget =
+                        ErroneousConfirmationTarget(
+                            eventId = eventId,
+                            expectedClassificationVersion = 1L,
+                            eventTypeName = "",
+                        ),
+                )
+            }
+        }
     }
 
     fun cancelMarkErroneous() {
-        _state.update { it.copy(erroneousConfirmationEventId = null) }
+        _state.update { it.copy(confirmationTarget = null) }
     }
 
     @OptIn(kotlin.uuid.ExperimentalUuidApi::class)
     fun confirmMarkErroneous(
-        eventId: String,
-        expectedVersion: Long,
+        eventId: String? = null,
+        expectedVersion: Long? = null,
     ) {
+        val target = _state.value.confirmationTarget
+        val targetEventId = eventId ?: target?.eventId ?: return
+        val targetVersion = expectedVersion ?: target?.expectedClassificationVersion ?: return
         val companyId = _state.value.companyId
+
         _state.update {
             it.copy(
-                erroneousConfirmationEventId = null,
+                confirmationTarget = null,
                 isMarkingErroneous = true,
             )
         }
@@ -302,8 +380,8 @@ class EventsViewModel(
             val result =
                 markEventErroneousUseCase(
                     companyId = companyId,
-                    eventId = eventId,
-                    expectedClassificationVersion = expectedVersion,
+                    eventId = targetEventId,
+                    expectedClassificationVersion = targetVersion,
                     idempotencyKey = idempotencyKey,
                 )
 
@@ -324,6 +402,7 @@ class EventsViewModel(
     }
 
     fun toggleExportMode() {
+        if (!_state.value.access.reportsExport) return
         _state.update { it.copy(isExportModeActive = !it.isExportModeActive) }
     }
 
@@ -337,6 +416,7 @@ class EventsViewModel(
 
     @OptIn(kotlin.uuid.ExperimentalUuidApi::class)
     fun startExport() {
+        if (!_state.value.access.reportsExport) return
         if (_state.value.isExportSubmitting) return
         val companyId = _state.value.companyId
         if (companyId.isBlank()) return
@@ -384,8 +464,21 @@ class EventsViewModel(
         exportObservationJob?.cancel()
         exportObservationJob =
             viewModelScope.launch {
-                while (true) {
-                    delay(1000L)
+                var attempt = 0
+                val maxAttempts = 60
+                while (isActive && attempt < maxAttempts) {
+                    if (!_state.value.access.reportsExport) {
+                        _state.update {
+                            it.copy(
+                                isExportModeActive = false,
+                                exportJobStatus = null,
+                            )
+                        }
+                        return@launch
+                    }
+                    attempt++
+                    val delayMs = (1500L + (attempt * 250L)).coerceAtMost(8000L)
+                    delay(delayMs)
                     try {
                         val status = observeEventsExportStatusUseCase(companyId, exportId)
                         _state.update { it.copy(exportJobStatus = status) }
@@ -393,16 +486,36 @@ class EventsViewModel(
                             status.status == EventsExportStatusCode.FAILED ||
                             status.status == EventsExportStatusCode.EXPIRED
                         ) {
-                            break
+                            return@launch
                         }
+                    } catch (e: EventsApiException.ExportExpired) {
+                        _state.update {
+                            it.copy(
+                                exportJobStatus = it.exportJobStatus?.copy(status = EventsExportStatusCode.EXPIRED),
+                                exportError = Res.string.events_export_expired_msg,
+                            )
+                        }
+                        return@launch
+                    } catch (e: EventsApiException.PermissionDenied) {
+                        _state.update {
+                            it.copy(
+                                isExportModeActive = false,
+                                exportJobStatus = null,
+                                exportError = Res.string.events_export_error_access_revoked,
+                            )
+                        }
+                        return@launch
                     } catch (e: Throwable) {
-                        // transient
+                        if (e.message?.contains("403") == true || e.message?.contains("410") == true) {
+                            return@launch
+                        }
                     }
                 }
             }
     }
 
     fun downloadExport(exportId: String) {
+        if (!_state.value.access.reportsExport) return
         val companyId = _state.value.companyId
         viewModelScope.launch {
             try {
@@ -467,6 +580,7 @@ class EventsViewModel(
         searchDebounceJob?.cancel()
         feedCollectJob?.cancel()
         exportObservationJob?.cancel()
+        filterOptionsJob?.cancel()
         super.onCleared()
     }
 }

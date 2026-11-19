@@ -58,6 +58,7 @@ import studio.acmenra.control.core.ui.theme.AmberCorners
 import studio.acmenra.control.core.ui.theme.AmberDimens
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementStatus
+import studio.acmenra.control.feature.events.presentation.ErroneousConfirmationTarget
 
 @Composable
 fun EventViewer(
@@ -73,6 +74,7 @@ fun EventViewer(
     onOpenVideo: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
     timeZone: TimeZone = TimeZone.currentSystemDefault(),
+    confirmationTarget: ErroneousConfirmationTarget? = null,
 ) {
     if (event == null) {
         Card(
@@ -283,6 +285,8 @@ fun EventViewer(
 
     // Mark Erroneous Confirmation Dialog
     if (isConfirmationOpen) {
+        val targetId = confirmationTarget?.eventId ?: event.id
+        val targetVersion = confirmationTarget?.expectedClassificationVersion ?: event.classificationVersion
         AlertDialog(
             onDismissRequest = onCancelMarkErroneous,
             shape = RoundedCornerShape(AmberCorners.ExtraLarge),
@@ -300,7 +304,9 @@ fun EventViewer(
             },
             confirmButton = {
                 Button(
-                    onClick = { onConfirmMarkErroneous(event.id, event.classificationVersion) },
+                    onClick = {
+                        onConfirmMarkErroneous(targetId, targetVersion)
+                    },
                     colors =
                         ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.error,

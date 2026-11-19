@@ -13,6 +13,12 @@ import studio.acmenra.control.feature.events.domain.model.EventsSummary
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 
+data class ErroneousConfirmationTarget(
+    val eventId: String,
+    val expectedClassificationVersion: Long,
+    val eventTypeName: String,
+)
+
 data class EventsState(
     val companyId: String = "",
     val access: EventsAccessCapabilities = EventsAccessCapabilities(),
@@ -42,11 +48,13 @@ data class EventsState(
     val exportError: StringResource? = null,
     val isFilterDialogOpen: Boolean = false,
     val isDatePickerOpen: Boolean = false,
-    val erroneousConfirmationEventId: String? = null,
+    val confirmationTarget: ErroneousConfirmationTarget? = null,
     val isMarkingErroneous: Boolean = false,
     val mutationErrorNotice: StringResource? = null,
     val clipboardNotice: String? = null,
 ) {
+    val erroneousConfirmationEventId: String?
+        get() = confirmationTarget?.eventId
     val selectedEvent: Event?
         get() = visibleEvents.firstOrNull { it.id == selectedEventId }
 

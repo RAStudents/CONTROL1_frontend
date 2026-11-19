@@ -124,6 +124,7 @@
     <string name="events_video_loading">Загрузка видео...</string>
     <string name="events_video_unavailable">Видео недоступно</string>
     <string name="events_video_retry">Повторить попытку</string>
+    <string name="events_video_open">Открыть видео</string>
     <string name="events_video_download">Скачать видео</string>
     <string name="events_video_download_starting">Начало загрузки...</string>
     <string name="events_video_download_success">Загрузка видео завершена</string>
@@ -163,6 +164,11 @@
     <string name="events_error_snapshot_too_large">Слишком много событий. Пожалуйста, сузьте фильтр или период.</string>
     <string name="events_error_apply_suggested">Применить предложенный период</string>
     <string name="events_error_filter_invalid">Недопустимые параметры фильтрации. Сброс некорректных параметров.</string>
+    <string name="events_connection_failed_title">Ошибка соединения</string>
+    <string name="events_connection_failed_3_attempts">Не удалось подключиться к серверу реального времени после 3 попыток.</string>
+    <string name="events_http_failed_title">Ошибка запроса</string>
+    <string name="events_http_failed_3_attempts">Не удалось загрузить данные после 3 попыток. Пожалуйста, повторите позже.</string>
+    <string name="events_export_polling_timeout">Время ожидания подготовки экспорта истекло. Пожалуйста, повторите попытку позже.</string>
 
     <!-- Realtime Connection State -->
     <string name="events_ws_connecting">Подключение к ленте...</string>

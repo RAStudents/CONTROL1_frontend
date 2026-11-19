@@ -103,10 +103,8 @@ class KtorEventsWebSocketDataSource(
     override val incomingFrames: Flow<IncomingWsFrame> = framesChannel.receiveAsFlow()
 
     private var sessionJob: Job? = null
-    private var heartbeatJob: Job? = null
     private var outgoingChannel: Channel<Frame>? = null
     private var lastConfirmedSeq: Long = 0L
-    private var explicitCloseReason: WsCloseReason? = null
 
     private fun drainFramesChannel() {
         while (framesChannel.tryReceive().isSuccess) {
@@ -125,10 +123,8 @@ class KtorEventsWebSocketDataSource(
     ) {
         val oldJob = sessionJob
         if (oldJob != null && oldJob.isActive) {
-            explicitCloseReason = WsCloseReason.REPLACED
-            oldJob.cancel()
+            oldJob.cancel(CancellationException(WsCloseReason.REPLACED.name))
         }
-        heartbeatJob?.cancel()
         outgoingChannel?.close()
         drainFramesChannel()
         lastConfirmedSeq = afterSequence
@@ -140,6 +136,8 @@ class KtorEventsWebSocketDataSource(
                 val url = buildWsUrl(companyId)
                 var disconnectReason = WsCloseReason.REMOTE_CLOSE
                 var disconnectMessage: String? = null
+                var localHeartbeatJob: Job? = null
+                var localOutgoingJob: Job? = null
                 try {
                     realtimeClient.webSocket(urlString = url) {
                         // Send AUTH frame as the very first client message
@@ -152,7 +150,7 @@ class KtorEventsWebSocketDataSource(
                         send(Frame.Text(json.encodeToString(authFrame)))
 
                         // Start outgoing pump
-                        val outgoingJob =
+                        localOutgoingJob =
                             launch {
                                 for (frame in outChan) {
                                     send(frame)
@@ -161,7 +159,7 @@ class KtorEventsWebSocketDataSource(
 
                         // Start Heartbeat loop: every 25s
                         var missedAcks = 0
-                        heartbeatJob =
+                        localHeartbeatJob =
                             launch {
                                 while (isActive) {
                                     delay(25_000L)
@@ -224,22 +222,26 @@ class KtorEventsWebSocketDataSource(
                                 }
                             }
                         }
-                        outgoingJob.cancel()
-                        heartbeatJob?.cancel()
+                        localOutgoingJob.cancel()
+                        localHeartbeatJob.cancel()
                     }
                 } catch (e: CancellationException) {
-                    disconnectReason = explicitCloseReason ?: WsCloseReason.SESSION_CLOSED
+                    disconnectReason =
+                        when (e.message) {
+                            WsCloseReason.REPLACED.name -> WsCloseReason.REPLACED
+                            WsCloseReason.SESSION_CLOSED.name -> WsCloseReason.SESSION_CLOSED
+                            else -> WsCloseReason.SESSION_CLOSED
+                        }
                     disconnectMessage = "Connection cancelled: $disconnectReason"
                     throw e
                 } catch (e: Throwable) {
                     disconnectReason = WsCloseReason.NETWORK_ERROR
                     disconnectMessage = e.message ?: "Socket error"
                 } finally {
-                    heartbeatJob?.cancel()
+                    localHeartbeatJob?.cancel()
+                    localOutgoingJob?.cancel()
                     outChan.close()
-                    val finalReason = explicitCloseReason ?: disconnectReason
-                    explicitCloseReason = null
-                    onDisconnected(finalReason, disconnectMessage)
+                    onDisconnected(disconnectReason, disconnectMessage)
                 }
             }
     }
@@ -249,20 +251,19 @@ class KtorEventsWebSocketDataSource(
         afterSequence: Long,
     ) {
         val frame = ReplayRequestFrameDto(replayId = replayId, afterSequence = afterSequence)
-        outgoingChannel?.send(Frame.Text(json.encodeToString(frame)))
+        runCatching { outgoingChannel?.send(Frame.Text(json.encodeToString(frame))) }
     }
 
     override suspend fun sendHeartbeat(clientConfirmedSeq: Long) {
         lastConfirmedSeq = clientConfirmedSeq
         val frame = HeartbeatFrameDto(clientConfirmedSeq = clientConfirmedSeq)
-        outgoingChannel?.send(Frame.Text(json.encodeToString(frame)))
+        runCatching { outgoingChannel?.send(Frame.Text(json.encodeToString(frame))) }
     }
 
     override suspend fun disconnect() {
-        explicitCloseReason = WsCloseReason.SESSION_CLOSED
-        heartbeatJob?.cancel()
-        sessionJob?.cancel()
+        val oldJob = sessionJob
         sessionJob = null
+        oldJob?.cancel(CancellationException(WsCloseReason.SESSION_CLOSED.name))
         outgoingChannel?.close()
         outgoingChannel = null
         drainFramesChannel()

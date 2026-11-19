@@ -124,6 +124,7 @@
     <string name="events_video_loading">Loading video...</string>
     <string name="events_video_unavailable">Video unavailable</string>
     <string name="events_video_retry">Retry video</string>
+    <string name="events_video_open">Open video</string>
     <string name="events_video_download">Download video</string>
     <string name="events_video_download_starting">Starting download...</string>
     <string name="events_video_download_success">Video download completed</string>
@@ -163,6 +164,11 @@
     <string name="events_error_snapshot_too_large">Too many events found. Please narrow down your search or date range.</string>
     <string name="events_error_apply_suggested">Apply suggested range</string>
     <string name="events_error_filter_invalid">Invalid filter criteria. Resetting invalid filters.</string>
+    <string name="events_connection_failed_title">Connection error</string>
+    <string name="events_connection_failed_3_attempts">Failed to connect to real-time server after 3 attempts.</string>
+    <string name="events_http_failed_title">Request failed</string>
+    <string name="events_http_failed_3_attempts">Failed to load data after 3 attempts. Please try again later.</string>
+    <string name="events_export_polling_timeout">Export preparation timed out. Please try again later.</string>
 
     <!-- Realtime Connection State -->
     <string name="events_ws_connecting">Connecting...</string>

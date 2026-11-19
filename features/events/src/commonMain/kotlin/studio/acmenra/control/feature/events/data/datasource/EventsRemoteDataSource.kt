@@ -103,6 +103,7 @@ sealed class EventsApiException(
     ) : EventsApiException(message)
 
     class PermissionDenied(
+        val reasonCode: String? = null,
         message: String = "Permission denied",
     ) : EventsApiException(message)
 

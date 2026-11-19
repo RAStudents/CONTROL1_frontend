@@ -32,7 +32,13 @@ object SafeJsLongSerializer : KSerializer<Long> {
     override fun deserialize(decoder: Decoder): Long {
         if (decoder is JsonDecoder) {
             val element = decoder.decodeJsonElement()
-            val raw = element.jsonPrimitive.content
+            val primitive = element.jsonPrimitive
+            if (primitive.isString) {
+                throw SerializationException(
+                    "Expected JSON number for SafeJsLong, but got string: \"${primitive.content}\"",
+                )
+            }
+            val raw = primitive.content
             if (raw.contains('.') || raw.contains('e', ignoreCase = true) || raw.contains('E')) {
                 throw SerializationException("Float/exponent not allowed for safe integer: $raw")
             }
@@ -72,7 +78,13 @@ object SafeJsNullableLongSerializer : KSerializer<Long?> {
         if (decoder is JsonDecoder) {
             val element = decoder.decodeJsonElement()
             if (element is JsonNull) return null
-            val raw = element.jsonPrimitive.content
+            val primitive = element.jsonPrimitive
+            if (primitive.isString) {
+                throw SerializationException(
+                    "Expected JSON number for SafeJsNullableLong, but got string: \"${primitive.content}\"",
+                )
+            }
+            val raw = primitive.content
             if (raw.contains('.') || raw.contains('e', ignoreCase = true) || raw.contains('E')) {
                 throw SerializationException("Float/exponent not allowed for safe integer: $raw")
             }

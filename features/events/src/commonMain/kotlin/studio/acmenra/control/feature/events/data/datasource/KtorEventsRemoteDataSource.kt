@@ -228,7 +228,7 @@ class KtorEventsRemoteDataSource(
                     "SUPPORT_GRANT_REVOKED",
                 )
             -> {
-                throw EventsApiException.PermissionDenied()
+                throw EventsApiException.PermissionDenied(reasonCode = code)
             }
             response.status == HttpStatusCode.Gone -> {
                 throw EventsApiException.SnapshotExpired()
@@ -237,7 +237,10 @@ class KtorEventsRemoteDataSource(
                 throw EventsApiException.StateConflict(latestEvent = details?.latestEvent)
             }
             response.status == HttpStatusCode.Forbidden -> {
-                throw EventsApiException.PermissionDenied()
+                throw EventsApiException.PermissionDenied(
+                    reasonCode =
+                        code.takeIf { it != "403" } ?: "PERMISSION_DENIED",
+                )
             }
             else -> {
                 throw EventsApiException.Generic(

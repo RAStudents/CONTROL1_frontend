@@ -6,8 +6,11 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class EventDto(
     @SerialName("id") val id: String,
+    @Serializable(with = SafeJsLongSerializer::class)
     @SerialName("event_version") val eventVersion: Long,
+    @Serializable(with = SafeJsLongSerializer::class)
     @SerialName("classification_version") val classificationVersion: Long,
+    @Serializable(with = SafeJsLongSerializer::class)
     @SerialName("acknowledgement_version") val acknowledgementVersion: Long,
     @SerialName("event_type_id") val eventTypeId: String,
     @SerialName("event_type_name") val eventTypeName: String,
@@ -33,6 +36,7 @@ data class EventsPageDto(
     @SerialName("next_cursor") val nextCursor: String? = null,
     @SerialName("has_more") val hasMore: Boolean = false,
     @SerialName("total_count") val totalCount: Int = 0,
+    @Serializable(with = SafeJsLongSerializer::class)
     @SerialName("as_of_sequence") val asOfSequence: Long = 0L,
 )
 
@@ -56,6 +60,7 @@ data class DevicesStatusSummaryDto(
 data class EventsSummaryDto(
     @SerialName("business_timezone") val businessTimezone: String,
     @SerialName("business_date") val businessDate: String,
+    @Serializable(with = SafeJsLongSerializer::class)
     @SerialName("summary_as_of_sequence") val summaryAsOfSequence: Long,
     @SerialName("today_events_count") val todayEventsCount: Int = 0,
     @SerialName("categories") val categories: List<CategoryScoreDto> = emptyList(),
@@ -64,6 +69,7 @@ data class EventsSummaryDto(
 
 @Serializable
 data class EventsBootstrapDto(
+    @Serializable(with = SafeJsLongSerializer::class)
     @SerialName("stream_cursor") val streamCursor: Long,
     @SerialName("events") val events: EventsPageDto,
     @SerialName("summary") val summary: EventsSummaryDto,
@@ -98,6 +104,7 @@ data class EventsFilterOptionsDto(
 
 @Serializable
 data class MarkErroneousRequestDto(
+    @Serializable(with = SafeJsLongSerializer::class)
     @SerialName("expected_classification_version") val expectedClassificationVersion: Long,
 )
 

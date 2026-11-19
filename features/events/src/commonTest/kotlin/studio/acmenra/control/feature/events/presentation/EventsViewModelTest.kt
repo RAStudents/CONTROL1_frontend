@@ -2,8 +2,11 @@ package studio.acmenra.control.feature.events.presentation
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -12,6 +15,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_network_error
+import studio.acmenra.control.core.ui.notice.Notice
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementStatus
 import studio.acmenra.control.feature.events.domain.model.EventIconKey
@@ -67,6 +71,12 @@ class EventsViewModelTest {
     ) : EventsFeedSession {
         private val _state = MutableStateFlow(initialFeedState)
         override val state: StateFlow<EventsFeedState> = _state.asStateFlow()
+
+        val noticeFlow = MutableSharedFlow<Notice>(extraBufferCapacity = 16)
+        override val connectionNotice: Flow<Notice> = noticeFlow.asSharedFlow()
+
+        val filterInvalidatedFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
+        override val filterOptionsInvalidated: Flow<Unit> = filterInvalidatedFlow.asSharedFlow()
 
         var loadNextPageCalled = false
         var refreshCalled = false

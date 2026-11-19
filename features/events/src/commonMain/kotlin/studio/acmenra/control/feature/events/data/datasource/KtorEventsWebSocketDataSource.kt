@@ -1,0 +1,256 @@
+package studio.acmenra.control.feature.events.data.datasource
+
+import io.ktor.client.HttpClient
+import io.ktor.client.plugins.websocket.webSocket
+import io.ktor.websocket.Frame
+import io.ktor.websocket.close
+import io.ktor.websocket.readText
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import studio.acmenra.control.feature.events.data.model.AccessCheckUnavailableFrameDto
+import studio.acmenra.control.feature.events.data.model.AccessInvalidatedFrameDto
+import studio.acmenra.control.feature.events.data.model.AuthFrameDto
+import studio.acmenra.control.feature.events.data.model.AuthRequiredFrameDto
+import studio.acmenra.control.feature.events.data.model.GenericRealtimeFrameDto
+import studio.acmenra.control.feature.events.data.model.HeartbeatAckFrameDto
+import studio.acmenra.control.feature.events.data.model.HeartbeatFrameDto
+import studio.acmenra.control.feature.events.data.model.ReplayCompletedFrameDto
+import studio.acmenra.control.feature.events.data.model.ReplayRequestFrameDto
+import studio.acmenra.control.feature.events.data.model.ResyncRequiredFrameDto
+import studio.acmenra.control.feature.events.data.model.SubscribedFrameDto
+import studio.acmenra.control.feature.events.data.model.TenantCommitFrameDto
+
+sealed interface IncomingWsFrame {
+    data class Subscribed(
+        val frame: SubscribedFrameDto,
+    ) : IncomingWsFrame
+
+    data class TenantCommit(
+        val frame: TenantCommitFrameDto,
+    ) : IncomingWsFrame
+
+    data class ReplayCompleted(
+        val frame: ReplayCompletedFrameDto,
+    ) : IncomingWsFrame
+
+    data class ResyncRequired(
+        val frame: ResyncRequiredFrameDto,
+    ) : IncomingWsFrame
+
+    data class HeartbeatAck(
+        val frame: HeartbeatAckFrameDto,
+    ) : IncomingWsFrame
+
+    data class AccessCheckUnavailable(
+        val frame: AccessCheckUnavailableFrameDto,
+    ) : IncomingWsFrame
+
+    data class AuthRequired(
+        val frame: AuthRequiredFrameDto,
+    ) : IncomingWsFrame
+
+    data class AccessInvalidated(
+        val frame: AccessInvalidatedFrameDto,
+    ) : IncomingWsFrame
+}
+
+interface EventsWebSocketDataSource {
+    val incomingFrames: Flow<IncomingWsFrame>
+
+    fun connect(
+        companyId: String,
+        accessToken: String,
+        replayId: Long,
+        afterSequence: Long,
+        scope: CoroutineScope,
+        getClientConfirmedSeq: () -> Long = { afterSequence },
+        onDisconnected: (closeReason: String?) -> Unit,
+    )
+
+    suspend fun sendReplayRequest(
+        replayId: Long,
+        afterSequence: Long,
+    )
+
+    suspend fun sendHeartbeat(clientConfirmedSeq: Long)
+
+    suspend fun disconnect()
+}
+
+class KtorEventsWebSocketDataSource(
+    private val realtimeClient: HttpClient,
+    private val json: Json = Json { ignoreUnknownKeys = true },
+    private val wsEndpointBase: String = "",
+) : EventsWebSocketDataSource {
+    private val framesChannel = Channel<IncomingWsFrame>(Channel.BUFFERED)
+    override val incomingFrames: Flow<IncomingWsFrame> = framesChannel.receiveAsFlow()
+
+    private var sessionJob: Job? = null
+    private var heartbeatJob: Job? = null
+    private var outgoingChannel: Channel<Frame>? = null
+    private var lastConfirmedSeq: Long = 0L
+
+    override fun connect(
+        companyId: String,
+        accessToken: String,
+        replayId: Long,
+        afterSequence: Long,
+        scope: CoroutineScope,
+        getClientConfirmedSeq: () -> Long,
+        onDisconnected: (closeReason: String?) -> Unit,
+    ) {
+        sessionJob?.cancel()
+        lastConfirmedSeq = afterSequence
+        val outChan = Channel<Frame>(Channel.BUFFERED)
+        outgoingChannel = outChan
+
+        sessionJob =
+            scope.launch {
+                val url = buildWsUrl(companyId)
+                var disconnectReason: String? = null
+                try {
+                    realtimeClient.webSocket(urlString = url) {
+                        // Send AUTH frame as the very first client message
+                        val authFrame =
+                            AuthFrameDto(
+                                accessToken = accessToken,
+                                replayId = replayId,
+                                afterSequence = afterSequence,
+                            )
+                        send(Frame.Text(json.encodeToString(authFrame)))
+
+                        // Start outgoing pump
+                        val outgoingJob =
+                            launch {
+                                for (frame in outChan) {
+                                    send(frame)
+                                }
+                            }
+
+                        // Start Heartbeat loop: every 25s
+                        var missedAcks = 0
+                        heartbeatJob =
+                            launch {
+                                while (isActive) {
+                                    delay(25_000L)
+                                    val confirmedSeq = getClientConfirmedSeq()
+                                    sendHeartbeat(confirmedSeq)
+                                    missedAcks++
+                                    if (missedAcks >= 2) {
+                                        // 2 missed ACKs -> reconnect
+                                        disconnectReason = "Heartbeat timeout (2 missed ACKs)"
+                                        close()
+                                        break
+                                    }
+                                }
+                            }
+
+                        // Receive loop
+                        for (frame in incoming) {
+                            if (frame is Frame.Text) {
+                                val text = frame.readText()
+                                val generic =
+                                    runCatching {
+                                        json.decodeFromString<GenericRealtimeFrameDto>(text)
+                                    }.getOrNull() ?: continue
+
+                                when (generic.type) {
+                                    "SUBSCRIBED" -> {
+                                        val dto = json.decodeFromString<SubscribedFrameDto>(text)
+                                        framesChannel.send(IncomingWsFrame.Subscribed(dto))
+                                    }
+                                    "TENANT_COMMIT" -> {
+                                        val dto = json.decodeFromString<TenantCommitFrameDto>(text)
+                                        framesChannel.send(IncomingWsFrame.TenantCommit(dto))
+                                    }
+                                    "REPLAY_COMPLETED" -> {
+                                        val dto = json.decodeFromString<ReplayCompletedFrameDto>(text)
+                                        framesChannel.send(IncomingWsFrame.ReplayCompleted(dto))
+                                    }
+                                    "RESYNC_REQUIRED" -> {
+                                        val dto = json.decodeFromString<ResyncRequiredFrameDto>(text)
+                                        framesChannel.send(IncomingWsFrame.ResyncRequired(dto))
+                                    }
+                                    "HEARTBEAT_ACK" -> {
+                                        missedAcks = 0
+                                        val dto = json.decodeFromString<HeartbeatAckFrameDto>(text)
+                                        framesChannel.send(IncomingWsFrame.HeartbeatAck(dto))
+                                    }
+                                    "ACCESS_CHECK_UNAVAILABLE" -> {
+                                        val dto = json.decodeFromString<AccessCheckUnavailableFrameDto>(text)
+                                        framesChannel.send(IncomingWsFrame.AccessCheckUnavailable(dto))
+                                    }
+                                    "AUTH_REQUIRED" -> {
+                                        val dto = json.decodeFromString<AuthRequiredFrameDto>(text)
+                                        framesChannel.send(IncomingWsFrame.AuthRequired(dto))
+                                    }
+                                    "ACCESS_INVALIDATED" -> {
+                                        val dto = json.decodeFromString<AccessInvalidatedFrameDto>(text)
+                                        framesChannel.send(IncomingWsFrame.AccessInvalidated(dto))
+                                    }
+                                }
+                            }
+                        }
+                        outgoingJob.cancel()
+                        heartbeatJob?.cancel()
+                    }
+                } catch (e: CancellationException) {
+                    disconnectReason = "Cancelled"
+                    throw e
+                } catch (e: Exception) {
+                    disconnectReason = e.message ?: "Socket closed"
+                } finally {
+                    heartbeatJob?.cancel()
+                    onDisconnected(disconnectReason)
+                }
+            }
+    }
+
+    override suspend fun sendReplayRequest(
+        replayId: Long,
+        afterSequence: Long,
+    ) {
+        val frame = ReplayRequestFrameDto(replayId = replayId, afterSequence = afterSequence)
+        outgoingChannel?.send(Frame.Text(json.encodeToString(frame)))
+    }
+
+    override suspend fun sendHeartbeat(clientConfirmedSeq: Long) {
+        lastConfirmedSeq = clientConfirmedSeq
+        val frame = HeartbeatFrameDto(clientConfirmedSeq = clientConfirmedSeq)
+        outgoingChannel?.send(Frame.Text(json.encodeToString(frame)))
+    }
+
+    override suspend fun disconnect() {
+        heartbeatJob?.cancel()
+        sessionJob?.cancel()
+        sessionJob = null
+        outgoingChannel?.close()
+        outgoingChannel = null
+    }
+
+    private fun buildWsUrl(companyId: String): String {
+        val path = "api/v1/companies/$companyId/events/ws"
+        val fullUrl =
+            if (wsEndpointBase.isBlank()) {
+                path
+            } else {
+                "${wsEndpointBase.trimEnd('/')}/$path"
+            }
+        return if (fullUrl.startsWith("http://")) {
+            "ws://" + fullUrl.removePrefix("http://")
+        } else if (fullUrl.startsWith("https://")) {
+            "wss://" + fullUrl.removePrefix("https://")
+        } else {
+            fullUrl
+        }
+    }
+}

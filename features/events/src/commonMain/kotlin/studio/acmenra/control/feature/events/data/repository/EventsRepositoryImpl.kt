@@ -51,6 +51,7 @@ class EventsRepositoryImpl(
 
     private val filterOptionsMutex = Mutex()
     private val filterCache = MutableStateFlow<Map<String, CachedFilterOptions>>(emptyMap())
+    private val cacheGenerations = MutableStateFlow<Map<String, Long>>(emptyMap())
 
     private data class CachedFilterOptions(
         val options: EventsFilterOptions,
@@ -58,6 +59,7 @@ class EventsRepositoryImpl(
     )
 
     override fun invalidateFilterCache(companyId: String) {
+        cacheGenerations.update { it + (companyId to (it[companyId] ?: 0L) + 1L) }
         filterCache.update { it - companyId }
     }
 
@@ -101,31 +103,42 @@ class EventsRepositoryImpl(
     }
 
     override suspend fun getFilterOptions(companyId: String): EventsFilterOptions {
-        filterOptionsMutex.withLock {
-            val cached = filterCache.value[companyId]
-            val result =
-                remoteDataSource.getFilterOptions(
-                    companyId = companyId,
-                    ifNoneMatchEtag = cached?.etag,
-                )
+        val startGen = cacheGenerations.value[companyId] ?: 0L
+        val cached = filterCache.value[companyId]
+        val result =
+            remoteDataSource.getFilterOptions(
+                companyId = companyId,
+                ifNoneMatchEtag = cached?.etag,
+            )
 
+        filterOptionsMutex.withLock {
+            val currentGen = cacheGenerations.value[companyId] ?: 0L
             return when (result) {
                 is FilterOptionsFetchResult.Success -> {
                     val mapped = EventsDtoMapper.mapFilterOptions(result.options)
-                    filterCache.update { it + (companyId to CachedFilterOptions(options = mapped, etag = result.etag)) }
+                    if (currentGen == startGen) {
+                        filterCache.update {
+                            it +
+                                (companyId to CachedFilterOptions(options = mapped, etag = result.etag))
+                        }
+                    }
                     mapped
                 }
                 FilterOptionsFetchResult.NotModified -> {
-                    if (cached != null) {
-                        cached.options
+                    val currentCached = filterCache.value[companyId]
+                    if (currentGen == startGen && currentCached != null) {
+                        currentCached.options
                     } else {
-                        // Cached body missing despite 304, re-fetch without ETag
+                        // Cached body missing or invalidated in-flight, re-fetch without ETag
                         val freshResult = remoteDataSource.getFilterOptions(companyId, ifNoneMatchEtag = null)
                         if (freshResult is FilterOptionsFetchResult.Success) {
                             val mapped = EventsDtoMapper.mapFilterOptions(freshResult.options)
-                            filterCache.update {
-                                it +
-                                    (companyId to CachedFilterOptions(options = mapped, etag = freshResult.etag))
+                            val nowGen = cacheGenerations.value[companyId] ?: 0L
+                            if (nowGen == currentGen) {
+                                filterCache.update {
+                                    it +
+                                        (companyId to CachedFilterOptions(options = mapped, etag = freshResult.etag))
+                                }
                             }
                             mapped
                         } else {

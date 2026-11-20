@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
 import org.jetbrains.compose.resources.StringResource
@@ -64,7 +65,7 @@ class EventsViewModel(
     private val _state = MutableStateFlow(EventsState())
     val state: StateFlow<EventsState> = _state.asStateFlow()
 
-    private var feedSession: EventsFeedSession? = null
+    internal var feedSession: EventsFeedSession? = null
     private var feedCollectJob: Job? = null
     private var feedNoticeJob: Job? = null
     private var feedFilterOptionsJob: Job? = null
@@ -383,19 +384,27 @@ class EventsViewModel(
                     when (result) {
                         is EventsOperationResult.Success -> {
                             requestSession.applyAcknowledged(result.data)
+                            val activeSession = feedSession
+                            if (activeSession != null && activeSession !== requestSession) {
+                                activeSession.applyAcknowledged(result.data)
+                            }
                         }
                         is EventsOperationResult.Failure -> {
                             requestSession.clearOptimisticAckPending(event.id)
+                            feedSession?.clearOptimisticAckPending(event.id)
                             _state.update { it.copy(mutationErrorNotice = mapMutationErrorToResource(result.error)) }
                         }
                     }
                 } catch (e: CancellationException) {
                     if (currentCompanyGen == companyGeneration) {
                         requestSession.clearOptimisticAckPending(event.id)
+                        feedSession?.clearOptimisticAckPending(event.id)
                     }
                     throw e
                 } finally {
-                    acknowledgeJobs.remove(event.id)
+                    if (acknowledgeJobs[event.id] === coroutineContext.job) {
+                        acknowledgeJobs.remove(event.id)
+                    }
                 }
             }
         acknowledgeJobs[event.id] = job
@@ -472,6 +481,10 @@ class EventsViewModel(
                 when (result) {
                     is EventsOperationResult.Success -> {
                         requestSession.applyEventMutationResult(result.data)
+                        val activeSession = feedSession
+                        if (activeSession != null && activeSession !== requestSession) {
+                            activeSession.applyEventMutationResult(result.data)
+                        }
                         _state.update { it.copy(isMarkingErroneous = false) }
                     }
                     is EventsOperationResult.Failure -> {
@@ -547,8 +560,16 @@ class EventsViewModel(
                         status.status == EventsExportStatusCode.PROCESSING
                     ) {
                         observeExport(status.exportId, requestCompanyId, currentCompanyGen)
+                    } else if (status.status == EventsExportStatusCode.COMPLETED ||
+                        status.status == EventsExportStatusCode.FAILED ||
+                        status.status == EventsExportStatusCode.EXPIRED
+                    ) {
+                        activeExportKey = null
+                        activeExportRequest = null
                     }
                 } catch (e: Throwable) {
+                    activeExportKey = null
+                    activeExportRequest = null
                     if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
                         return@launch
                     }
@@ -577,6 +598,8 @@ class EventsViewModel(
                         return@launch
                     }
                     if (!_state.value.access.reportsExport) {
+                        activeExportKey = null
+                        activeExportRequest = null
                         _state.update {
                             it.copy(
                                 isExportModeActive = false,
@@ -598,9 +621,13 @@ class EventsViewModel(
                             status.status == EventsExportStatusCode.FAILED ||
                             status.status == EventsExportStatusCode.EXPIRED
                         ) {
+                            activeExportKey = null
+                            activeExportRequest = null
                             return@launch
                         }
                     } catch (e: EventsApiException.ExportExpired) {
+                        activeExportKey = null
+                        activeExportRequest = null
                         if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
                             _state.update {
                                 it.copy(
@@ -611,6 +638,8 @@ class EventsViewModel(
                         }
                         return@launch
                     } catch (e: EventsApiException.PermissionDenied) {
+                        activeExportKey = null
+                        activeExportRequest = null
                         if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
                             _state.update {
                                 it.copy(
@@ -623,11 +652,15 @@ class EventsViewModel(
                         return@launch
                     } catch (e: Throwable) {
                         if (e.message?.contains("403") == true || e.message?.contains("410") == true) {
+                            activeExportKey = null
+                            activeExportRequest = null
                             return@launch
                         }
                     }
                 }
                 if (isActive && attempt >= maxAttempts) {
+                    activeExportKey = null
+                    activeExportRequest = null
                     if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
                         _state.update {
                             it.copy(
@@ -715,7 +748,7 @@ class EventsViewModel(
         _state.update { it.copy(isDatePickerOpen = false) }
     }
 
-    override fun onCleared() {
+    public override fun onCleared() {
         feedSession?.close()
         searchDebounceJob?.cancel()
         feedCollectJob?.cancel()

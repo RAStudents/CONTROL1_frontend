@@ -10,11 +10,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -30,14 +32,18 @@ import studio.acmenra.control.core.network.model.TokenPair
 import studio.acmenra.control.core.ui.notice.Notice
 import studio.acmenra.control.feature.events.data.datasource.EventsApiException
 import studio.acmenra.control.feature.events.data.datasource.EventsWebSocketDataSource
+import studio.acmenra.control.feature.events.data.datasource.FilterOptionsFetchResult
 import studio.acmenra.control.feature.events.data.datasource.IncomingWsFrame
 import studio.acmenra.control.feature.events.data.datasource.KtorEventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.KtorEventsWebSocketDataSource
 import studio.acmenra.control.feature.events.data.datasource.WsCloseReason
+import studio.acmenra.control.feature.events.data.mapper.EventsDtoMapper
 import studio.acmenra.control.feature.events.data.model.AccessInvalidatedFrameDto
 import studio.acmenra.control.feature.events.data.model.AuthRequiredFrameDto
 import studio.acmenra.control.feature.events.data.model.EventDto
+import studio.acmenra.control.feature.events.data.model.EventTypeOptionDto
 import studio.acmenra.control.feature.events.data.model.EventsBootstrapDto
+import studio.acmenra.control.feature.events.data.model.EventsFilterOptionsDto
 import studio.acmenra.control.feature.events.data.model.EventsPageDto
 import studio.acmenra.control.feature.events.data.model.EventsSummaryDto
 import studio.acmenra.control.feature.events.data.model.ReplayCompletedFrameDto
@@ -83,6 +89,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -112,6 +119,7 @@ class EventsContractV292MandatoryTests {
         var lastAfterSequence: Long? = null
         var lastDisconnectReason: WsCloseReason? = null
         var disconnected = false
+        var disconnectCount = 0
         var sentReplayRequests = mutableListOf<Pair<Long, Long>>()
         var connectCount = 0
         var connectionHistory = mutableListOf<Triple<String, Long, Long>>()
@@ -144,7 +152,24 @@ class EventsContractV292MandatoryTests {
 
         override suspend fun disconnect() {
             disconnected = true
+            disconnectCount++
         }
+    }
+
+    private class TestTokenStorage(
+        private var storedTokens: TokenPair? = TokenPair("tok", "ref"),
+    ) : TokenStorage {
+        override fun getTokens(): TokenPair? = storedTokens
+
+        override fun saveTokens(tokens: TokenPair) {
+            storedTokens = tokens
+        }
+
+        override fun clear() {
+            storedTokens = null
+        }
+
+        override fun hasTokens(): Boolean = storedTokens != null
     }
 
     private fun sampleEvent(
@@ -697,25 +722,27 @@ class EventsContractV292MandatoryTests {
                 advanceUntilIdle()
 
                 // Buffer commits with duplicate 101
+                val sha101 = "a".repeat(64)
+                val sha102 = "b".repeat(64)
                 val commit101a =
                     TenantCommitFrameDto(
                         replayId = activeReplay,
                         tenantSequence = 101L,
-                        payloadSha256 = "sha-101",
+                        payloadSha256 = sha101,
                         eventCreated = sampleEventDto("ev-101"),
                     )
                 val commit101b =
                     TenantCommitFrameDto(
                         replayId = activeReplay,
                         tenantSequence = 101L,
-                        payloadSha256 = "sha-101",
+                        payloadSha256 = sha101,
                         eventCreated = sampleEventDto("ev-101"),
                     )
                 val commit102 =
                     TenantCommitFrameDto(
                         replayId = activeReplay,
                         tenantSequence = 102L,
-                        payloadSha256 = "sha-102",
+                        payloadSha256 = sha102,
                         eventCreated = sampleEventDto("ev-102"),
                     )
 
@@ -1362,18 +1389,20 @@ class EventsContractV292MandatoryTests {
                 )
                 advanceUntilIdle()
 
+                val shaStale = "a".repeat(64)
+                val shaValid = "b".repeat(64)
                 val staleCommit =
                     TenantCommitFrameDto(
                         replayId = activeReplayId - 1,
                         tenantSequence = 101L,
-                        payloadSha256 = "sha-stale",
+                        payloadSha256 = shaStale,
                         eventCreated = sampleEventDto("ev-stale"),
                     )
                 val validCommit =
                     TenantCommitFrameDto(
                         replayId = activeReplayId,
                         tenantSequence = 101L,
-                        payloadSha256 = "sha-valid",
+                        payloadSha256 = shaValid,
                         eventCreated = sampleEventDto("ev-valid"),
                     )
                 processor.dispatch(SessionCommand.WsFrameReceived(IncomingWsFrame.TenantCommit(staleCommit)))
@@ -1471,11 +1500,12 @@ class EventsContractV292MandatoryTests {
                 advanceUntilIdle()
 
                 // Sequence 101 missing! Only 102 arrived (gap)
+                val sha102 = "b".repeat(64)
                 val commit102 =
                     TenantCommitFrameDto(
                         replayId = activeReplay,
                         tenantSequence = 102L,
-                        payloadSha256 = "sha-102",
+                        payloadSha256 = sha102,
                         eventCreated = sampleEventDto("ev-102"),
                     )
                 processor.dispatch(SessionCommand.WsFrameReceived(IncomingWsFrame.TenantCommit(commit102)))
@@ -2250,6 +2280,14 @@ class EventsContractV292MandatoryTests {
                 }
             val dataSource = KtorEventsWebSocketDataSource(client)
 
+            val receivedFrames = mutableListOf<IncomingWsFrame>()
+            val collectJob =
+                launch {
+                    dataSource.incomingFrames.collect { frame ->
+                        receivedFrames.add(frame)
+                    }
+                }
+
             // Connect 1
             dataSource.connect(
                 companyId = "comp-1",
@@ -2260,8 +2298,11 @@ class EventsContractV292MandatoryTests {
                 getClientConfirmedSeq = { 100L },
                 onDisconnected = { _, _ -> },
             )
+            advanceUntilIdle()
+            val conn1Id = dataSource.getActiveConnectionIdForTest()
+            assertEquals(1L, conn1Id)
 
-            // Connect 2 (supersedes connection 1, advances activeConnectionId)
+            // Connect 2 (supersedes connection 1, advances activeConnectionId to 2)
             dataSource.connect(
                 companyId = "comp-1",
                 accessToken = "tok-2",
@@ -2271,9 +2312,35 @@ class EventsContractV292MandatoryTests {
                 getClientConfirmedSeq = { 200L },
                 onDisconnected = { _, _ -> },
             )
-
             advanceUntilIdle()
+            val conn2Id = dataSource.getActiveConnectionIdForTest()
+            assertEquals(2L, conn2Id)
+
+            // Simulate frames arriving from connection 1 after connection 2 is active
+            val shaValid = "c".repeat(64)
+            val staleCommit =
+                IncomingWsFrame.TenantCommit(
+                    sampleCommitDto(1L, 101L, "ev-stale").copy(payloadSha256 = shaValid),
+                )
+            val staleAuth = IncomingWsFrame.AuthRequired(AuthRequiredFrameDto(reason = "TOKEN_EXPIRED"))
+            dataSource.emitRawFrameForTest(conn1Id, staleCommit)
+            dataSource.emitRawFrameForTest(conn1Id, staleAuth)
+
+            // Emit frame from connection 2 (active)
+            val validCommit =
+                IncomingWsFrame.TenantCommit(
+                    sampleCommitDto(2L, 201L, "ev-valid").copy(payloadSha256 = shaValid),
+                )
+            dataSource.emitRawFrameForTest(conn2Id, validCommit)
+            advanceUntilIdle()
+
+            // Verify: all connection 1 frames were discarded, only connection 2 frame was received
+            assertEquals(1, receivedFrames.size)
+            assertEquals(validCommit, receivedFrames.first())
+
+            collectJob.cancel()
             dataSource.disconnect()
+            advanceUntilIdle()
         }
 
     // Scenario 24: Concurrent acknowledge of distinct events runs in parallel without cancellation or stuck pending ID
@@ -2643,4 +2710,633 @@ class EventsContractV292MandatoryTests {
                 testScope.cancel()
             }
         }
+
+    // Scenario 27: Bootstrap completes after EVENTS_READ revocation -> summary and counts are not published
+    @Test
+    fun testScenario27_BootstrapDiscardedAfterEventsReadRevocation() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                val bootstrap =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-leak")),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 42,
+                                asOfSequence = 100L,
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 99,
+                            ),
+                        streamCursor = 100L,
+                    )
+
+                // User loses EVENTS_READ before or during bootstrap arrival
+                processor.dispatch(SessionCommand.AccessUpdated(EventsAccessCapabilities(eventsRead = false)))
+                advanceUntilIdle()
+
+                val result = processor.installBootstrap(bootstrap, generation = 1L)
+                assertEquals(BootstrapApplyResult.Stale, result)
+                advanceUntilIdle()
+
+                // State must remain strictly fail-closed: no events, null summary, zero counts
+                assertTrue(
+                    processor.state.value.visibleEvents
+                        .isEmpty(),
+                )
+                assertNull(processor.state.value.summary)
+                assertEquals(0, processor.state.value.snapshotTotalCount)
+                assertEquals(0, processor.state.value.pendingNewerCount)
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 28: Rapid access capability updates serialize without race or deadlock
+    @Test
+    fun testScenario28_RapidAccessCapabilitiesTransitions() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var revokedCount = 0
+                var grantedCount = 0
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                        onEventsReadRevoked = { revokedCount++ },
+                        onEventsReadGranted = { grantedCount++ },
+                    )
+
+                // Dispatch rapid alternating permissions
+                processor.dispatch(SessionCommand.AccessUpdated(EventsAccessCapabilities(eventsRead = false)))
+                processor.dispatch(SessionCommand.AccessUpdated(EventsAccessCapabilities(eventsRead = true)))
+                processor.dispatch(SessionCommand.AccessUpdated(EventsAccessCapabilities(eventsRead = false)))
+                processor.dispatch(SessionCommand.AccessUpdated(EventsAccessCapabilities(eventsRead = true)))
+                advanceUntilIdle()
+
+                assertEquals(2, revokedCount)
+                assertEquals(2, grantedCount)
+                assertTrue(processor.state.value.access.eventsRead)
+
+                // Can successfully install bootstrap after transitions
+                val bootstrap =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-active")),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                val res = processor.installBootstrap(bootstrap, 1L)
+                assertTrue(res is BootstrapApplyResult.Applied)
+                processor.dispatch(SessionCommand.ViewportAtTop)
+                advanceUntilIdle()
+
+                assertEquals(1, processor.state.value.visibleEvents.size)
+                assertEquals(
+                    "ev-active",
+                    processor.state.value.visibleEvents[0]
+                        .id,
+                )
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 29: Actor close during nextReplayGeneration does not hang deferred
+    @Test
+    fun testScenario29_ActorCloseDuringNextReplayGenerationCompletesDeferred() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                processor.close()
+                advanceUntilIdle()
+
+                // Calling nextReplayGeneration after close must complete immediately (exceptionally) without hanging
+                val resultDeferred =
+                    async {
+                        runCatching { processor.nextReplayGeneration() }
+                    }
+                advanceUntilIdle()
+
+                assertTrue(resultDeferred.isCompleted)
+                val outcome = resultDeferred.await()
+                assertTrue(outcome.isFailure)
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 30: Acknowledge in-flight preserves mutation update even if filter changed
+    @Test
+    fun testScenario30_AcknowledgeInFlightPropagatesToActiveFeedSessionOnFilterChange() =
+        runTest(testDispatcher) {
+            val event1 = sampleEvent("ev-1").copy(status = EventAcknowledgementStatus.NEW, classificationVersion = 1L)
+            val updatedEvent1 =
+                event1.copy(
+                    status = EventAcknowledgementStatus.ACKNOWLEDGED,
+                    classificationVersion = 2L,
+                )
+
+            val session1 = FakeFeedSession(companyId = "comp-1", initialEvents = listOf(event1))
+            val session2 = FakeFeedSession(companyId = "comp-1", initialEvents = listOf(event1))
+
+            var callCount = 0
+            val feedFactory: (String, EventsQuery, EventsAccessCapabilities) -> EventsFeedSession = { _, _, _ ->
+                callCount++
+                if (callCount == 1) session1 else session2
+            }
+
+            val ackUseCase =
+                object : AcknowledgeEventUseCase {
+                    override suspend fun invoke(
+                        companyId: String,
+                        eventId: String,
+                    ): EventsOperationResult<Event> {
+                        delay(100L)
+                        return EventsOperationResult.Success(updatedEvent1)
+                    }
+                }
+
+            val vm =
+                createTestViewModel(
+                    feedFactory = feedFactory,
+                    acknowledgeEventUseCase = ackUseCase,
+                )
+            vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true, eventsReview = true))
+            advanceUntilIdle()
+            assertEquals(session1, vm.feedSession)
+
+            // Start acknowledge on session1
+            vm.acknowledgeEvent(event1)
+            // While in flight, user changes filter -> vm creates session2
+            vm.onEventTypeToggled("type-99")
+            advanceUntilIdle()
+            assertEquals(session2, vm.feedSession)
+
+            // Let acknowledge finish
+            advanceUntilIdle()
+
+            // Both session1 and the active session2 received applyAcknowledged!
+            assertEquals(
+                EventAcknowledgementStatus.ACKNOWLEDGED,
+                session2.state.value.visibleEvents
+                    .first { it.id == "ev-1" }
+                    .status,
+            )
+            assertEquals(
+                2L,
+                session2.state.value.visibleEvents
+                    .first { it.id == "ev-1" }
+                    .classificationVersion,
+            )
+            vm.onCleared()
+        }
+
+    // Scenario 31: Invalidation during in-flight getFilterOptions does not cache stale response
+    @Test
+    fun testScenario31_FilterCacheInvalidationDuringInFlightHttpFetch() =
+        runTest(testDispatcher) {
+            var fetchAttempts = 0
+            val remoteDataSource =
+                object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                    override suspend fun getFilterOptions(
+                        companyId: String,
+                        ifNoneMatchEtag: String?,
+                    ): FilterOptionsFetchResult {
+                        fetchAttempts++
+                        delay(100L)
+                        return FilterOptionsFetchResult.Success(
+                            options =
+                                EventsFilterOptionsDto(
+                                    revision = "rev-$fetchAttempts",
+                                    eventTypes =
+                                        listOf(
+                                            EventTypeOptionDto("type-$fetchAttempts", "Type $fetchAttempts"),
+                                        ),
+                                    locations = emptyList(),
+                                ),
+                            etag = "etag-$fetchAttempts",
+                        )
+                    }
+
+                    override suspend fun getBootstrap(
+                        companyId: String,
+                        query: EventsQuery,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun getEventsPage(
+                        companyId: String,
+                        cursor: String,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun acknowledgeEvent(
+                        companyId: String,
+                        eventId: String,
+                    ) = error("unused")
+
+                    override suspend fun markEventErroneous(
+                        companyId: String,
+                        eventId: String,
+                        expectedClassificationVersion: Long,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun createExport(
+                        companyId: String,
+                        request: studio.acmenra.control.feature.events.data.model.CreateExportRequestDto,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun getExportStatus(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+
+                    override suspend fun downloadExport(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+                }
+
+            val repo =
+                EventsRepositoryImpl(
+                    remoteDataSource = remoteDataSource,
+                    webSocketDataSourceFactory = { error("unused") },
+                    sessionManager = SessionManager(TestTokenStorage()),
+                    connectivityProvider =
+                        object : EventsConnectivityProvider {
+                            override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                        },
+                )
+
+            // Start in-flight fetch
+            val job1 = async { repo.getFilterOptions("comp-1") }
+            advanceUntilIdle()
+
+            // Invalidate cache while job1 is in-flight
+            repo.invalidateFilterCache("comp-1")
+
+            val result1 = job1.await()
+            assertEquals("type-1", result1.eventTypes.first().id)
+
+            // Cache must NOT have been populated with the invalidated response. Next call must re-fetch:
+            val result2 = repo.getFilterOptions("comp-1")
+            assertEquals(2, fetchAttempts)
+            assertEquals("type-2", result2.eventTypes.first().id)
+        }
+
+    // Scenario 32: Export reaching terminal status clears activeExportKey
+    @Test
+    fun testScenario32_ExportTerminalStatusClearsActiveExportKey() =
+        runTest(testDispatcher) {
+            val generatedKeys = mutableListOf<String>()
+            val createExportUseCase =
+                object : CreateEventsExportUseCase {
+                    override suspend fun invoke(
+                        companyId: String,
+                        request: EventsExportRequest,
+                        idempotencyKey: String,
+                    ): EventsExportStatus {
+                        generatedKeys.add(idempotencyKey)
+                        return EventsExportStatus(
+                            exportId = "exp-1",
+                            status = EventsExportStatusCode.COMPLETED,
+                            totalRecords = 10,
+                            processedRecords = 10,
+                            createdAt = Instant.fromEpochMilliseconds(0),
+                        )
+                    }
+                }
+
+            val vm = createTestViewModel(createEventsExportUseCase = createExportUseCase)
+            vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true, reportsExport = true))
+            advanceUntilIdle()
+
+            // First export
+            vm.startExport()
+            advanceUntilIdle()
+            assertEquals(1, generatedKeys.size)
+            val key1 = generatedKeys[0]
+
+            // Second export with same parameters
+            vm.startExport()
+            advanceUntilIdle()
+            assertEquals(2, generatedKeys.size)
+            val key2 = generatedKeys[1]
+
+            // Idempotency keys must be distinct because previous export reached COMPLETED
+            assertNotEquals(key1, key2)
+            vm.onCleared()
+        }
+
+    // Scenario 33: EventsDtoMapper throws IllegalArgumentException on malformed timestamps
+    @Test
+    fun testScenario33_EventsDtoMapperStrictDateParsing() {
+        val invalidOccurredDto =
+            sampleEventDto("ev-bad").copy(
+                occurredAt = "malformed-date-string",
+            )
+        assertFailsWith<IllegalArgumentException> {
+            EventsDtoMapper.mapEvent(invalidOccurredDto)
+        }
+
+        val invalidReceivedDto =
+            sampleEventDto("ev-bad-received").copy(
+                receivedAt = "invalid-iso-string",
+            )
+        assertFailsWith<IllegalArgumentException> {
+            EventsDtoMapper.mapEvent(invalidReceivedDto)
+        }
+    }
+
+    // Scenario 34: TenantCommitFrameDto strictly enforces 64-character hexadecimal payload_sha256
+    @Test
+    fun testScenario34_TenantCommitFrameDtoStrictPayloadSha256Validation() {
+        val validSha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val validFrame =
+            TenantCommitFrameDto(
+                replayId = 1L,
+                tenantSequence = 100L,
+                payloadSha256 = validSha,
+                eventCreated = sampleEventDto("ev-1"),
+            )
+        // Must succeed without throwing and return true
+        assertTrue(validFrame.validateEnvelope())
+
+        // Empty sha returns false
+        val emptyShaFrame = validFrame.copy(payloadSha256 = "")
+        assertFalse(emptyShaFrame.validateEnvelope())
+
+        // Too short returns false
+        val shortShaFrame = validFrame.copy(payloadSha256 = "abc123")
+        assertFalse(shortShaFrame.validateEnvelope())
+
+        // Non-hex characters returns false
+        val nonHexSha = "g".repeat(64)
+        val nonHexFrame = validFrame.copy(payloadSha256 = nonHexSha)
+        assertFalse(nonHexFrame.validateEnvelope())
+    }
+
+    // Scenario 35: Feed session cleanup on terminal invalidation cancels sessionJob and is idempotent
+    @Test
+    fun testScenario35_FeedSessionCleanupCancelsSessionJobAndIsIdempotent() =
+        runTest(testDispatcher) {
+            val parentScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val testWs = TestWebSocketDataSource()
+
+                val sessionManager = SessionManager(TestTokenStorage())
+                val session =
+                    EventsFeedSessionImpl(
+                        companyId = "comp-1",
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        remoteDataSource =
+                            object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                                override suspend fun getBootstrap(
+                                    companyId: String,
+                                    query: EventsQuery,
+                                    limit: Int,
+                                ) = sampleBootstrapDto()
+
+                                override suspend fun getEventsPage(
+                                    companyId: String,
+                                    cursor: String,
+                                    limit: Int,
+                                ) = error("unused")
+
+                                override suspend fun getFilterOptions(
+                                    companyId: String,
+                                    ifNoneMatchEtag: String?,
+                                ) = error("unused")
+
+                                override suspend fun acknowledgeEvent(
+                                    companyId: String,
+                                    eventId: String,
+                                ) = error("unused")
+
+                                override suspend fun markEventErroneous(
+                                    companyId: String,
+                                    eventId: String,
+                                    expectedClassificationVersion: Long,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun createExport(
+                                    companyId: String,
+                                    request: studio.acmenra.control.feature.events.data.model.CreateExportRequestDto,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun getExportStatus(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+
+                                override suspend fun downloadExport(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+                            },
+                        webSocketDataSource = testWs,
+                        sessionManager = sessionManager,
+                        connectivityProvider =
+                            object : EventsConnectivityProvider {
+                                override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                            },
+                        accessInvalidationListener = { _, _ -> },
+                        parentScope = parentScope,
+                    )
+                advanceUntilIdle()
+
+                // First close
+                session.close()
+                advanceUntilIdle()
+                assertEquals(1, testWs.disconnectCount)
+
+                // Second close must be idempotent (no duplicate cleanup)
+                session.close()
+                advanceUntilIdle()
+                assertEquals(1, testWs.disconnectCount)
+            } finally {
+                parentScope.cancel()
+            }
+        }
+
+    private class FakeFeedSession(
+        override val companyId: String = "comp-1",
+        override val query: EventsQuery = EventsQuery(),
+        initialEvents: List<Event> = emptyList(),
+    ) : EventsFeedSession {
+        override val state =
+            MutableStateFlow(
+                EventsFeedState(
+                    visibleEvents = initialEvents,
+                    snapshotTotalCount = initialEvents.size,
+                    access = EventsAccessCapabilities(eventsRead = true, eventsReview = true, reportsExport = true),
+                ),
+            )
+        val noticeFlow = MutableSharedFlow<Notice>(extraBufferCapacity = 16)
+        override val connectionNotice: Flow<Notice> = noticeFlow
+        val filterInvalidatedFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
+        override val filterOptionsInvalidated: Flow<Unit> = filterInvalidatedFlow
+
+        override fun loadNextPage() {}
+
+        override fun refresh() {}
+
+        override fun onViewportAtTop() {}
+
+        override fun markOptimisticAckPending(eventId: String) {
+            val nextAck = state.value.realtimeOverlay.pendingAckIds + eventId
+            state.update { it.copy(realtimeOverlay = it.realtimeOverlay.copy(pendingAckIds = nextAck)) }
+        }
+
+        override fun clearOptimisticAckPending(eventId: String) {
+            val nextAck = state.value.realtimeOverlay.pendingAckIds - eventId
+            state.update { it.copy(realtimeOverlay = it.realtimeOverlay.copy(pendingAckIds = nextAck)) }
+        }
+
+        override fun applyAcknowledged(event: Event) {
+            val nextAck = state.value.realtimeOverlay.pendingAckIds - event.id
+            val nextEvents = state.value.visibleEvents.map { if (it.id == event.id) event else it }
+            state.update {
+                it.copy(
+                    visibleEvents = nextEvents,
+                    realtimeOverlay = it.realtimeOverlay.copy(pendingAckIds = nextAck),
+                )
+            }
+        }
+
+        override fun applyEventMutationResult(event: Event) {
+            val nextEvents = state.value.visibleEvents.map { if (it.id == event.id) event else it }
+            state.update { it.copy(visibleEvents = nextEvents) }
+        }
+
+        override fun retryRebootstrap() {}
+
+        override fun updateAccessCapabilities(access: EventsAccessCapabilities) {
+            state.update { it.copy(access = access) }
+        }
+
+        override fun close() {}
+    }
+
+    private fun createTestViewModel(
+        feed: EventsFeedSession = FakeFeedSession(),
+        feedFactory: ((String, EventsQuery, EventsAccessCapabilities) -> EventsFeedSession)? = null,
+        loadEventFilterOptionsUseCase: LoadEventFilterOptionsUseCase =
+            object : LoadEventFilterOptionsUseCase {
+                override suspend fun invoke(companyId: String) = EventsFilterOptions()
+            },
+        acknowledgeEventUseCase: AcknowledgeEventUseCase =
+            object : AcknowledgeEventUseCase {
+                override suspend fun invoke(
+                    companyId: String,
+                    eventId: String,
+                ): EventsOperationResult<Event> = error("unused")
+            },
+        markEventErroneousUseCase: MarkEventErroneousUseCase =
+            object : MarkEventErroneousUseCase {
+                override suspend fun invoke(
+                    companyId: String,
+                    eventId: String,
+                    expectedClassificationVersion: Long,
+                    idempotencyKey: String,
+                ): EventsOperationResult<Event> = error("unused")
+            },
+        createEventsExportUseCase: CreateEventsExportUseCase =
+            object : CreateEventsExportUseCase {
+                override suspend fun invoke(
+                    companyId: String,
+                    request: EventsExportRequest,
+                    idempotencyKey: String,
+                ): EventsExportStatus = error("unused")
+            },
+        observeEventsExportStatusUseCase: ObserveEventsExportStatusUseCase =
+            object : ObserveEventsExportStatusUseCase {
+                override suspend fun invoke(
+                    companyId: String,
+                    exportId: String,
+                ): EventsExportStatus = error("unused")
+            },
+        downloadEventsExportUseCase: DownloadEventsExportUseCase =
+            object : DownloadEventsExportUseCase {
+                override suspend fun invoke(
+                    companyId: String,
+                    exportId: String,
+                ): EventsExportDownload = error("unused")
+            },
+        exportFileSaver: ExportFileSaver =
+            object : ExportFileSaver {
+                override suspend fun saveExportFile(download: EventsExportDownload) = true
+            },
+    ): EventsViewModel {
+        val feedUseCase =
+            object : ObserveEventsFeedUseCase {
+                override fun invoke(
+                    companyId: String,
+                    query: EventsQuery,
+                    access: EventsAccessCapabilities,
+                ): EventsFeedSession = feedFactory?.invoke(companyId, query, access) ?: feed
+            }
+        return EventsViewModel(
+            observeEventsFeedUseCase = feedUseCase,
+            loadEventFilterOptionsUseCase = loadEventFilterOptionsUseCase,
+            acknowledgeEventUseCase = acknowledgeEventUseCase,
+            markEventErroneousUseCase = markEventErroneousUseCase,
+            createEventsExportUseCase = createEventsExportUseCase,
+            observeEventsExportStatusUseCase = observeEventsExportStatusUseCase,
+            downloadEventsExportUseCase = downloadEventsExportUseCase,
+            exportFileSaver = exportFileSaver,
+        )
+    }
 }

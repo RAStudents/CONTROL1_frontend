@@ -16,6 +16,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.ui.generated.resources.Res
@@ -75,7 +76,9 @@ class EventsFeedSessionImpl(
     private suspend fun nextBootstrapGeneration(): Long = bootstrapGenMutex.withLock { ++bootstrapGeneration }
 
     private var lastUsedAccessToken: String? = null
-    private var isClosed = false
+    private var isTerminal = false
+    private var isCleanupStarted = false
+    val isClosed: Boolean get() = isTerminal || isCleanupStarted
     private var isOnline = true
 
     private var consecutiveWsFailures = 0
@@ -106,6 +109,12 @@ class EventsFeedSessionImpl(
             },
             onAccessInvalidated = { reason, targetCompanyId ->
                 handleTerminalAccessInvalidated(reason, targetCompanyId)
+            },
+            onEventsReadRevoked = {
+                handleEventsReadRevoked()
+            },
+            onEventsReadGranted = {
+                handleEventsReadGranted()
             },
             onFilterOptionsUpdated = {
                 onFilterOptionsInvalidated?.invoke()
@@ -423,36 +432,36 @@ class EventsFeedSessionImpl(
         }
     }
 
+    private var loadNextPageJob: Job? = null
+
     private fun handleTerminalAccessInvalidated(
         reason: String,
         targetCompanyId: String?,
     ) {
-        isClosed = true
-        connectJob?.cancel()
-        wsFramesJob?.cancel()
-        connectivityJob?.cancel()
-        connectionStateJob?.cancel()
-        bootstrapJob?.cancel()
-        rebootstrapJob?.cancel()
-        processor.close()
-        sessionScope.launch {
-            webSocketDataSource.disconnect()
+        performCleanup {
             accessInvalidationListener?.onAccessInvalidated(reason, targetCompanyId ?: companyId)
         }
     }
 
-    private suspend fun handleSessionRevoked() {
-        isClosed = true
-        connectJob?.cancel()
-        wsFramesJob?.cancel()
-        connectivityJob?.cancel()
-        connectionStateJob?.cancel()
+    private fun handleSessionRevoked() {
+        performCleanup {
+            sessionManager.logout()
+            accessInvalidationListener?.onAccessInvalidated("SESSION_REVOKED", null)
+        }
+    }
+
+    private fun handleEventsReadRevoked() {
         bootstrapJob?.cancel()
         rebootstrapJob?.cancel()
-        processor.close()
-        webSocketDataSource.disconnect()
-        sessionManager.logout()
-        accessInvalidationListener?.onAccessInvalidated("SESSION_REVOKED", null)
+        loadNextPageJob?.cancel()
+        connectJob?.cancel()
+        sessionScope.launch {
+            webSocketDataSource.disconnect()
+        }
+    }
+
+    private fun handleEventsReadGranted() {
+        triggerBootstrap()
     }
 
     override fun loadNextPage() {
@@ -462,29 +471,31 @@ class EventsFeedSessionImpl(
         val currentSnapshotId = currentState.snapshotId
 
         processor.dispatch(SessionCommand.SetLoadingNextPage(true))
-        sessionScope.launch {
-            try {
-                val pageDto = remoteDataSource.getEventsPage(companyId, cursor, limit = 50)
-                val page = EventsDtoMapper.mapPage(pageDto)
-                consecutiveHttpFailures = 0
-                processor.dispatch(SessionCommand.NextPageLoaded(page, snapshotId = currentSnapshotId))
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: EventsApiException.SnapshotExpired) {
-                processor.dispatch(SessionCommand.PaginationFailed(EventsPaginationError.SnapshotExpired))
-                triggerRebootstrap()
-            } catch (e: Throwable) {
-                consecutiveHttpFailures++
-                checkHttpFailuresNotice()
-                val err =
-                    if (e.message?.contains("Network") == true || !isOnline) {
-                        EventsPaginationError.Network
-                    } else {
-                        EventsPaginationError.Server(e.message)
-                    }
-                processor.dispatch(SessionCommand.PaginationFailed(err))
+        loadNextPageJob?.cancel()
+        loadNextPageJob =
+            sessionScope.launch {
+                try {
+                    val pageDto = remoteDataSource.getEventsPage(companyId, cursor, limit = 50)
+                    val page = EventsDtoMapper.mapPage(pageDto)
+                    consecutiveHttpFailures = 0
+                    processor.dispatch(SessionCommand.NextPageLoaded(page, snapshotId = currentSnapshotId))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: EventsApiException.SnapshotExpired) {
+                    processor.dispatch(SessionCommand.PaginationFailed(EventsPaginationError.SnapshotExpired))
+                    triggerRebootstrap()
+                } catch (e: Throwable) {
+                    consecutiveHttpFailures++
+                    checkHttpFailuresNotice()
+                    val err =
+                        if (e.message?.contains("Network") == true || !isOnline) {
+                            EventsPaginationError.Network
+                        } else {
+                            EventsPaginationError.Server(e.message)
+                        }
+                    processor.dispatch(SessionCommand.PaginationFailed(err))
+                }
             }
-        }
     }
 
     override fun refresh() {
@@ -514,21 +525,14 @@ class EventsFeedSessionImpl(
     }
 
     override fun updateAccessCapabilities(access: EventsAccessCapabilities) {
-        val wasRead = state.value.access.eventsRead
         processor.dispatch(SessionCommand.AccessUpdated(access))
-        if (wasRead && !access.eventsRead) {
-            connectJob?.cancel()
-            sessionScope.launch {
-                webSocketDataSource.disconnect()
-            }
-        } else if (!wasRead && access.eventsRead) {
-            triggerBootstrap()
-        }
     }
 
-    override fun close() {
-        if (isClosed) return
-        isClosed = true
+    private fun performCleanup(postAction: (suspend () -> Unit)? = null) {
+        if (isCleanupStarted) return
+        isCleanupStarted = true
+        isTerminal = true
+
         processor.close()
         connectJob?.cancel()
         wsFramesJob?.cancel()
@@ -536,14 +540,21 @@ class EventsFeedSessionImpl(
         connectionStateJob?.cancel()
         bootstrapJob?.cancel()
         rebootstrapJob?.cancel()
+        loadNextPageJob?.cancel()
+
         sessionScope.launch {
-            kotlinx.coroutines.withContext(NonCancellable) {
+            withContext(NonCancellable) {
                 try {
                     webSocketDataSource.disconnect()
+                    postAction?.invoke()
                 } finally {
                     sessionJob.cancel()
                 }
             }
         }
+    }
+
+    override fun close() {
+        performCleanup()
     }
 }

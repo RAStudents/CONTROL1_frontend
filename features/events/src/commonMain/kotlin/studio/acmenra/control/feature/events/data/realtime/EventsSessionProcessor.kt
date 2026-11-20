@@ -128,6 +128,8 @@ class EventsSessionProcessor(
     private val onTokenRefreshNeeded: suspend () -> Unit,
     private val onSessionRevoked: suspend () -> Unit = {},
     private val onAccessInvalidated: (reason: String, companyId: String?) -> Unit,
+    private val onEventsReadRevoked: () -> Unit = {},
+    private val onEventsReadGranted: () -> Unit = {},
     private val onFilterOptionsUpdated: ((EventsFilterOptionsDto) -> Unit)? = null,
     private val timeSource: TimeSource.Monotonic = TimeSource.Monotonic,
 ) {
@@ -151,26 +153,43 @@ class EventsSessionProcessor(
 
     init {
         scope.launch {
-            for (command in commandChannel) {
-                if (!isActive) break
-                try {
-                    processCommand(command)
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    if (command is SessionCommand.InstallBootstrap) {
-                        command.response.cancel(e)
-                    }
-                    throw e
-                } catch (e: Throwable) {
-                    if (command is SessionCommand.InstallBootstrap) {
-                        command.response.completeExceptionally(e)
+            try {
+                for (command in commandChannel) {
+                    if (!isActive) break
+                    try {
+                        processCommand(command)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        when (command) {
+                            is SessionCommand.InstallBootstrap -> command.response.cancel(e)
+                            is SessionCommand.NextReplayGeneration -> command.response.cancel(e)
+                            else -> Unit
+                        }
+                        throw e
+                    } catch (e: Throwable) {
+                        when (command) {
+                            is SessionCommand.InstallBootstrap -> command.response.completeExceptionally(e)
+                            is SessionCommand.NextReplayGeneration -> command.response.completeExceptionally(e)
+                            else -> Unit
+                        }
+                        if (command is SessionCommand.Close) break
+                        // Prevent uncaught exceptions from killing the command processing loop
+                        isRebootstrapping = true
+                        rebootstrapBuffer.clear()
+                        onTriggerRebootstrap()
                     }
                     if (command is SessionCommand.Close) break
-                    // Prevent uncaught exceptions from killing the command processing loop
-                    isRebootstrapping = true
-                    rebootstrapBuffer.clear()
-                    onTriggerRebootstrap()
                 }
-                if (command is SessionCommand.Close) break
+            } finally {
+                for (remaining in commandChannel) {
+                    when (remaining) {
+                        is SessionCommand.InstallBootstrap -> remaining.response.complete(BootstrapApplyResult.Stale)
+                        is SessionCommand.NextReplayGeneration ->
+                            remaining.response.completeExceptionally(
+                                kotlinx.coroutines.CancellationException("Processor closed"),
+                            )
+                        else -> Unit
+                    }
+                }
             }
         }
     }
@@ -218,8 +237,14 @@ class EventsSessionProcessor(
     private suspend fun processCommand(command: SessionCommand) {
         if (isAccessInvalidated && command !is SessionCommand.Close) {
             // Terminal state: ignore all frames and updates
-            if (command is SessionCommand.InstallBootstrap) {
-                command.response.complete(BootstrapApplyResult.Stale)
+            when (command) {
+                is SessionCommand.InstallBootstrap ->
+                    command.response.complete(BootstrapApplyResult.Stale)
+                is SessionCommand.NextReplayGeneration ->
+                    command.response.completeExceptionally(
+                        IllegalStateException("Processor is terminal: access invalidated"),
+                    )
+                else -> Unit
             }
             return
         }
@@ -271,7 +296,9 @@ class EventsSessionProcessor(
             is SessionCommand.AcknowledgeSucceeded -> handleAcknowledgeSucceeded(command.event)
             is SessionCommand.EventMutationApplied -> handleEventMutationApplied(command.event)
             is SessionCommand.AccessUpdated -> {
-                if (!command.access.eventsRead) {
+                val wasRead = _state.value.access.eventsRead
+                val nowRead = command.access.eventsRead
+                if (wasRead && !nowRead) {
                     snapshotItems.clear()
                     currentOverlay = RealtimeOverlay()
                     rebootstrapBuffer.clear()
@@ -289,6 +316,10 @@ class EventsSessionProcessor(
                             pendingHistoryCount = 0,
                         )
                     }
+                    onEventsReadRevoked()
+                } else if (!wasRead && nowRead) {
+                    _state.update { it.copy(access = command.access) }
+                    onEventsReadGranted()
                 } else {
                     _state.update { it.copy(access = command.access) }
                 }
@@ -341,6 +372,10 @@ class EventsSessionProcessor(
         generation: Long,
         response: CompletableDeferred<BootstrapApplyResult>,
     ) {
+        if (!_state.value.access.eventsRead) {
+            response.complete(BootstrapApplyResult.Stale)
+            return
+        }
         if (generation <= currentBootstrapGeneration) {
             response.complete(BootstrapApplyResult.Stale)
             return

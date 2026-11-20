@@ -6,6 +6,7 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -24,6 +25,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.SessionState
@@ -33,6 +35,7 @@ import studio.acmenra.control.core.ui.notice.Notice
 import studio.acmenra.control.feature.events.data.datasource.EventsApiException
 import studio.acmenra.control.feature.events.data.datasource.EventsWebSocketDataSource
 import studio.acmenra.control.feature.events.data.datasource.FilterOptionsFetchResult
+import studio.acmenra.control.feature.events.data.datasource.IncomingWsEnvelope
 import studio.acmenra.control.feature.events.data.datasource.IncomingWsFrame
 import studio.acmenra.control.feature.events.data.datasource.KtorEventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.KtorEventsWebSocketDataSource
@@ -110,8 +113,8 @@ class EventsContractV292MandatoryTests {
     }
 
     private class TestWebSocketDataSource : EventsWebSocketDataSource {
-        val framesFlow = MutableSharedFlow<IncomingWsFrame>(extraBufferCapacity = 64)
-        override val incomingFrames: Flow<IncomingWsFrame> = framesFlow
+        val framesFlow = MutableSharedFlow<IncomingWsEnvelope>(extraBufferCapacity = 64)
+        override val incomingFrames: Flow<IncomingWsEnvelope> = framesFlow
 
         var connectCalled = false
         var connectedCompanyId: String? = null
@@ -123,6 +126,15 @@ class EventsContractV292MandatoryTests {
         var sentReplayRequests = mutableListOf<Pair<Long, Long>>()
         var connectCount = 0
         var connectionHistory = mutableListOf<Triple<String, Long, Long>>()
+        var currentConnectionId: Long = 0L
+        var failReplayRequest = false
+
+        suspend fun emit(
+            frame: IncomingWsFrame,
+            connId: Long = currentConnectionId,
+        ) {
+            framesFlow.emit(IncomingWsEnvelope(connId, frame))
+        }
 
         override fun connect(
             companyId: String,
@@ -132,19 +144,25 @@ class EventsContractV292MandatoryTests {
             scope: CoroutineScope,
             getClientConfirmedSeq: () -> Long,
             onDisconnected: (reason: WsCloseReason, message: String?) -> Unit,
-        ) {
+        ): Long {
             connectCalled = true
             connectCount++
+            currentConnectionId = connectCount.toLong()
             connectedCompanyId = companyId
             lastReplayId = replayId
             lastAfterSequence = afterSequence
             connectionHistory.add(Triple(companyId, replayId, afterSequence))
+            return currentConnectionId
         }
 
         override suspend fun sendReplayRequest(
             replayId: Long,
             afterSequence: Long,
         ) {
+            if (failReplayRequest) {
+                throw io.ktor.utils.io.errors
+                    .IOException("Failed to send replay request")
+            }
             sentReplayRequests.add(replayId to afterSequence)
         }
 
@@ -228,10 +246,12 @@ class EventsContractV292MandatoryTests {
         replayId: Long,
         sequence: Long,
         eventId: String,
+        payloadSha256: String = "0".repeat(64),
     ): TenantCommitFrameDto =
         TenantCommitFrameDto(
             replayId = replayId,
             tenantSequence = sequence,
+            payloadSha256 = payloadSha256,
             eventCreated = sampleEventDto(eventId),
         )
 
@@ -391,12 +411,12 @@ class EventsContractV292MandatoryTests {
 
                 // Frame delivered to A must NOT appear in B
                 val replayA = wsA.lastReplayId ?: 1L
-                wsA.framesFlow.emit(
+                wsA.emit(
                     IncomingWsFrame.TenantCommit(
-                        TenantCommitFrameDto(
+                        sampleCommitDto(
                             replayId = replayA,
-                            tenantSequence = 101L,
-                            eventCreated = sampleEventDto("ev-comp-A"),
+                            sequence = 101L,
+                            eventId = "ev-comp-A",
                         ),
                     ),
                 )
@@ -498,8 +518,12 @@ class EventsContractV292MandatoryTests {
                 // Receive terminal ACCESS_INVALIDATED
                 processor.dispatch(
                     SessionCommand.WsFrameReceived(
-                        IncomingWsFrame.AccessInvalidated(
-                            AccessInvalidatedFrameDto(reason = "COMPANY_RESTRICTED", companyId = "comp-1"),
+                        IncomingWsEnvelope(
+                            connectionId = 1L,
+                            frame =
+                                IncomingWsFrame.AccessInvalidated(
+                                    AccessInvalidatedFrameDto(reason = "COMPANY_RESTRICTED", companyId = "comp-1"),
+                                ),
                         ),
                     ),
                 )
@@ -517,12 +541,16 @@ class EventsContractV292MandatoryTests {
                 // Subsequent commit arrives after invalidation
                 processor.dispatch(
                     SessionCommand.WsFrameReceived(
-                        IncomingWsFrame.TenantCommit(
-                            TenantCommitFrameDto(
-                                replayId = 1L,
-                                tenantSequence = 101L,
-                                eventCreated = sampleEventDto("ev-after-invalidated"),
-                            ),
+                        IncomingWsEnvelope(
+                            connectionId = 1L,
+                            frame =
+                                IncomingWsFrame.TenantCommit(
+                                    sampleCommitDto(
+                                        replayId = 1L,
+                                        sequence = 101L,
+                                        eventId = "ev-after-invalidated",
+                                    ),
+                                ),
                         ),
                     ),
                 )
@@ -568,8 +596,12 @@ class EventsContractV292MandatoryTests {
                 // Server claims replay completed up to 500
                 processor.dispatch(
                     SessionCommand.WsFrameReceived(
-                        IncomingWsFrame.ReplayCompleted(
-                            ReplayCompletedFrameDto(replayId = 1L, throughSequence = 500L),
+                        IncomingWsEnvelope(
+                            connectionId = 1L,
+                            frame =
+                                IncomingWsFrame.ReplayCompleted(
+                                    ReplayCompletedFrameDto(replayId = 1L, throughSequence = 500L),
+                                ),
                         ),
                     ),
                 )
@@ -713,9 +745,13 @@ class EventsContractV292MandatoryTests {
                 // Trigger RESYNC_REQUIRED to enter rebootstrap buffering
                 processor.dispatch(
                     SessionCommand.WsFrameReceived(
-                        IncomingWsFrame.ResyncRequired(
-                            studio.acmenra.control.feature.events.data.model
-                                .ResyncRequiredFrameDto(replayId = activeReplay),
+                        IncomingWsEnvelope(
+                            connectionId = 1L,
+                            frame =
+                                IncomingWsFrame.ResyncRequired(
+                                    studio.acmenra.control.feature.events.data.model
+                                        .ResyncRequiredFrameDto(replayId = activeReplay),
+                                ),
                         ),
                     ),
                 )
@@ -746,9 +782,15 @@ class EventsContractV292MandatoryTests {
                         eventCreated = sampleEventDto("ev-102"),
                     )
 
-                processor.dispatch(SessionCommand.WsFrameReceived(IncomingWsFrame.TenantCommit(commit101a)))
-                processor.dispatch(SessionCommand.WsFrameReceived(IncomingWsFrame.TenantCommit(commit101b)))
-                processor.dispatch(SessionCommand.WsFrameReceived(IncomingWsFrame.TenantCommit(commit102)))
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(commit101a))),
+                )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(commit101b))),
+                )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(commit102))),
+                )
                 advanceUntilIdle()
 
                 // Rebootstrap loads bootstrap with streamCursor = 100
@@ -1381,9 +1423,13 @@ class EventsContractV292MandatoryTests {
 
                 processor.dispatch(
                     SessionCommand.WsFrameReceived(
-                        IncomingWsFrame.ResyncRequired(
-                            studio.acmenra.control.feature.events.data.model
-                                .ResyncRequiredFrameDto(replayId = activeReplayId),
+                        IncomingWsEnvelope(
+                            connectionId = 1L,
+                            frame =
+                                IncomingWsFrame.ResyncRequired(
+                                    studio.acmenra.control.feature.events.data.model
+                                        .ResyncRequiredFrameDto(replayId = activeReplayId),
+                                ),
                         ),
                     ),
                 )
@@ -1405,8 +1451,12 @@ class EventsContractV292MandatoryTests {
                         payloadSha256 = shaValid,
                         eventCreated = sampleEventDto("ev-valid"),
                     )
-                processor.dispatch(SessionCommand.WsFrameReceived(IncomingWsFrame.TenantCommit(staleCommit)))
-                processor.dispatch(SessionCommand.WsFrameReceived(IncomingWsFrame.TenantCommit(validCommit)))
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(staleCommit))),
+                )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(validCommit))),
+                )
                 advanceUntilIdle()
 
                 val b2 =
@@ -1491,9 +1541,13 @@ class EventsContractV292MandatoryTests {
 
                 processor.dispatch(
                     SessionCommand.WsFrameReceived(
-                        IncomingWsFrame.ResyncRequired(
-                            studio.acmenra.control.feature.events.data.model
-                                .ResyncRequiredFrameDto(replayId = activeReplay),
+                        IncomingWsEnvelope(
+                            connectionId = 1L,
+                            frame =
+                                IncomingWsFrame.ResyncRequired(
+                                    studio.acmenra.control.feature.events.data.model
+                                        .ResyncRequiredFrameDto(replayId = activeReplay),
+                                ),
                         ),
                     ),
                 )
@@ -1508,7 +1562,9 @@ class EventsContractV292MandatoryTests {
                         payloadSha256 = sha102,
                         eventCreated = sampleEventDto("ev-102"),
                     )
-                processor.dispatch(SessionCommand.WsFrameReceived(IncomingWsFrame.TenantCommit(commit102)))
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(commit102))),
+                )
                 advanceUntilIdle()
 
                 val b2 =
@@ -2026,7 +2082,7 @@ class EventsContractV292MandatoryTests {
                 assertEquals(100L, testWs.lastAfterSequence)
 
                 // Trigger RESYNC_REQUIRED to cause rebootstrap
-                testWs.framesFlow.emit(
+                testWs.emit(
                     IncomingWsFrame.ResyncRequired(
                         ResyncRequiredFrameDto(replayId = initialReplay, reason = "BUFFER_GAP"),
                     ),
@@ -2040,7 +2096,7 @@ class EventsContractV292MandatoryTests {
                 assertEquals(200L, testWs.lastAfterSequence)
 
                 // Verify that new commit on new replayId applies successfully
-                testWs.framesFlow.emit(
+                testWs.emit(
                     IncomingWsFrame.TenantCommit(
                         sampleCommitDto(
                             replayId = reconnectedReplay,
@@ -2127,12 +2183,16 @@ class EventsContractV292MandatoryTests {
                 // Deliver incoming commit while EVENTS_READ is false
                 processor.dispatch(
                     SessionCommand.WsFrameReceived(
-                        IncomingWsFrame.TenantCommit(
-                            sampleCommitDto(
-                                replayId = processor.currentReplayId,
-                                sequence = 101L,
-                                eventId = "ev-leak-attempt",
-                            ),
+                        IncomingWsEnvelope(
+                            connectionId = 1L,
+                            frame =
+                                IncomingWsFrame.TenantCommit(
+                                    sampleCommitDto(
+                                        replayId = processor.currentReplayId,
+                                        sequence = 101L,
+                                        eventId = "ev-leak-attempt",
+                                    ),
+                                ),
                         ),
                     ),
                 )
@@ -2244,7 +2304,7 @@ class EventsContractV292MandatoryTests {
                 advanceUntilIdle()
 
                 // WS sends AUTH_REQUIRED with SESSION_REVOKED
-                testWs.framesFlow.emit(
+                testWs.emit(
                     IncomingWsFrame.AuthRequired(
                         AuthRequiredFrameDto(reason = "SESSION_REVOKED"),
                     ),
@@ -2280,11 +2340,11 @@ class EventsContractV292MandatoryTests {
                 }
             val dataSource = KtorEventsWebSocketDataSource(client)
 
-            val receivedFrames = mutableListOf<IncomingWsFrame>()
+            val receivedFrames = mutableListOf<IncomingWsEnvelope>()
             val collectJob =
                 launch {
-                    dataSource.incomingFrames.collect { frame ->
-                        receivedFrames.add(frame)
+                    dataSource.incomingFrames.collect { envelope ->
+                        receivedFrames.add(envelope)
                     }
                 }
 
@@ -2336,11 +2396,79 @@ class EventsContractV292MandatoryTests {
 
             // Verify: all connection 1 frames were discarded, only connection 2 frame was received
             assertEquals(1, receivedFrames.size)
-            assertEquals(validCommit, receivedFrames.first())
+            assertEquals(validCommit, receivedFrames.first().frame)
+            assertEquals(conn2Id, receivedFrames.first().connectionId)
 
             collectJob.cancel()
             dataSource.disconnect()
             advanceUntilIdle()
+
+            // Also verify processor drops frames with connId < activeConnectionId
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = {},
+                        onTokenRefreshNeeded = {},
+                        onAccessInvalidated = { _, _ -> },
+                    )
+                val bootstrap =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = emptyList(),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 0,
+                                asOfSequence = 100L,
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 0,
+                            ),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(bootstrap, 1L)
+                advanceUntilIdle()
+
+                // Activate connection 2 in processor
+                processor.dispatch(SessionCommand.WsConnectionActivated(2L))
+                advanceUntilIdle()
+
+                // Dispatch stale frame with connectionId = 1L (e.g. was sitting in actor channel before activation)
+                processor.dispatch(SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, staleCommit)))
+                advanceUntilIdle()
+                // Must be discarded without affecting state
+                assertTrue(
+                    processor.state.value.realtimeOverlay.entries
+                        .isEmpty(),
+                )
+
+                // Dispatch valid frame with connectionId = 2L and next sequence 101L
+                val processorCommit =
+                    IncomingWsFrame.TenantCommit(
+                        sampleCommitDto(processor.currentReplayId, 101L, "ev-valid").copy(payloadSha256 = shaValid),
+                    )
+                processor.dispatch(SessionCommand.WsFrameReceived(IncomingWsEnvelope(2L, processorCommit)))
+                processor.dispatch(SessionCommand.ViewportAtTop)
+                advanceUntilIdle()
+                assertEquals(1, processor.state.value.visibleEvents.size)
+                assertEquals(
+                    "ev-valid",
+                    processor.state.value.visibleEvents
+                        .first()
+                        .id,
+                )
+            } finally {
+                testScope.cancel()
+            }
         }
 
     // Scenario 24: Concurrent acknowledge of distinct events runs in parallel without cancellation or stuck pending ID
@@ -3206,6 +3334,455 @@ class EventsContractV292MandatoryTests {
                 session.close()
                 advanceUntilIdle()
                 assertEquals(1, testWs.disconnectCount)
+            } finally {
+                parentScope.cancel()
+            }
+        }
+
+    // Scenario 36: TenantCommitFrameDto strictly requires payload_sha256 in JSON deserialization
+    @Test
+    fun testScenario36_TenantCommitFrameDtoRequiresPayloadSha256InJson() {
+        val eventJson = Json.encodeToString(sampleEventDto("ev-1"))
+        val validJson =
+            """
+            {
+                "replay_id": 1,
+                "tenant_sequence": 100,
+                "payload_sha256": "${"0".repeat(64)}",
+                "event_created": $eventJson
+            }
+            """.trimIndent()
+        val decoded = Json.decodeFromString<TenantCommitFrameDto>(validJson)
+        assertEquals(100L, decoded.tenantSequence)
+        assertEquals("0".repeat(64), decoded.payloadSha256)
+
+        val missingShaJson =
+            """
+            {
+                "replay_id": 1,
+                "tenant_sequence": 100,
+                "event_created": $eventJson
+            }
+            """.trimIndent()
+        assertFailsWith<SerializationException> {
+            Json.decodeFromString<TenantCommitFrameDto>(missingShaJson)
+        }
+    }
+
+    // Scenario 37: Realtime commit with same sequence but different payloadSha256 triggers rebootstrap
+    @Test
+    fun testScenario37_RealtimeCommitDuplicateSequenceHashMismatchTriggersRebootstrap() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var rebootstrapTriggered = false
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { rebootstrapTriggered = true },
+                        onTokenRefreshNeeded = {},
+                        onAccessInvalidated = { _, _ -> },
+                    )
+                val bootstrap =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = emptyList(),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 0,
+                                asOfSequence = 100L,
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 0,
+                            ),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(bootstrap, 1L)
+                advanceUntilIdle()
+
+                val sha1 = "1".repeat(64)
+                val commit1 =
+                    TenantCommitFrameDto(
+                        replayId = processor.currentReplayId,
+                        tenantSequence = 101L,
+                        payloadSha256 = sha1,
+                        eventCreated = sampleEventDto("ev-101"),
+                    )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(commit1))),
+                )
+                advanceUntilIdle()
+
+                assertFalse(rebootstrapTriggered)
+
+                // Dispatch another commit for sequence 101 but with a different hash (integrity violation)
+                val sha2 = "2".repeat(64)
+                val commitDuplicateMismatch =
+                    TenantCommitFrameDto(
+                        replayId = processor.currentReplayId,
+                        tenantSequence = 101L,
+                        payloadSha256 = sha2,
+                        eventCreated = sampleEventDto("ev-101-corrupted"),
+                    )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(commitDuplicateMismatch)),
+                    ),
+                )
+                advanceUntilIdle()
+
+                assertTrue(rebootstrapTriggered)
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 38: Ambiguous network error during startExport preserves activeExportKey on retry
+    @Test
+    fun testScenario38_AmbiguousNetworkErrorPreservesExportIdempotencyKey() =
+        runTest(testDispatcher) {
+            val usedKeys = mutableListOf<String>()
+            var failWithNetworkError = true
+            val createExportUseCase =
+                object : CreateEventsExportUseCase {
+                    override suspend fun invoke(
+                        companyId: String,
+                        request: EventsExportRequest,
+                        idempotencyKey: String,
+                    ): EventsExportStatus {
+                        usedKeys.add(idempotencyKey)
+                        if (failWithNetworkError) {
+                            throw io.ktor.utils.io.errors
+                                .IOException("Network timeout")
+                        }
+                        return EventsExportStatus(
+                            exportId = "exp-1",
+                            status = EventsExportStatusCode.QUEUED,
+                            totalRecords = 1,
+                            processedRecords = 0,
+                            createdAt = Instant.fromEpochMilliseconds(0),
+                        )
+                    }
+                }
+
+            val vm = createTestViewModel(createEventsExportUseCase = createExportUseCase)
+            vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true, reportsExport = true))
+            advanceUntilIdle()
+
+            // First attempt fails with network error
+            vm.startExport()
+            advanceUntilIdle()
+            assertEquals(1, usedKeys.size)
+            assertNotNull(vm.state.value.exportError)
+
+            // Retry attempt: network recovered
+            failWithNetworkError = false
+            vm.startExport()
+            advanceUntilIdle()
+            assertEquals(2, usedKeys.size)
+
+            // Keys must match because network error is ambiguous and must reuse key
+            assertEquals(usedKeys[0], usedKeys[1])
+            assertEquals(
+                EventsExportStatusCode.QUEUED,
+                vm.state.value.exportJobStatus
+                    ?.status,
+            )
+            vm.onCleared()
+        }
+
+    // Scenario 39: Rapid true -> false -> true EVENTS_READ transition serializes disconnect and reconnect
+    @Test
+    fun testScenario39_RapidEventsReadTransitionSerializesDisconnectAndReconnect() =
+        runTest(testDispatcher) {
+            val parentScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val testWs = TestWebSocketDataSource()
+                val session =
+                    EventsFeedSessionImpl(
+                        companyId = "comp-1",
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        remoteDataSource =
+                            object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                                override suspend fun getBootstrap(
+                                    companyId: String,
+                                    query: EventsQuery,
+                                    limit: Int,
+                                ) = sampleBootstrapDto()
+
+                                override suspend fun getEventsPage(
+                                    companyId: String,
+                                    cursor: String,
+                                    limit: Int,
+                                ) = error("unused")
+
+                                override suspend fun getFilterOptions(
+                                    companyId: String,
+                                    ifNoneMatchEtag: String?,
+                                ) = error("unused")
+
+                                override suspend fun acknowledgeEvent(
+                                    companyId: String,
+                                    eventId: String,
+                                ) = error("unused")
+
+                                override suspend fun markEventErroneous(
+                                    companyId: String,
+                                    eventId: String,
+                                    expectedClassificationVersion: Long,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun createExport(
+                                    companyId: String,
+                                    request: studio.acmenra.control.feature.events.data.model.CreateExportRequestDto,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun getExportStatus(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+
+                                override suspend fun downloadExport(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+                            },
+                        webSocketDataSource = testWs,
+                        sessionManager = SessionManager(TestTokenStorage()),
+                        connectivityProvider =
+                            object : EventsConnectivityProvider {
+                                override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                            },
+                        accessInvalidationListener = { _, _ -> },
+                        parentScope = parentScope,
+                    )
+                advanceUntilIdle()
+                assertEquals(1, testWs.connectCount)
+
+                // Rapid transition: true -> false -> true
+                session.updateAccessCapabilities(EventsAccessCapabilities(eventsRead = false))
+                session.updateAccessCapabilities(EventsAccessCapabilities(eventsRead = true))
+                advanceUntilIdle()
+
+                // Must have disconnected old connection and reconnected new connection
+                assertEquals(1, testWs.disconnectCount)
+                assertEquals(2, testWs.connectCount)
+                assertTrue(session.state.value.access.eventsRead)
+
+                session.close()
+                advanceUntilIdle()
+            } finally {
+                parentScope.cancel()
+            }
+        }
+
+    // Scenario 40: Revoking EVENTS_READ during loadNextPage resets isLoadingNextPage to false
+    @Test
+    fun testScenario40_RevokingEventsReadDuringLoadNextPageResetsLoadingState() =
+        runTest(testDispatcher) {
+            val parentScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val pageStarted = CompletableDeferred<Unit>()
+                val pageBlocker = CompletableDeferred<EventsPageDto>()
+                val testWs = TestWebSocketDataSource()
+                val session =
+                    EventsFeedSessionImpl(
+                        companyId = "comp-1",
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        remoteDataSource =
+                            object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                                override suspend fun getBootstrap(
+                                    companyId: String,
+                                    query: EventsQuery,
+                                    limit: Int,
+                                ) = sampleBootstrapDto().copy(
+                                    events =
+                                        EventsPageDto(
+                                            items = listOf(sampleEventDto("ev-1")),
+                                            nextCursor = "cursor-next",
+                                            hasMore = true,
+                                            totalCount = 10,
+                                            asOfSequence = 100L,
+                                        ),
+                                )
+
+                                override suspend fun getEventsPage(
+                                    companyId: String,
+                                    cursor: String,
+                                    limit: Int,
+                                ): EventsPageDto {
+                                    pageStarted.complete(Unit)
+                                    return pageBlocker.await()
+                                }
+
+                                override suspend fun getFilterOptions(
+                                    companyId: String,
+                                    ifNoneMatchEtag: String?,
+                                ) = error("unused")
+
+                                override suspend fun acknowledgeEvent(
+                                    companyId: String,
+                                    eventId: String,
+                                ) = error("unused")
+
+                                override suspend fun markEventErroneous(
+                                    companyId: String,
+                                    eventId: String,
+                                    expectedClassificationVersion: Long,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun createExport(
+                                    companyId: String,
+                                    request: studio.acmenra.control.feature.events.data.model.CreateExportRequestDto,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun getExportStatus(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+
+                                override suspend fun downloadExport(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+                            },
+                        webSocketDataSource = testWs,
+                        sessionManager = SessionManager(TestTokenStorage()),
+                        connectivityProvider =
+                            object : EventsConnectivityProvider {
+                                override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                            },
+                        accessInvalidationListener = { _, _ -> },
+                        parentScope = parentScope,
+                    )
+                advanceUntilIdle()
+
+                // Trigger loadNextPage
+                session.loadNextPage()
+                advanceUntilIdle()
+                assertTrue(pageStarted.isCompleted)
+                assertTrue(session.state.value.isLoadingNextPage)
+
+                // Revoke access while pagination is pending
+                session.updateAccessCapabilities(EventsAccessCapabilities(eventsRead = false))
+                advanceUntilIdle()
+
+                // isLoadingNextPage must be reset to false immediately
+                assertFalse(session.state.value.isLoadingNextPage)
+
+                session.close()
+                advanceUntilIdle()
+            } finally {
+                parentScope.cancel()
+            }
+        }
+
+    // Scenario 41: Failure in sendReplayRequest triggers rebootstrap instead of hanging in replaying
+    @Test
+    fun testScenario41_SendReplayRequestFailureTriggersRebootstrap() =
+        runTest(testDispatcher) {
+            val parentScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val testWs = TestWebSocketDataSource()
+                var bootstrapCallCount = 0
+                val session =
+                    EventsFeedSessionImpl(
+                        companyId = "comp-1",
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        remoteDataSource =
+                            object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                                override suspend fun getBootstrap(
+                                    companyId: String,
+                                    query: EventsQuery,
+                                    limit: Int,
+                                ): EventsBootstrapDto {
+                                    bootstrapCallCount++
+                                    return sampleBootstrapDto(cursor = 100L * bootstrapCallCount)
+                                }
+
+                                override suspend fun getEventsPage(
+                                    companyId: String,
+                                    cursor: String,
+                                    limit: Int,
+                                ) = error("unused")
+
+                                override suspend fun getFilterOptions(
+                                    companyId: String,
+                                    ifNoneMatchEtag: String?,
+                                ) = error("unused")
+
+                                override suspend fun acknowledgeEvent(
+                                    companyId: String,
+                                    eventId: String,
+                                ) = error("unused")
+
+                                override suspend fun markEventErroneous(
+                                    companyId: String,
+                                    eventId: String,
+                                    expectedClassificationVersion: Long,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun createExport(
+                                    companyId: String,
+                                    request: studio.acmenra.control.feature.events.data.model.CreateExportRequestDto,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun getExportStatus(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+
+                                override suspend fun downloadExport(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+                            },
+                        webSocketDataSource = testWs,
+                        sessionManager = SessionManager(TestTokenStorage()),
+                        connectivityProvider =
+                            object : EventsConnectivityProvider {
+                                override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                            },
+                        accessInvalidationListener = { _, _ -> },
+                        parentScope = parentScope,
+                    )
+                advanceUntilIdle()
+                assertEquals(1, bootstrapCallCount)
+
+                // Configure replay requests to fail
+                testWs.failReplayRequest = true
+
+                // Send a replay request by receiving a REPLAY_COMPLETED through a higher sequence
+                val currentReplay = testWs.lastReplayId ?: 1L
+                testWs.emit(
+                    IncomingWsFrame.ReplayCompleted(
+                        ReplayCompletedFrameDto(replayId = currentReplay, throughSequence = 150L),
+                    ),
+                )
+                advanceUntilIdle()
+
+                // Sending replay request failed -> must trigger rebootstrap!
+                assertTrue(bootstrapCallCount >= 2)
+
+                session.close()
+                advanceUntilIdle()
             } finally {
                 parentScope.cancel()
             }

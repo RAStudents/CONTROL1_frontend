@@ -8,6 +8,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import studio.acmenra.control.core.network.model.TokenPair
 
+@OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
 class SessionManager(
     private val tokenStorage: TokenStorage,
 ) {
@@ -19,20 +20,20 @@ class SessionManager(
     @kotlin.concurrent.Volatile
     private var currentRevision: Long = 0L
 
-    @kotlin.concurrent.Volatile
-    private var refreshDelegate: (suspend (failedAccessToken: String?) -> SessionSnapshot?)? = null
+    private val refreshDelegate =
+        kotlin.concurrent.atomics.AtomicReference<(suspend (String?) -> SessionSnapshot?)?>(null)
 
-    fun setRefreshDelegate(delegate: (suspend (failedAccessToken: String?) -> SessionSnapshot?)?) {
-        this.refreshDelegate = delegate
+    fun setRefreshDelegate(delegate: (suspend (String?) -> SessionSnapshot?)?) {
+        refreshDelegate.store(delegate)
+    }
+
+    fun clearRefreshDelegate(expected: suspend (String?) -> SessionSnapshot?) {
+        refreshDelegate.compareAndSet(expected, null)
     }
 
     suspend fun refreshActiveSession(failedAccessToken: String? = null): SessionSnapshot? {
-        val delegate = refreshDelegate
-        return if (delegate != null) {
-            delegate(failedAccessToken)
-        } else {
-            getSnapshot()
-        }
+        val delegate = refreshDelegate.load()
+        return delegate?.invoke(failedAccessToken) ?: getSnapshot()
     }
 
     fun currentRevision(): Long = currentRevision

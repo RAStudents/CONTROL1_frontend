@@ -41,6 +41,7 @@ data class EventsAccessCapabilities(
     val reportsExport: Boolean = false,
 ) {
     val canAcknowledge: Boolean get() = eventsRead && eventsReview
+    val canExport: Boolean get() = eventsRead && reportsExport
 }
 
 data class Event(

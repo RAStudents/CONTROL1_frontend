@@ -7,6 +7,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.auth.SessionManager
+import studio.acmenra.control.core.network.client.isConnectivityError
 import studio.acmenra.control.feature.events.data.datasource.EventsApiException
 import studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.EventsWebSocketDataSource
@@ -124,21 +125,26 @@ class EventsRepositoryImpl(
     }
 
     override suspend fun getFilterOptions(companyId: String): EventsFilterOptions {
-        val stateBefore = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
-        val startCacheGen: Long = stateBefore.cacheGeneration
-        val requestGen: Long = nextFilterRequestGeneration(companyId)
+        val (startCacheGen, etag, requestGen) =
+            filterOptionsMutex.withLock {
+                val stateBefore = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
+                Triple(
+                    stateBefore.cacheGeneration,
+                    stateBefore.cached?.etag,
+                    nextFilterRequestGeneration(companyId),
+                )
+            }
 
-        val cached = stateBefore.cached
         val result =
             remoteDataSource.getFilterOptions(
                 companyId = companyId,
-                ifNoneMatchEtag = cached?.etag,
+                ifNoneMatchEtag = etag,
             )
 
-        filterOptionsMutex.withLock {
-            return when (result) {
-                is FilterOptionsFetchResult.Success -> {
-                    val mapped = EventsDtoMapper.mapFilterOptions(result.options)
+        when (result) {
+            is FilterOptionsFetchResult.Success -> {
+                val mapped = EventsDtoMapper.mapFilterOptions(result.options)
+                filterOptionsMutex.withLock {
                     companyFilterStates.update { map ->
                         val current = map[companyId] ?: CompanyFilterCacheState()
                         if (current.cacheGeneration == startCacheGen && requestGen >= current.latestAppliedRequestGen) {
@@ -153,43 +159,50 @@ class EventsRepositoryImpl(
                             map
                         }
                     }
-                    mapped
                 }
-                FilterOptionsFetchResult.NotModified -> {
-                    val current = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
-                    if (current.cacheGeneration == startCacheGen &&
-                        current.cached != null &&
-                        requestGen >= current.latestAppliedRequestGen
-                    ) {
-                        current.cached.options
-                    } else {
-                        // Cached body missing or invalidated in-flight, re-fetch without ETag
-                        val freshResult = remoteDataSource.getFilterOptions(companyId, ifNoneMatchEtag = null)
-                        if (freshResult is FilterOptionsFetchResult.Success) {
-                            val mapped = EventsDtoMapper.mapFilterOptions(freshResult.options)
-                            companyFilterStates.update { map ->
-                                val now = map[companyId] ?: CompanyFilterCacheState()
-                                if (now.cacheGeneration == current.cacheGeneration &&
-                                    requestGen >= now.latestAppliedRequestGen
-                                ) {
-                                    map + (
-                                        companyId to
-                                            now.copy(
-                                                latestAppliedRequestGen = requestGen,
-                                                cached = CachedFilterOptions(options = mapped, etag = freshResult.etag),
-                                            )
-                                    )
-                                } else {
-                                    map
-                                }
-                            }
-                            mapped
+                return mapped
+            }
+            FilterOptionsFetchResult.NotModified -> {
+                val cached =
+                    filterOptionsMutex.withLock {
+                        val current = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
+                        if (current.cacheGeneration == startCacheGen &&
+                            current.cached != null &&
+                            requestGen >= current.latestAppliedRequestGen
+                        ) {
+                            current.cached.options
                         } else {
-                            throw IllegalStateException(
-                                "Server returned NotModified (304) on unconditional filter options request",
-                            )
+                            null
                         }
                     }
+                if (cached != null) {
+                    return cached
+                }
+
+                val freshResult = remoteDataSource.getFilterOptions(companyId, ifNoneMatchEtag = null)
+                if (freshResult is FilterOptionsFetchResult.Success) {
+                    val mapped = EventsDtoMapper.mapFilterOptions(freshResult.options)
+                    filterOptionsMutex.withLock {
+                        companyFilterStates.update { map ->
+                            val now = map[companyId] ?: CompanyFilterCacheState()
+                            if (now.cacheGeneration == startCacheGen && requestGen >= now.latestAppliedRequestGen) {
+                                map + (
+                                    companyId to
+                                        now.copy(
+                                            latestAppliedRequestGen = requestGen,
+                                            cached = CachedFilterOptions(options = mapped, etag = freshResult.etag),
+                                        )
+                                )
+                            } else {
+                                map
+                            }
+                        }
+                    }
+                    return mapped
+                } else {
+                    throw IllegalStateException(
+                        "Server returned NotModified (304) on unconditional filter options request",
+                    )
                 }
             }
         }
@@ -247,9 +260,7 @@ class EventsRepositoryImpl(
             EventsOperationResult.Failure(err)
         } catch (e: Throwable) {
             val err =
-                if (e.message?.contains("403") == true || e.message?.contains("PermissionDenied") == true) {
-                    EventsMutationError.PermissionDenied
-                } else if (e.message?.contains("Network") == true || e.message?.contains("Connect") == true) {
+                if (isConnectivityError(e)) {
                     EventsMutationError.Network
                 } else {
                     EventsMutationError.Server(e.message)
@@ -294,9 +305,7 @@ class EventsRepositoryImpl(
             EventsOperationResult.Failure(err)
         } catch (e: Throwable) {
             val err =
-                if (e.message?.contains("403") == true || e.message?.contains("PermissionDenied") == true) {
-                    EventsMutationError.PermissionDenied
-                } else if (e.message?.contains("Network") == true || e.message?.contains("Connect") == true) {
+                if (isConnectivityError(e)) {
                     EventsMutationError.Network
                 } else {
                     EventsMutationError.Server(e.message)

@@ -10,6 +10,7 @@ import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementSt
 import studio.acmenra.control.feature.events.domain.model.EventIconKey
 import studio.acmenra.control.feature.events.domain.model.EventValidityFilter
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
+import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
 import studio.acmenra.control.feature.events.domain.model.EventsFilter
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
 import studio.acmenra.control.feature.events.domain.model.EventsQueryRouteCodec
@@ -224,5 +225,70 @@ class EventsDomainTest {
         val (decodedCompany, decodedQuery) = EventsQueryRouteCodec.decodeHash(encoded)
         assertNull(decodedCompany)
         assertEquals("Тест_%\\", decodedQuery.filter.searchId)
+    }
+
+    @Test
+    fun testEventsQueryRouteCodecReconstructsDateSelectionWithBusinessTimezone() {
+        val tz = TimeZone.of("UTC+3")
+        val singleDay = DateSelection.Single(LocalDate(2026, 5, 10))
+        val (from, to) = DateFilterUtils.dateSelectionToUtcBounds(singleDay, tz)
+        val query = EventsQuery(filter = EventsFilter(dateFrom = from, dateTo = to, dateSelection = singleDay))
+        val encoded = EventsQueryRouteCodec.encodeHash("c1", query)
+
+        val (_, decoded) = EventsQueryRouteCodec.decodeHash(encoded, tz)
+        assertEquals(from, decoded.filter.dateFrom)
+        assertEquals(to, decoded.filter.dateTo)
+        assertTrue(decoded.filter.dateSelection is DateSelection.Single)
+        assertEquals(LocalDate(2026, 5, 10), (decoded.filter.dateSelection as DateSelection.Single).date)
+
+        val range = DateSelection.Range(LocalDate(2026, 5, 10), LocalDate(2026, 5, 15))
+        val (rangeFrom, rangeTo) = DateFilterUtils.dateSelectionToUtcBounds(range, tz)
+        val rangeQuery =
+            EventsQuery(filter = EventsFilter(dateFrom = rangeFrom, dateTo = rangeTo, dateSelection = range))
+        val rangeEncoded = EventsQueryRouteCodec.encodeHash("c1", rangeQuery)
+
+        val (_, decodedRange) = EventsQueryRouteCodec.decodeHash(rangeEncoded, tz)
+        assertEquals(rangeFrom, decodedRange.filter.dateFrom)
+        assertEquals(rangeTo, decodedRange.filter.dateTo)
+        assertTrue(decodedRange.filter.dateSelection is DateSelection.Range)
+        assertEquals(LocalDate(2026, 5, 10), (decodedRange.filter.dateSelection as DateSelection.Range).startDate)
+        assertEquals(LocalDate(2026, 5, 15), (decodedRange.filter.dateSelection as DateSelection.Range).endDate)
+    }
+
+    @Test
+    fun testEventsAccessCapabilitiesCanExport() {
+        assertFalse(EventsAccessCapabilities(eventsRead = false, eventsReview = false, reportsExport = false).canExport)
+        assertFalse(EventsAccessCapabilities(eventsRead = false, eventsReview = false, reportsExport = true).canExport)
+        assertFalse(EventsAccessCapabilities(eventsRead = true, eventsReview = false, reportsExport = false).canExport)
+        assertTrue(EventsAccessCapabilities(eventsRead = true, eventsReview = false, reportsExport = true).canExport)
+        assertTrue(EventsAccessCapabilities(eventsRead = true, eventsReview = true, reportsExport = true).canExport)
+    }
+
+    @Test
+    fun testEventsExportDownloadEqualsAndHashCode() {
+        val d1 =
+            EventsExportDownload(
+                exportId = "exp-1",
+                filename = "report.csv",
+                bytes = byteArrayOf(1, 2, 3),
+                contentType = "text/csv",
+            )
+        val d2 =
+            EventsExportDownload(
+                exportId = "exp-1",
+                filename = "report.csv",
+                bytes = byteArrayOf(1, 2, 3),
+                contentType = "text/csv",
+            )
+        val d3 =
+            EventsExportDownload(
+                exportId = "exp-1",
+                filename = "report.csv",
+                bytes = byteArrayOf(1, 2, 4),
+                contentType = "text/csv",
+            )
+        assertEquals(d1, d2)
+        assertEquals(d1.hashCode(), d2.hashCode())
+        assertFalse(d1 == d3)
     }
 }

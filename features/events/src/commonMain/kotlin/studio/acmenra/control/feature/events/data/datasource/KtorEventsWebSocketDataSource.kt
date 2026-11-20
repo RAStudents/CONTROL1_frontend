@@ -2,6 +2,7 @@ package studio.acmenra.control.feature.events.data.datasource
 
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.websocket.webSocket
+import io.ktor.http.encodeURLPathPart
 import io.ktor.websocket.Frame
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
@@ -156,7 +157,6 @@ class KtorEventsWebSocketDataSource(
     private var currentSession: ConnectionSession? = null
 
     private val activeConnectionId = kotlin.concurrent.atomics.AtomicLong(0L)
-    private var lastConfirmedSeq: Long = 0L
 
     internal fun emitRawFrameForTest(
         connectionId: Long,
@@ -183,7 +183,6 @@ class KtorEventsWebSocketDataSource(
         onDisconnected: (reason: WsCloseReason, message: String?) -> Unit,
     ): Long {
         val outChan = Channel<Frame>(Channel.BUFFERED)
-        lastConfirmedSeq = afterSequence
 
         val connectionId = activeConnectionId.addAndFetch(1L)
 
@@ -244,7 +243,6 @@ class KtorEventsWebSocketDataSource(
                                     break
                                 }
                                 val confirmedSeq = getClientConfirmedSeq()
-                                lastConfirmedSeq = confirmedSeq
                                 val hbFrame = HeartbeatFrameDto(clientConfirmedSeq = confirmedSeq)
                                 try {
                                     outChan.send(Frame.Text(json.encodeToString(hbFrame)))
@@ -428,7 +426,6 @@ class KtorEventsWebSocketDataSource(
     }
 
     override suspend fun sendHeartbeat(clientConfirmedSeq: Long) {
-        lastConfirmedSeq = clientConfirmedSeq
         val frame = HeartbeatFrameDto(clientConfirmedSeq = clientConfirmedSeq)
         val text = json.encodeToString(frame)
         try {
@@ -463,13 +460,20 @@ class KtorEventsWebSocketDataSource(
         }
     }
 
-    private fun buildWsUrl(companyId: String): String {
-        val path = "api/v1/companies/$companyId/events/ws"
+    internal fun buildWsUrl(companyId: String): String {
+        val encodedCompany = companyId.encodeURLPathPart()
+        val base = wsEndpointBase.trim().trimEnd('/')
+        val urlWithoutApi =
+            when {
+                base.endsWith("/api/v1", ignoreCase = true) -> base.substring(0, base.length - "/api/v1".length)
+                else -> base
+            }
+        val path = "api/v1/companies/$encodedCompany/events/ws"
         val fullUrl =
-            if (wsEndpointBase.isBlank()) {
+            if (urlWithoutApi.isBlank()) {
                 path
             } else {
-                "${wsEndpointBase.trimEnd('/')}/$path"
+                "$urlWithoutApi/$path"
             }
         return when {
             fullUrl.startsWith("http://", ignoreCase = true) ->

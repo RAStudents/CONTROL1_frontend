@@ -67,7 +67,10 @@ object EventsQueryRouteCodec {
         return "$HASH_PREFIX?$queryString"
     }
 
-    fun decodeHash(rawHashOrUrl: String): Pair<String?, EventsQuery> {
+    fun decodeHash(
+        rawHashOrUrl: String,
+        businessTimezone: kotlinx.datetime.TimeZone? = null,
+    ): Pair<String?, EventsQuery> {
         val raw = rawHashOrUrl.substringAfter("#", rawHashOrUrl)
         val queryPart =
             if (raw.contains("?")) {
@@ -131,9 +134,17 @@ object EventsQueryRouteCodec {
             }
         }
 
+        val dateSelection =
+            if (businessTimezone != null && (dateFrom != null || dateTo != null)) {
+                DateFilterUtils.utcBoundsToDateSelection(dateFrom, dateTo, businessTimezone)
+            } else {
+                DateSelection.All
+            }
+
         val filter =
             EventsFilter(
                 searchId = searchId,
+                dateSelection = dateSelection,
                 dateFrom = dateFrom,
                 dateTo = dateTo,
                 eventTypeIds = eventTypeIds,

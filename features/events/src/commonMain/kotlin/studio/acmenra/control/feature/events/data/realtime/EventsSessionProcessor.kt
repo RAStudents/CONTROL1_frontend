@@ -138,11 +138,18 @@ class EventsSessionProcessor(
     private val onEventsReadGranted: () -> Unit = {},
     private val onFilterOptionsUpdated: ((EventsFilterOptionsDto) -> Unit)? = null,
     private val timeSource: TimeSource.Monotonic = TimeSource.Monotonic,
+    private val companyId: String = "",
 ) {
-    private val _state = MutableStateFlow(EventsFeedState(access = initialAccess))
+    private val _state =
+        MutableStateFlow(
+            EventsFeedState(
+                access = initialAccess,
+                isInitialLoading = initialAccess.eventsRead && companyId.isNotBlank(),
+            ),
+        )
     val state: StateFlow<EventsFeedState> = _state.asStateFlow()
 
-    private val commandChannel = Channel<SessionCommand>(Channel.UNLIMITED)
+    private val commandChannel = Channel<SessionCommand>(capacity = 512)
     private val sequenceProcessor = TenantSequenceProcessor()
     private val snapshotItems = mutableListOf<Event>()
     private var currentOverlay = RealtimeOverlay()
@@ -240,7 +247,12 @@ class EventsSessionProcessor(
     }
 
     fun dispatch(command: SessionCommand) {
-        commandChannel.trySend(command)
+        val result = commandChannel.trySend(command)
+        if (result.isFailure) {
+            if (command is SessionCommand.WsFrameReceived) {
+                onTriggerRebootstrap()
+            }
+        }
     }
 
     fun close() {
@@ -408,6 +420,7 @@ class EventsSessionProcessor(
                     snapshotItems.clear()
                     currentOverlay = RealtimeOverlay()
                     rebootstrapBuffer.clear()
+                    sequenceProcessor.startReplay(1L, 0L)
                     isRebootstrapping = false
                     bufferReplayId = null
                     nextCursor = null
@@ -418,7 +431,10 @@ class EventsSessionProcessor(
                             realtimeOverlay = RealtimeOverlay(),
                             summary = null,
                             snapshotTotalCount = 0,
+                            asOfSequence = 0L,
                             hasMore = false,
+                            isInitialLoading = false,
+                            initialLoadError = null,
                             isLoadingNextPage = false,
                             paginationError = null,
                             pendingNewerCount = 0,
@@ -1006,6 +1022,10 @@ class EventsSessionProcessor(
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
             )
+        }
+
+        if (currentOverlay.entries.size > 500) {
+            onTriggerRebootstrap()
         }
     }
 

@@ -32,6 +32,7 @@ import kotlinx.serialization.json.Json
 import studio.acmenra.control.NetworkConfig
 import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.auth.SessionManager
+import studio.acmenra.control.core.network.auth.SessionSnapshot
 import studio.acmenra.control.core.network.engine.createHttpEngineFactory
 import studio.acmenra.control.core.network.model.OAuthErrorResponse
 import studio.acmenra.control.core.network.model.RefreshTokenRequest
@@ -75,135 +76,148 @@ object HttpClientFactory {
             }
 
         val refreshClient = createExternalClient(enableLogs = enableLogs, customLogger = customLogger, engine = engine)
-        return buildClient(engine) {
-            installNetworkTimeouts()
+        val client =
+            try {
+                buildClient(engine) {
+                    installNetworkTimeouts()
 
-            defaultRequest {
-                url(apiBaseUrl.trimEnd('/') + "/")
-                header(HttpHeaders.Accept, ContentType.Application.Json.toString())
-            }
-
-            install(originGuardPlugin)
-
-            install(ContentNegotiation) {
-                json(
-                    Json {
-                        prettyPrint = debugMode
-                        isLenient = true
-                        ignoreUnknownKeys = true
-                        encodeDefaults = false
-                    },
-                )
-            }
-
-            install(Auth) {
-                bearer {
-                    cacheTokens = false
-                    nonCancellableRefresh = true
-
-                    loadTokens {
-                        val snapshot = sessionManager.getSnapshot()
-                        if (snapshot == null || !snapshot.tokens.isValid()) {
-                            null
-                        } else {
-                            BearerTokens(
-                                accessToken = snapshot.tokens.accessToken,
-                                refreshToken = snapshot.tokens.refreshToken,
-                            )
-                        }
+                    defaultRequest {
+                        url(apiBaseUrl.trimEnd('/') + "/")
+                        header(HttpHeaders.Accept, ContentType.Application.Json.toString())
                     }
 
-                    refreshTokens {
-                        if (!isSameOrigin(this.response.request.url, expectedOrigin)) {
-                            return@refreshTokens null
-                        }
-                        val refreshSnapshot =
-                            sessionManager.refreshSession(failedAccessToken = oldTokens?.accessToken) { current ->
-                                val refreshUrl =
-                                    URLBuilder(expectedOrigin)
-                                        .apply {
-                                            val existing = pathSegments.filter { it.isNotEmpty() }
-                                            val newSegments =
-                                                refreshPath
-                                                    .trim('/')
-                                                    .split('/')
-                                                    .filter { it.isNotEmpty() }
-                                            pathSegments = existing + newSegments
-                                        }.buildString()
+                    install(originGuardPlugin)
 
-                                val response =
-                                    this@refreshTokens.client.post(refreshUrl) {
-                                        with(this@refreshTokens) {
-                                            markAsRefreshTokenRequest()
-                                        }
-                                        contentType(ContentType.Application.Json)
-                                        setBody(RefreshTokenRequest(refreshToken = current.tokens.refreshToken))
-                                    }
+                    install(ContentNegotiation) {
+                        json(
+                            Json {
+                                prettyPrint = debugMode
+                                isLenient = true
+                                ignoreUnknownKeys = true
+                                encodeDefaults = false
+                            },
+                        )
+                    }
 
-                                response.toRefreshedTokens(current.tokens.refreshToken)
+                    install(Auth) {
+                        bearer {
+                            cacheTokens = false
+                            nonCancellableRefresh = true
+
+                            loadTokens {
+                                val snapshot = sessionManager.getSnapshot()
+                                if (snapshot == null || !snapshot.tokens.isValid()) {
+                                    null
+                                } else {
+                                    BearerTokens(
+                                        accessToken = snapshot.tokens.accessToken,
+                                        refreshToken = snapshot.tokens.refreshToken,
+                                    )
+                                }
                             }
 
-                        refreshSnapshot?.tokens?.let {
-                            BearerTokens(
-                                accessToken = it.accessToken,
-                                refreshToken = it.refreshToken,
-                            )
+                            refreshTokens {
+                                if (!isSameOrigin(this.response.request.url, expectedOrigin)) {
+                                    return@refreshTokens null
+                                }
+                                val refreshSnapshot =
+                                    sessionManager.refreshSession(
+                                        failedAccessToken = oldTokens?.accessToken,
+                                    ) { current ->
+                                        val refreshUrl =
+                                            URLBuilder(expectedOrigin)
+                                                .apply {
+                                                    val existing = pathSegments.filter { it.isNotEmpty() }
+                                                    val newSegments =
+                                                        refreshPath
+                                                            .trim('/')
+                                                            .split('/')
+                                                            .filter { it.isNotEmpty() }
+                                                    pathSegments = existing + newSegments
+                                                }.buildString()
+
+                                        val response =
+                                            this@refreshTokens.client.post(refreshUrl) {
+                                                with(this@refreshTokens) {
+                                                    markAsRefreshTokenRequest()
+                                                }
+                                                contentType(ContentType.Application.Json)
+                                                setBody(RefreshTokenRequest(refreshToken = current.tokens.refreshToken))
+                                            }
+
+                                        response.toRefreshedTokens(current.tokens.refreshToken)
+                                    }
+
+                                refreshSnapshot?.tokens?.let {
+                                    BearerTokens(
+                                        accessToken = it.accessToken,
+                                        refreshToken = it.refreshToken,
+                                    )
+                                }
+                            }
+
+                            sendWithoutRequest { request ->
+                                isSameOrigin(request.url.build(), expectedOrigin)
+                            }
                         }
                     }
 
-                    sendWithoutRequest { request ->
-                        isSameOrigin(request.url.build(), expectedOrigin)
-                    }
-                }
-            }
-
-            if (enableLogs) {
-                install(Logging) {
-                    if (customLogger != null) {
-                        logger = customLogger
-                    }
-                    level = LogLevel.HEADERS
-                    sanitizeHeader { header ->
-                        header.equals(HttpHeaders.Authorization, ignoreCase = true) ||
-                            header.equals(HttpHeaders.Cookie, ignoreCase = true) ||
-                            header.equals(HttpHeaders.SetCookie, ignoreCase = true)
-                    }
-                }
-            }
-        }.also { client ->
-            if (accessInvalidationListener != null) {
-                client.attributes.put(AccessInvalidationAttributeKey, accessInvalidationListener)
-            }
-            sessionManager.setRefreshDelegate { failedToken ->
-                val current = sessionManager.getSnapshot()
-                val targetToken = failedToken ?: current?.tokens?.accessToken
-                sessionManager.refreshSession(failedAccessToken = targetToken) { cur ->
-                    val refreshUrl =
-                        URLBuilder(expectedOrigin)
-                            .apply {
-                                val existing = pathSegments.filter { it.isNotEmpty() }
-                                val newSegments =
-                                    refreshPath
-                                        .trim('/')
-                                        .split('/')
-                                        .filter { it.isNotEmpty() }
-                                pathSegments = existing + newSegments
-                            }.buildString()
-
-                    val response =
-                        refreshClient.post(refreshUrl) {
-                            contentType(ContentType.Application.Json)
-                            setBody(RefreshTokenRequest(refreshToken = cur.tokens.refreshToken))
+                    if (enableLogs) {
+                        install(Logging) {
+                            if (customLogger != null) {
+                                logger = customLogger
+                            }
+                            level = LogLevel.HEADERS
+                            sanitizeHeader { header ->
+                                header.equals(HttpHeaders.Authorization, ignoreCase = true) ||
+                                    header.equals(HttpHeaders.Cookie, ignoreCase = true) ||
+                                    header.equals(HttpHeaders.SetCookie, ignoreCase = true)
+                            }
                         }
-
-                    response.toRefreshedTokens(cur.tokens.refreshToken)
+                    }
                 }
-            }
-            client.coroutineContext[Job]?.invokeOnCompletion {
+            } catch (e: Throwable) {
                 refreshClient.close()
-                sessionManager.setRefreshDelegate(null)
+                throw e
+            }
+
+        if (accessInvalidationListener != null) {
+            client.attributes.put(AccessInvalidationAttributeKey, accessInvalidationListener)
+        }
+
+        val delegate: suspend (String?) -> SessionSnapshot? = { failedToken ->
+            val current = sessionManager.getSnapshot()
+            val targetToken = failedToken ?: current?.tokens?.accessToken
+            sessionManager.refreshSession(failedAccessToken = targetToken) { cur ->
+                val refreshUrl =
+                    URLBuilder(expectedOrigin)
+                        .apply {
+                            val existing = pathSegments.filter { it.isNotEmpty() }
+                            val newSegments =
+                                refreshPath
+                                    .trim('/')
+                                    .split('/')
+                                    .filter { it.isNotEmpty() }
+                            pathSegments = existing + newSegments
+                        }.buildString()
+
+                val response =
+                    refreshClient.post(refreshUrl) {
+                        contentType(ContentType.Application.Json)
+                        setBody(RefreshTokenRequest(refreshToken = cur.tokens.refreshToken))
+                    }
+
+                response.toRefreshedTokens(cur.tokens.refreshToken)
             }
         }
+
+        sessionManager.setRefreshDelegate(delegate)
+        client.coroutineContext[Job]?.invokeOnCompletion {
+            refreshClient.close()
+            sessionManager.clearRefreshDelegate(delegate)
+        }
+
+        return client
     }
 
     /**

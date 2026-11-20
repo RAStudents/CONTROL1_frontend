@@ -152,7 +152,7 @@ data class ApiErrorDetailsDto(
     @SerialName("code") val code: String,
     @SerialName("message") val message: String? = null,
     @SerialName("request_id") val requestId: String? = null,
-    @SerialName("retryable") val retryable: Boolean = false,
+    @SerialName("retryable") val retryable: Boolean? = null,
     @SerialName("details") val details: ApiErrorExtraDetailsDto? = null,
 )
 

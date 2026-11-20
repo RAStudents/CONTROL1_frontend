@@ -93,8 +93,8 @@ class EventsViewModel(
                 val wasRead = _state.value.access.eventsRead
                 // Fail-closed updates when capabilities change
                 val shouldClearFeed = !accessCapabilities.eventsRead
-                val shouldClearReview = !accessCapabilities.eventsReview
-                val shouldClearExport = !accessCapabilities.reportsExport
+                val shouldClearReview = !accessCapabilities.canAcknowledge
+                val shouldClearExport = !accessCapabilities.canExport
 
                 if (shouldClearFeed) {
                     ++filterOptionsGeneration
@@ -142,6 +142,12 @@ class EventsViewModel(
                     } else {
                         it.copy(
                             access = accessCapabilities,
+                            realtimeOverlay =
+                                if (shouldClearReview) {
+                                    it.realtimeOverlay.copy(pendingAckIds = emptySet())
+                                } else {
+                                    it.realtimeOverlay
+                                },
                             confirmationTarget = if (shouldClearReview) null else it.confirmationTarget,
                             isMarkingErroneous = if (shouldClearReview) false else it.isMarkingErroneous,
                             isExportModeActive = if (shouldClearExport) false else it.isExportModeActive,
@@ -180,7 +186,7 @@ class EventsViewModel(
             EventsState(
                 companyId = companyId,
                 access = accessCapabilities,
-                isInitialLoading = true,
+                isInitialLoading = accessCapabilities.eventsRead && companyId.isNotBlank(),
                 initialLoadError = null,
                 visibleEvents = emptyList(),
                 selectedEventId = null,
@@ -261,8 +267,8 @@ class EventsViewModel(
                             asOfSequence = if (canRead) feedState.asOfSequence else 0L,
                             snapshotTotalCount = if (canRead) feedState.snapshotTotalCount else null,
                             hasMore = if (canRead) feedState.hasMore else false,
-                            isInitialLoading = feedState.isInitialLoading,
-                            initialLoadError = feedState.initialLoadError,
+                            isInitialLoading = if (canRead) feedState.isInitialLoading else false,
+                            initialLoadError = if (canRead) feedState.initialLoadError else null,
                             isLoadingNextPage = if (canRead) feedState.isLoadingNextPage else false,
                             paginationError = if (canRead) feedState.paginationError else null,
                             connectionState = feedState.connectionState,
@@ -480,6 +486,15 @@ class EventsViewModel(
         _state.update { it.copy(confirmationTarget = null) }
     }
 
+    private data class ErroneousOperationIdentity(
+        val companyId: String,
+        val eventId: String,
+        val expectedClassificationVersion: Long,
+    )
+
+    private var activeMarkErroneousIdentity: ErroneousOperationIdentity? = null
+    private var activeMarkErroneousKey: String? = null
+
     @OptIn(kotlin.uuid.ExperimentalUuidApi::class)
     fun confirmMarkErroneous(
         eventId: String? = null,
@@ -504,10 +519,24 @@ class EventsViewModel(
         markErroneousJob =
             viewModelScope.launch {
                 try {
+                    val opIdentity =
+                        ErroneousOperationIdentity(
+                            companyId = requestCompanyId,
+                            eventId = targetEventId,
+                            expectedClassificationVersion = targetVersion,
+                        )
                     val idempotencyKey =
-                        kotlin.uuid.Uuid
-                            .random()
-                            .toString()
+                        if (activeMarkErroneousIdentity == opIdentity && activeMarkErroneousKey != null) {
+                            activeMarkErroneousKey!!
+                        } else {
+                            val newKey =
+                                kotlin.uuid.Uuid
+                                    .random()
+                                    .toString()
+                            activeMarkErroneousIdentity = opIdentity
+                            activeMarkErroneousKey = newKey
+                            newKey
+                        }
                     val result =
                         markEventErroneousUseCase(
                             companyId = requestCompanyId,
@@ -521,6 +550,8 @@ class EventsViewModel(
                     }
                     when (result) {
                         is EventsOperationResult.Success -> {
+                            activeMarkErroneousIdentity = null
+                            activeMarkErroneousKey = null
                             requestSession.applyEventMutationResult(result.data)
                             val activeSession = feedSession
                             if (activeSession != null && activeSession !== requestSession) {
@@ -528,6 +559,18 @@ class EventsViewModel(
                             }
                         }
                         is EventsOperationResult.Failure -> {
+                            val isDefiniteFailure =
+                                when (result.error) {
+                                    is EventsMutationError.PermissionDenied -> true
+                                    is EventsMutationError.StateConflict -> true
+                                    is EventsMutationError.PayloadMismatch -> true
+                                    is EventsMutationError.Network -> false
+                                    is EventsMutationError.Server -> false
+                                }
+                            if (isDefiniteFailure) {
+                                activeMarkErroneousIdentity = null
+                                activeMarkErroneousKey = null
+                            }
                             _state.update {
                                 it.copy(
                                     mutationErrorNotice = mapMutationErrorToResource(result.error),
@@ -546,7 +589,7 @@ class EventsViewModel(
     }
 
     fun toggleExportMode() {
-        if (!_state.value.access.reportsExport) return
+        if (!_state.value.access.canExport) return
         _state.update { it.copy(isExportModeActive = !it.isExportModeActive) }
     }
 
@@ -560,7 +603,7 @@ class EventsViewModel(
 
     @OptIn(kotlin.uuid.ExperimentalUuidApi::class)
     fun startExport() {
-        if (!_state.value.access.reportsExport) return
+        if (!_state.value.access.canExport) return
         if (_state.value.isExportSubmitting) return
         val requestCompanyId = _state.value.companyId
         if (requestCompanyId.isBlank()) return
@@ -623,17 +666,12 @@ class EventsViewModel(
                         when (e) {
                             is EventsApiException.PermissionDenied -> true
                             is EventsApiException.SnapshotTooLarge -> true
+                            is EventsApiException.ExportDownloadTooLarge -> true
                             is EventsApiException.ExportExpired -> true
                             is EventsApiException.FilterInvalid -> true
+                            is EventsApiException.PayloadMismatch -> true
                             is EventsApiException.Generic -> !e.retryable
-                            else -> {
-                                val msg = e.message ?: ""
-                                msg.contains("400") ||
-                                    msg.contains("401") ||
-                                    msg.contains("403") ||
-                                    msg.contains("404") ||
-                                    msg.contains("409")
-                            }
+                            else -> false
                         }
                     if (isDefiniteFailure) {
                         activeExportKey = null
@@ -666,7 +704,7 @@ class EventsViewModel(
                     if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
                         return@launch
                     }
-                    if (!_state.value.access.reportsExport) {
+                    if (!_state.value.access.canExport) {
                         activeExportKey = null
                         activeExportRequest = null
                         _state.update {
@@ -724,17 +762,12 @@ class EventsViewModel(
                             }
                         }
                         return@launch
-                    } catch (e: Throwable) {
-                        if (e.message?.contains("403") == true || e.message?.contains("410") == true) {
-                            activeExportKey = null
-                            activeExportRequest = null
-                            return@launch
-                        }
+                    } catch (_: Throwable) {
+                        // Transient network or server error during polling: keep activeExportKey and activeExportRequest
                     }
                 }
                 if (isActive && attempt >= maxAttempts) {
-                    activeExportKey = null
-                    activeExportRequest = null
+                    // Timeout reached: retain activeExportKey and activeExportRequest so user can continue or retry
                     if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
                         _state.update {
                             it.copy(
@@ -747,7 +780,7 @@ class EventsViewModel(
     }
 
     fun downloadExport(exportId: String) {
-        if (!_state.value.access.reportsExport) return
+        if (!_state.value.access.canExport) return
         val requestCompanyId = _state.value.companyId
         val currentCompanyGen = companyGeneration
         downloadExportJob?.cancel()
@@ -787,7 +820,8 @@ class EventsViewModel(
     private fun mapExportErrorToResource(throwable: Throwable): StringResource =
         when (throwable) {
             is EventsApiException.PermissionDenied -> Res.string.events_export_error_access_revoked
-            is EventsApiException.SnapshotTooLarge -> Res.string.events_export_error_limit_exceeded
+            is EventsApiException.SnapshotTooLarge, is EventsApiException.ExportDownloadTooLarge ->
+                Res.string.events_export_error_limit_exceeded
             is EventsApiException.ExportExpired -> Res.string.events_export_expired_msg
             else -> Res.string.events_export_error_generic
         }
@@ -824,7 +858,7 @@ class EventsViewModel(
         _state.update { it.copy(isDatePickerOpen = false) }
     }
 
-    public override fun onCleared() {
+    protected override fun onCleared() {
         feedSession?.close()
         searchDebounceJob?.cancel()
         feedCollectJob?.cancel()
@@ -837,6 +871,14 @@ class EventsViewModel(
         acknowledgeJobs.clear()
         markErroneousJob?.cancel()
         filterOptionsJob?.cancel()
+        activeExportKey = null
+        activeExportRequest = null
+        activeMarkErroneousIdentity = null
+        activeMarkErroneousKey = null
         super.onCleared()
+    }
+
+    internal fun clearForTest() {
+        onCleared()
     }
 }

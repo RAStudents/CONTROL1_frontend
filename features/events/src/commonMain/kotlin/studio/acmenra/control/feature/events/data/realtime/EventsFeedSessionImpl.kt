@@ -19,6 +19,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.auth.SessionManager
+import studio.acmenra.control.core.network.client.isConnectivityError
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.events_connection_failed_3_attempts
 import studio.acmenra.control.core.ui.generated.resources.events_connection_failed_title
@@ -77,9 +78,9 @@ class EventsFeedSessionImpl(
     private suspend fun nextBootstrapGeneration(): Long = bootstrapGenMutex.withLock { ++bootstrapGeneration }
 
     private var lastUsedAccessToken: String? = null
-    private var isTerminal = false
-    private var isCleanupStarted = false
-    val isClosed: Boolean get() = isTerminal || isCleanupStarted
+    private val isTerminal = kotlin.concurrent.atomics.AtomicBoolean(false)
+    private val isCleanupStarted = kotlin.concurrent.atomics.AtomicBoolean(false)
+    val isClosed: Boolean get() = isTerminal.load() || isCleanupStarted.load()
     private var isOnline = true
 
     @kotlin.concurrent.Volatile
@@ -105,6 +106,7 @@ class EventsFeedSessionImpl(
         EventsSessionProcessor(
             query = query,
             initialAccess = initialAccess,
+            companyId = companyId,
             scope = sessionScope,
             onSendReplayRequest = { replayId, afterSequence ->
                 sessionScope.launch {
@@ -362,6 +364,12 @@ class EventsFeedSessionImpl(
                         processor.dispatch(SessionCommand.RebootstrapStateChanged(RebootstrapState.Idle))
                         handleEventsReadRevoked()
                         return@launch
+                    } catch (e: EventsApiException.SnapshotTooLarge) {
+                        processor.dispatch(SessionCommand.RebootstrapStateChanged(RebootstrapState.Failed(e)))
+                        return@launch
+                    } catch (e: EventsApiException.FilterInvalid) {
+                        processor.dispatch(SessionCommand.RebootstrapStateChanged(RebootstrapState.Failed(e)))
+                        return@launch
                     } catch (e: Throwable) {
                         consecutiveHttpFailures++
                         checkHttpFailuresNotice()
@@ -387,6 +395,45 @@ class EventsFeedSessionImpl(
         }
     }
 
+    private suspend fun openWebSocketConnection(
+        generation: Long,
+        afterSequence: Long,
+        replayId: Long,
+    ) {
+        disconnectJob?.join()
+        if (!canReadEvents() || generation != connectionGeneration.load()) return
+
+        val snapshot = sessionManager.getSnapshot()
+        val token = snapshot?.tokens?.accessToken
+        if (token.isNullOrBlank()) {
+            processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.FAILED))
+            return
+        }
+        lastUsedAccessToken = token
+
+        processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.CONNECTING))
+
+        val connectionId =
+            webSocketDataSource.connect(
+                companyId = companyId,
+                accessToken = token,
+                replayId = replayId,
+                afterSequence = afterSequence,
+                scope = sessionScope,
+                getClientConfirmedSeq = { processor.getAsOfSequence() },
+                onDisconnected = { reason, _ ->
+                    if (!isClosed && generation == connectionGeneration.load() && canReadEvents()) {
+                        handleDisconnect(reason)
+                    }
+                },
+            )
+        if (!canReadEvents() || generation != connectionGeneration.load()) {
+            webSocketDataSource.disconnect(connectionId)
+            return
+        }
+        processor.dispatch(SessionCommand.WsConnectionActivated(connectionId))
+    }
+
     private fun connectWebSocket(
         afterSequence: Long,
         replayId: Long,
@@ -397,38 +444,11 @@ class EventsFeedSessionImpl(
 
         connectJob =
             sessionScope.launch {
-                disconnectJob?.join()
-                if (!canReadEvents() || generation != connectionGeneration.load()) return@launch
-
-                val snapshot = sessionManager.getSnapshot()
-                val token = snapshot?.tokens?.accessToken
-                if (token.isNullOrBlank()) {
-                    processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.FAILED))
-                    return@launch
-                }
-                lastUsedAccessToken = token
-
-                processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.CONNECTING))
-
-                val connectionId =
-                    webSocketDataSource.connect(
-                        companyId = companyId,
-                        accessToken = token,
-                        replayId = replayId,
-                        afterSequence = afterSequence,
-                        scope = sessionScope,
-                        getClientConfirmedSeq = { processor.getAsOfSequence() },
-                        onDisconnected = { reason, _ ->
-                            if (!isClosed && generation == connectionGeneration.load() && canReadEvents()) {
-                                handleDisconnect(reason)
-                            }
-                        },
-                    )
-                if (!canReadEvents() || generation != connectionGeneration.load()) {
-                    webSocketDataSource.disconnect(connectionId)
-                    return@launch
-                }
-                processor.dispatch(SessionCommand.WsConnectionActivated(connectionId))
+                openWebSocketConnection(
+                    generation = generation,
+                    afterSequence = afterSequence,
+                    replayId = replayId,
+                )
             }
     }
 
@@ -471,7 +491,7 @@ class EventsFeedSessionImpl(
         if (!canReadEvents()) return
         if (resetAttempt) reconnectAttempt = 0
         connectJob?.cancel()
-        val generation = connectionGeneration.load()
+        val generation = connectionGeneration.addAndFetch(1L)
         connectJob =
             sessionScope.launch {
                 if (!canReadEvents() || !isOnline) return@launch
@@ -483,7 +503,6 @@ class EventsFeedSessionImpl(
                 val jitter = Random.nextLong(100, 500)
                 delay((baseDelay + jitter).coerceAtMost(30_000L))
 
-                disconnectJob?.join()
                 if (!isActive ||
                     !canReadEvents() ||
                     !isOnline ||
@@ -493,7 +512,11 @@ class EventsFeedSessionImpl(
                 }
                 val currentSeq = processor.getAsOfSequence()
                 val currentReplayId = processor.currentReplayId
-                connectWebSocket(afterSequence = currentSeq, replayId = currentReplayId)
+                openWebSocketConnection(
+                    generation = generation,
+                    afterSequence = currentSeq,
+                    replayId = currentReplayId,
+                )
             }
     }
 
@@ -608,7 +631,7 @@ class EventsFeedSessionImpl(
                     consecutiveHttpFailures++
                     checkHttpFailuresNotice()
                     val err =
-                        if (e.message?.contains("Network") == true || !isOnline) {
+                        if (isConnectivityError(e) || !isOnline) {
                             EventsPaginationError.Network
                         } else {
                             EventsPaginationError.Server(e.message)
@@ -656,9 +679,8 @@ class EventsFeedSessionImpl(
     }
 
     private fun performCleanup(postAction: (suspend () -> Unit)? = null) {
-        if (isCleanupStarted) return
-        isCleanupStarted = true
-        isTerminal = true
+        if (!isCleanupStarted.compareAndSet(false, true)) return
+        isTerminal.store(true)
 
         val gen = ++accessTransitionGeneration
         disconnectJob?.cancel()

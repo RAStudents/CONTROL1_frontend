@@ -85,6 +85,11 @@ sealed class EventsApiException(
         message: String = "Snapshot too large",
     ) : EventsApiException(message)
 
+    class ExportDownloadTooLarge(
+        val maxBytes: Long,
+        message: String = "Export exceeds maximum download size: $maxBytes bytes",
+    ) : EventsApiException(message)
+
     class StateConflict(
         val latestEvent: EventDto?,
         message: String = "State conflict",

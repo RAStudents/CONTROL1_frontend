@@ -38,4 +38,22 @@ data class EventsExportDownload(
     val filename: String,
     val bytes: ByteArray,
     val contentType: String,
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is EventsExportDownload) return false
+
+        return exportId == other.exportId &&
+            filename == other.filename &&
+            contentType == other.contentType &&
+            bytes.contentEquals(other.bytes)
+    }
+
+    override fun hashCode(): Int {
+        var result = exportId.hashCode()
+        result = 31 * result + filename.hashCode()
+        result = 31 * result + contentType.hashCode()
+        result = 31 * result + bytes.contentHashCode()
+        return result
+    }
+}

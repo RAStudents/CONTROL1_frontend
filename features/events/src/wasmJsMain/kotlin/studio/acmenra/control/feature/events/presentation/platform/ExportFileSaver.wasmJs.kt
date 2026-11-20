@@ -1,5 +1,6 @@
 package studio.acmenra.control.feature.events.presentation.platform
 
+import kotlinx.coroutines.CancellationException
 import org.koin.core.module.Module
 import org.koin.dsl.module
 import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
@@ -11,11 +12,10 @@ import kotlin.io.encoding.ExperimentalEncodingApi
     """(filename, contentType, base64Data) => {
     try {
         var byteChars = atob(base64Data);
-        var byteNumbers = new Array(byteChars.length);
+        var byteArray = new Uint8Array(byteChars.length);
         for (var i = 0; i < byteChars.length; i++) {
-            byteNumbers[i] = byteChars.charCodeAt(i);
+            byteArray[i] = byteChars.charCodeAt(i);
         }
-        var byteArray = new Uint8Array(byteNumbers);
         var blob = new Blob([byteArray], { type: contentType });
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
@@ -48,6 +48,8 @@ class WasmExportFileSaver : ExportFileSaver {
                 contentType = download.contentType.ifBlank { "text/csv" },
                 base64Data = base64,
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
             false
         }

@@ -34,6 +34,7 @@ import studio.acmenra.control.core.network.auth.TokenStorage
 import studio.acmenra.control.core.network.model.TokenPair
 import studio.acmenra.control.core.ui.notice.Notice
 import studio.acmenra.control.feature.events.data.datasource.EventsApiException
+import studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.EventsWebSocketDataSource
 import studio.acmenra.control.feature.events.data.datasource.FilterOptionsFetchResult
 import studio.acmenra.control.feature.events.data.datasource.IncomingWsEnvelope
@@ -3076,7 +3077,7 @@ class EventsContractV292MandatoryTests {
                     .first { it.id == "ev-1" }
                     .classificationVersion,
             )
-            vm.onCleared()
+            vm.clearForTest()
         }
 
     // Scenario 31: Invalidation during in-flight getFilterOptions does not cache stale response
@@ -3215,7 +3216,7 @@ class EventsContractV292MandatoryTests {
 
             // Idempotency keys must be distinct because previous export reached COMPLETED
             assertNotEquals(key1, key2)
-            vm.onCleared()
+            vm.clearForTest()
         }
 
     // Scenario 33: EventsDtoMapper throws IllegalArgumentException on malformed timestamps
@@ -3514,7 +3515,7 @@ class EventsContractV292MandatoryTests {
                 vm.state.value.exportJobStatus
                     ?.status,
             )
-            vm.onCleared()
+            vm.clearForTest()
         }
 
     // Scenario 39: Rapid true -> false -> true EVENTS_READ transition serializes disconnect and reconnect
@@ -5840,6 +5841,374 @@ class EventsContractV292MandatoryTests {
             assertTrue(tracker.onTick())
             assertEquals(1, tracker.missedAcks.load())
         }
+
+    // Scenario 68: EventsViewModel preserves idempotencyKey across transient network failures and resets on success
+    @Test
+    fun testScenario68_ViewModelPreservesIdempotencyKeyOnNetworkFailureAndResetsOnSuccess() =
+        runTest(testDispatcher) {
+            val usedKeys = mutableListOf<String>()
+            var shouldFailWithNetwork = true
+            val markUseCase =
+                object : MarkEventErroneousUseCase {
+                    override suspend fun invoke(
+                        companyId: String,
+                        eventId: String,
+                        expectedClassificationVersion: Long,
+                        idempotencyKey: String,
+                    ): EventsOperationResult<Event> {
+                        usedKeys.add(idempotencyKey)
+                        return if (shouldFailWithNetwork) {
+                            EventsOperationResult.Failure(EventsMutationError.Network)
+                        } else {
+                            EventsOperationResult.Success(
+                                Event(
+                                    id = eventId,
+                                    eventVersion = 2L,
+                                    classificationVersion = expectedClassificationVersion + 1,
+                                    acknowledgementVersion = 1L,
+                                    eventTypeId = "type-1",
+                                    eventTypeName = "No helmet",
+                                    categoryCode = "safety",
+                                    iconKey = EventIconKey.HELMET,
+                                    locationId = "loc-1",
+                                    locationName = "Zone 1",
+                                    deviceId = "dev-1",
+                                    deviceName = "Camera 1",
+                                    occurredAt = Instant.parse("2026-01-01T12:00:00Z"),
+                                    receivedAt = Instant.parse("2026-01-01T12:00:05Z"),
+                                    status = EventAcknowledgementStatus.NEW,
+                                    acknowledgedAt = null,
+                                    acknowledgedBy = null,
+                                    isErroneous = true,
+                                    previewUrl = "https://cdn.example.com/p.jpg",
+                                    videoUrl = null,
+                                ),
+                            )
+                        }
+                    }
+                }
+
+            val feed = FakeFeedSession()
+            val vm = createTestViewModel(feed = feed, markEventErroneousUseCase = markUseCase)
+            vm.initialize(
+                "comp-1",
+                EventsAccessCapabilities(eventsRead = true, eventsReview = true, reportsExport = true),
+            )
+            advanceUntilIdle()
+
+            // First attempt -> Network error
+            vm.confirmMarkErroneous("ev-1", 1L)
+            advanceUntilIdle()
+            assertEquals(1, usedKeys.size)
+            val firstKey = usedKeys[0]
+
+            // Retry attempt -> Same key must be reused!
+            vm.confirmMarkErroneous("ev-1", 1L)
+            advanceUntilIdle()
+            assertEquals(2, usedKeys.size)
+            assertEquals(firstKey, usedKeys[1])
+
+            // Success attempt -> Same key reused
+            shouldFailWithNetwork = false
+            vm.confirmMarkErroneous("ev-1", 1L)
+            advanceUntilIdle()
+            assertEquals(3, usedKeys.size)
+            assertEquals(firstKey, usedKeys[2])
+
+            // Subsequent mark after success -> Brand new key must be generated!
+            vm.confirmMarkErroneous("ev-2", 1L)
+            advanceUntilIdle()
+            assertEquals(4, usedKeys.size)
+            val newKey = usedKeys[3]
+            assertTrue(newKey != firstKey)
+
+            vm.clearForTest()
+        }
+
+    // Scenario 69: EventsViewModel preserves export idempotencyKey across transient export creation failures
+    @Test
+    fun testScenario69_ViewModelPreservesExportIdempotencyKeyOnTransientError() =
+        runTest(testDispatcher) {
+            val usedKeys = mutableListOf<String>()
+            var failTransiently = true
+            val createExportUseCase =
+                object : CreateEventsExportUseCase {
+                    override suspend fun invoke(
+                        companyId: String,
+                        request: EventsExportRequest,
+                        idempotencyKey: String,
+                    ): EventsExportStatus {
+                        usedKeys.add(idempotencyKey)
+                        if (failTransiently) {
+                            throw EventsApiException.Generic(
+                                code = "TIMEOUT",
+                                serverMessage = "Gateway timeout",
+                                retryable = true,
+                            )
+                        }
+                        return EventsExportStatus(
+                            exportId = "exp-1",
+                            status = EventsExportStatusCode.COMPLETED,
+                            createdAt = Instant.parse("2026-01-01T12:00:00Z"),
+                        )
+                    }
+                }
+
+            val feed = FakeFeedSession()
+            val vm = createTestViewModel(feed = feed, createEventsExportUseCase = createExportUseCase)
+            vm.initialize(
+                "comp-1",
+                EventsAccessCapabilities(eventsRead = true, eventsReview = true, reportsExport = true),
+            )
+            advanceUntilIdle()
+            vm.toggleExportMode()
+
+            // 1. First export submission fails with transient error
+            vm.startExport()
+            advanceUntilIdle()
+            assertEquals(1, usedKeys.size)
+            val firstKey = usedKeys[0]
+
+            // 2. Retry export submission reuses same idempotency key
+            failTransiently = false
+            vm.startExport()
+            advanceUntilIdle()
+            assertEquals(2, usedKeys.size)
+            assertEquals(firstKey, usedKeys[1])
+
+            // 3. Once completed, next export generates brand new key
+            vm.startExport()
+            advanceUntilIdle()
+            assertEquals(3, usedKeys.size)
+            assertTrue(usedKeys[2] != firstKey)
+
+            vm.clearForTest()
+        }
+
+    // Scenario 70: EventsRepositoryImpl.getFilterOptions handles concurrent multi-tenant requests without mutex deadlock
+    @Test
+    fun testScenario70_RepositoryFilterOptionsNonBlockingAcrossCompanies() =
+        runTest(testDispatcher) {
+            val compALatch = CompletableDeferred<Unit>()
+            val compAStarted = CompletableDeferred<Unit>()
+            val fakeRemote =
+                object : EventsRemoteDataSource {
+                    override suspend fun getFilterOptions(
+                        companyId: String,
+                        ifNoneMatchEtag: String?,
+                    ): FilterOptionsFetchResult {
+                        if (companyId == "comp-A") {
+                            compAStarted.complete(Unit)
+                            compALatch.await()
+                            return FilterOptionsFetchResult.Success(
+                                EventsFilterOptionsDto(
+                                    revision = "revA",
+                                    eventTypes = listOf(EventTypeOptionDto("tA", "Type A")),
+                                ),
+                                etag = "etagA",
+                            )
+                        } else {
+                            return FilterOptionsFetchResult.Success(
+                                EventsFilterOptionsDto(
+                                    revision = "revB",
+                                    eventTypes = listOf(EventTypeOptionDto("tB", "Type B")),
+                                ),
+                                etag = "etagB",
+                            )
+                        }
+                    }
+
+                    override suspend fun getBootstrap(
+                        companyId: String,
+                        query: EventsQuery,
+                        limit: Int,
+                    ): EventsBootstrapDto = error("unused")
+
+                    override suspend fun getEventsPage(
+                        companyId: String,
+                        cursor: String,
+                        limit: Int,
+                    ): EventsPageDto = error("unused")
+
+                    override suspend fun acknowledgeEvent(
+                        companyId: String,
+                        eventId: String,
+                    ): EventDto = error("unused")
+
+                    override suspend fun markEventErroneous(
+                        companyId: String,
+                        eventId: String,
+                        expectedClassificationVersion: Long,
+                        idempotencyKey: String,
+                    ): EventDto = error("unused")
+
+                    override suspend fun createExport(
+                        companyId: String,
+                        request: studio.acmenra.control.feature.events.data.model.CreateExportRequestDto,
+                        idempotencyKey: String,
+                    ): studio.acmenra.control.feature.events.data.model.EventsExportStatusDto = error("unused")
+
+                    override suspend fun getExportStatus(
+                        companyId: String,
+                        exportId: String,
+                    ): studio.acmenra.control.feature.events.data.model.EventsExportStatusDto = error("unused")
+
+                    override suspend fun downloadExport(
+                        companyId: String,
+                        exportId: String,
+                    ): EventsExportDownload = error("unused")
+                }
+
+            val sessionManager = SessionManager(TestTokenStorage())
+            val repo =
+                EventsRepositoryImpl(
+                    remoteDataSource = fakeRemote,
+                    webSocketDataSourceFactory = { TestWebSocketDataSource() },
+                    sessionManager = sessionManager,
+                    connectivityProvider =
+                        object : EventsConnectivityProvider {
+                            override val isOnline = MutableStateFlow(true)
+                        },
+                )
+
+            // Start comp-A in background coroutine (it suspends on compALatch)
+            val jobA = async { repo.getFilterOptions("comp-A") }
+            compAStarted.await()
+
+            // Fetch comp-B concurrently - must NOT be blocked by comp-A!
+            val optionsB = repo.getFilterOptions("comp-B")
+            assertEquals(1, optionsB.eventTypes.size)
+            assertEquals("tB", optionsB.eventTypes[0].id)
+
+            // Now release comp-A
+            compALatch.complete(Unit)
+            val optionsA = jobA.await()
+            assertEquals(1, optionsA.eventTypes.size)
+            assertEquals("tA", optionsA.eventTypes[0].id)
+        }
+
+    // Scenario 71: KtorEventsRemoteDataSource.downloadExport enforces MAX_EXPORT_DOWNLOAD_BYTES (50MB)
+    @Test
+    fun testScenario71_RemoteDataSourceDownloadExportTooLarge() =
+        runTest(testDispatcher) {
+            val mockEngine =
+                MockEngine { _ ->
+                    respond(
+                        content =
+                            io.ktor.utils.io
+                                .ByteReadChannel(ByteArray(0)),
+                        status = HttpStatusCode.OK,
+                        headers =
+                            headersOf(
+                                HttpHeaders.ContentType to listOf("text/csv"),
+                                HttpHeaders.ContentLength to listOf((50L * 1024 * 1024 + 1L).toString()),
+                            ),
+                    )
+                }
+
+            val remote = KtorEventsRemoteDataSource(HttpClient(mockEngine))
+            val ex =
+                try {
+                    remote.downloadExport("c1", "exp-1")
+                    null
+                } catch (e: EventsApiException.ExportDownloadTooLarge) {
+                    e
+                }
+            assertNotNull(ex)
+            assertEquals(50L * 1024 * 1024, ex.maxBytes)
+        }
+
+    // Scenario 72: KtorEventsRemoteDataSource path parts encoding prevents path traversal and unescaped characters
+    @Test
+    fun testScenario72_RemoteDataSourceEncodesUrlPathSegments() =
+        runTest(testDispatcher) {
+            val interceptedPaths = mutableListOf<String>()
+            val mockEngine =
+                MockEngine { request ->
+                    interceptedPaths.add(request.url.encodedPath)
+                    respond(
+                        content = """{"error": {"code": "INVALID_ARGUMENT", "message": "Bad filter"}}""",
+                        status = HttpStatusCode.BadRequest,
+                        headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                    )
+                }
+
+            val remote = KtorEventsRemoteDataSource(HttpClient(mockEngine))
+            try {
+                remote.getBootstrap("comp/test%1 space", EventsQuery(), limit = 10)
+            } catch (_: EventsApiException) {
+            }
+
+            assertEquals(1, interceptedPaths.size)
+            assertTrue(
+                interceptedPaths[0].contains("comp%2Ftest%251%20space"),
+                "Expected encoded company path part, got: ${interceptedPaths[0]}",
+            )
+        }
+
+    // Scenario 73: KtorEventsRemoteDataSource maps HTTP status code retryability when backend retryable is null
+    @Test
+    fun testScenario73_RemoteDataSourceStatusCodeRetryabilityFallback() =
+        runTest(testDispatcher) {
+            var statusCodeToReturn = HttpStatusCode.ServiceUnavailable
+            val mockEngine =
+                MockEngine { _ ->
+                    respond(
+                        content =
+                            """{"error": {"code": "SERVICE_UNAVAILABLE", "message": "Down", "retryable": null}}""",
+                        status = statusCodeToReturn,
+                        headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                    )
+                }
+
+            val remote = KtorEventsRemoteDataSource(HttpClient(mockEngine))
+
+            // 503 Service Unavailable -> retryable = true
+            try {
+                remote.getBootstrap("c1", EventsQuery(), limit = 10)
+                error("Expected exception")
+            } catch (e: EventsApiException.Generic) {
+                assertTrue(e.retryable)
+            }
+
+            // 429 Too Many Requests -> retryable = true
+            statusCodeToReturn = HttpStatusCode.TooManyRequests
+            try {
+                remote.getBootstrap("c1", EventsQuery(), limit = 10)
+                error("Expected exception")
+            } catch (e: EventsApiException.Generic) {
+                assertTrue(e.retryable)
+            }
+
+            // 400 Bad Request -> retryable = false
+            statusCodeToReturn = HttpStatusCode.BadRequest
+            try {
+                remote.getBootstrap("c1", EventsQuery(), limit = 10)
+                error("Expected exception")
+            } catch (e: EventsApiException.Generic) {
+                assertFalse(e.retryable)
+            }
+        }
+
+    // Scenario 74: KtorEventsWebSocketDataSource.buildWsUrl handles base URL with /api/v1 and encodes companyId
+    @Test
+    fun testScenario74_WebSocketDataSourceBuildWsUrl() {
+        val dsWithApi =
+            KtorEventsWebSocketDataSource(
+                realtimeClient = HttpClient(MockEngine { respond("ok") }),
+                wsEndpointBase = "https://example.com/api/v1",
+            )
+        val url1 = dsWithApi.buildWsUrl("company/01")
+        assertEquals("wss://example.com/api/v1/companies/company%2F01/events/ws", url1)
+
+        val dsWithoutApi =
+            KtorEventsWebSocketDataSource(
+                realtimeClient = HttpClient(MockEngine { respond("ok") }),
+                wsEndpointBase = "http://localhost:8080",
+            )
+        val url2 = dsWithoutApi.buildWsUrl("company-abc")
+        assertEquals("ws://localhost:8080/api/v1/companies/company-abc/events/ws", url2)
+    }
 
     private class FakeFeedSession(
         override val companyId: String = "comp-1",

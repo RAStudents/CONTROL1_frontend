@@ -29,6 +29,8 @@ import studio.acmenra.control.feature.events.domain.model.EventValidityFilter
 import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
 
+private const val MAX_EXPORT_DOWNLOAD_BYTES = 50L * 1024 * 1024
+
 class KtorEventsRemoteDataSource(
     private val apiClient: HttpClient,
     private val json: Json = Json { ignoreUnknownKeys = true },
@@ -172,6 +174,15 @@ class KtorEventsRemoteDataSource(
         val disposition = response.headers[HttpHeaders.ContentDisposition]
         val filename = extractFilenameFromDisposition(disposition) ?: "events_export.csv"
         val contentType = response.headers[HttpHeaders.ContentType] ?: "text/csv"
+        val contentLength = response.headers[HttpHeaders.ContentLength]?.toLongOrNull()
+        if (contentLength != null && contentLength > MAX_EXPORT_DOWNLOAD_BYTES) {
+            throw EventsApiException.SnapshotTooLarge(
+                maxItems = null,
+                suggestedFrom = null,
+                suggestedTo = null,
+                message = "Export file size ($contentLength bytes) exceeds maximum limit",
+            )
+        }
         val bytes = response.readRawBytes()
 
         return EventsExportDownload(

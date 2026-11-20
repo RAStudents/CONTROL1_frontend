@@ -99,6 +99,7 @@ sealed interface SessionCommand {
 
     data class AccessUpdated(
         val access: EventsAccessCapabilities,
+        val generation: Long = 0L,
     ) : SessionCommand
 
     data class StartReplay(
@@ -158,8 +159,19 @@ class EventsSessionProcessor(
     @kotlin.concurrent.Volatile
     private var eventsReadDeniedLatch: Boolean = !initialAccess.eventsRead
 
-    fun setImmediateEventsReadDenied(denied: Boolean) {
+    @kotlin.concurrent.Volatile
+    private var latestImmediateDeniedGeneration: Long = 0L
+
+    private var latestProcessedAccessGeneration: Long = 0L
+
+    fun setImmediateEventsReadDenied(
+        denied: Boolean,
+        generation: Long = 0L,
+    ) {
         eventsReadDeniedLatch = denied
+        if (denied && generation > latestImmediateDeniedGeneration) {
+            latestImmediateDeniedGeneration = generation
+        }
     }
 
     fun isImmediateEventsReadDenied(): Boolean = eventsReadDeniedLatch
@@ -345,18 +357,30 @@ class EventsSessionProcessor(
             is SessionCommand.AcknowledgeSucceeded -> handleAcknowledgeSucceeded(command.event)
             is SessionCommand.EventMutationApplied -> handleEventMutationApplied(command.event)
             is SessionCommand.AccessUpdated -> {
+                if (command.generation < latestProcessedAccessGeneration) {
+                    return
+                }
+                latestProcessedAccessGeneration = command.generation
+
                 val wasRead = _state.value.access.eventsRead
                 val nowRead = command.access.eventsRead
-                eventsReadDeniedLatch = !nowRead
-                if (wasRead && !nowRead) {
+
+                if (!nowRead) {
+                    eventsReadDeniedLatch = true
+                } else if (latestImmediateDeniedGeneration <= command.generation) {
+                    eventsReadDeniedLatch = false
+                }
+
+                if (eventsReadDeniedLatch) {
                     snapshotItems.clear()
                     currentOverlay = RealtimeOverlay()
                     rebootstrapBuffer.clear()
                     isRebootstrapping = false
                     bufferReplayId = null
+                    nextCursor = null
                     _state.update {
                         it.copy(
-                            access = command.access,
+                            access = command.access.copy(eventsRead = false),
                             visibleEvents = emptyList(),
                             realtimeOverlay = RealtimeOverlay(),
                             summary = null,
@@ -366,14 +390,19 @@ class EventsSessionProcessor(
                             paginationError = null,
                             pendingNewerCount = 0,
                             pendingHistoryCount = 0,
+                            snapshotId = null,
                         )
                     }
-                    onEventsReadRevoked()
-                } else if (!wasRead && nowRead) {
-                    _state.update { it.copy(access = command.access) }
-                    onEventsReadGranted()
+                    if (wasRead) {
+                        onEventsReadRevoked()
+                    }
                 } else {
-                    _state.update { it.copy(access = command.access) }
+                    if (!wasRead && nowRead) {
+                        _state.update { it.copy(access = command.access) }
+                        onEventsReadGranted()
+                    } else {
+                        _state.update { it.copy(access = command.access) }
+                    }
                 }
             }
             is SessionCommand.StartReplay -> {

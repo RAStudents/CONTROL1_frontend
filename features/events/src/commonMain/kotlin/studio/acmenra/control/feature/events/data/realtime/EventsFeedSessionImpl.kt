@@ -87,6 +87,7 @@ class EventsFeedSessionImpl(
     private fun canReadEvents(): Boolean = !isClosed && currentAccess.eventsRead && state.value.access.eventsRead
 
     private var accessTransitionGeneration = 0L
+    private var accessCapabilitiesGeneration = 0L
     private var disconnectJob: Job? = null
     private var tokenRefreshJob: Job? = null
 
@@ -384,7 +385,7 @@ class EventsFeedSessionImpl(
                         },
                     )
                 if (!canReadEvents() || generation != connectionGeneration) {
-                    webSocketDataSource.disconnect()
+                    webSocketDataSource.disconnect(connectionId)
                     return@launch
                 }
                 processor.dispatch(SessionCommand.WsConnectionActivated(connectionId))
@@ -596,11 +597,12 @@ class EventsFeedSessionImpl(
     override fun updateAccessCapabilities(access: EventsAccessCapabilities) {
         val wasRead = currentAccess.eventsRead
         currentAccess = access
+        val gen = ++accessCapabilitiesGeneration
         if (wasRead && !access.eventsRead) {
-            processor.setImmediateEventsReadDenied(true)
+            processor.setImmediateEventsReadDenied(true, gen)
             handleEventsReadRevoked()
         }
-        processor.dispatch(SessionCommand.AccessUpdated(access))
+        processor.dispatch(SessionCommand.AccessUpdated(access, gen))
     }
 
     private fun performCleanup(postAction: (suspend () -> Unit)? = null) {

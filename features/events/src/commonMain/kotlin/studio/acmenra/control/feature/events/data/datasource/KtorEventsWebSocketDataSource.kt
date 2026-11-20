@@ -100,9 +100,10 @@ interface EventsWebSocketDataSource {
 
     suspend fun sendHeartbeat(clientConfirmedSeq: Long)
 
-    suspend fun disconnect()
+    suspend fun disconnect(connectionId: Long? = null)
 }
 
+@OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
 class KtorEventsWebSocketDataSource(
     private val realtimeClient: HttpClient,
     private val json: Json = Json { ignoreUnknownKeys = true },
@@ -118,18 +119,15 @@ class KtorEventsWebSocketDataSource(
     override val incomingFrames: Flow<IncomingWsEnvelope> =
         rawFramesChannel
             .receiveAsFlow()
-            .filter { env -> env.connectionId == activeConnectionId }
+            .filter { env -> env.connectionId == activeConnectionId.load() }
 
     private val connectionMutex = Mutex()
 
     @kotlin.concurrent.Volatile
     private var currentSession: ConnectionSession? = null
 
-    @kotlin.concurrent.Volatile
-    private var connectionSequence: Long = 0L
-
-    @kotlin.concurrent.Volatile
-    private var activeConnectionId: Long = 0L
+    private val connectionSequence = kotlin.concurrent.atomics.AtomicLong(0L)
+    private val activeConnectionId = kotlin.concurrent.atomics.AtomicLong(0L)
     private var lastConfirmedSeq: Long = 0L
 
     internal fun emitRawFrameForTest(
@@ -139,7 +137,7 @@ class KtorEventsWebSocketDataSource(
         rawFramesChannel.trySend(IncomingWsEnvelope(connectionId, frame))
     }
 
-    internal fun getActiveConnectionIdForTest(): Long = activeConnectionId
+    internal fun getActiveConnectionIdForTest(): Long = activeConnectionId.load()
 
     private fun drainFramesChannel() {
         while (rawFramesChannel.tryReceive().isSuccess) {
@@ -159,18 +157,22 @@ class KtorEventsWebSocketDataSource(
         val outChan = Channel<Frame>(Channel.BUFFERED)
         lastConfirmedSeq = afterSequence
 
-        val connectionId = ++connectionSequence
-        activeConnectionId = connectionId
+        val connectionId = connectionSequence.addAndFetch(1L)
+        activeConnectionId.store(connectionId)
 
         scope.launch {
             connectionMutex.withLock {
+                if (connectionId != activeConnectionId.load()) {
+                    outChan.close()
+                    return@launch
+                }
                 val oldSession = currentSession
                 if (oldSession != null && oldSession.job.isActive) {
                     oldSession.job.cancel(CancellationException(WsCloseReason.REPLACED.name))
                     oldSession.job.join()
                     oldSession.outgoing.close()
                 }
-                if (connectionId != activeConnectionId) {
+                if (connectionId != activeConnectionId.load()) {
                     outChan.close()
                     return@launch
                 }
@@ -230,7 +232,7 @@ class KtorEventsWebSocketDataSource(
 
                     // Receive loop with connectionId fencing
                     for (frame in incoming) {
-                        if (connectionId != activeConnectionId) break
+                        if (connectionId != activeConnectionId.load()) break
                         if (frame is Frame.Text) {
                             val text = frame.readText()
                             val generic =
@@ -238,12 +240,12 @@ class KtorEventsWebSocketDataSource(
                                     json.decodeFromString<GenericRealtimeFrameDto>(text)
                                 }.getOrNull() ?: continue
 
-                            if (connectionId != activeConnectionId) break
+                            if (connectionId != activeConnectionId.load()) break
 
                             when (generic.type) {
                                 "SUBSCRIBED" -> {
                                     val dto = json.decodeFromString<SubscribedFrameDto>(text)
-                                    if (connectionId == activeConnectionId) {
+                                    if (connectionId == activeConnectionId.load()) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(connectionId, IncomingWsFrame.Subscribed(dto)),
                                         )
@@ -251,7 +253,7 @@ class KtorEventsWebSocketDataSource(
                                 }
                                 "TENANT_COMMIT" -> {
                                     val dto = json.decodeFromString<TenantCommitFrameDto>(text)
-                                    if (connectionId == activeConnectionId) {
+                                    if (connectionId == activeConnectionId.load()) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(connectionId, IncomingWsFrame.TenantCommit(dto)),
                                         )
@@ -259,7 +261,7 @@ class KtorEventsWebSocketDataSource(
                                 }
                                 "REPLAY_COMPLETED" -> {
                                     val dto = json.decodeFromString<ReplayCompletedFrameDto>(text)
-                                    if (connectionId == activeConnectionId) {
+                                    if (connectionId == activeConnectionId.load()) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(connectionId, IncomingWsFrame.ReplayCompleted(dto)),
                                         )
@@ -267,7 +269,7 @@ class KtorEventsWebSocketDataSource(
                                 }
                                 "RESYNC_REQUIRED" -> {
                                     val dto = json.decodeFromString<ResyncRequiredFrameDto>(text)
-                                    if (connectionId == activeConnectionId) {
+                                    if (connectionId == activeConnectionId.load()) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(connectionId, IncomingWsFrame.ResyncRequired(dto)),
                                         )
@@ -276,7 +278,7 @@ class KtorEventsWebSocketDataSource(
                                 "HEARTBEAT_ACK" -> {
                                     missedAcks = 0
                                     val dto = json.decodeFromString<HeartbeatAckFrameDto>(text)
-                                    if (connectionId == activeConnectionId) {
+                                    if (connectionId == activeConnectionId.load()) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(connectionId, IncomingWsFrame.HeartbeatAck(dto)),
                                         )
@@ -284,7 +286,7 @@ class KtorEventsWebSocketDataSource(
                                 }
                                 "ACCESS_CHECK_UNAVAILABLE" -> {
                                     val dto = json.decodeFromString<AccessCheckUnavailableFrameDto>(text)
-                                    if (connectionId == activeConnectionId) {
+                                    if (connectionId == activeConnectionId.load()) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(
                                                 connectionId,
@@ -295,7 +297,7 @@ class KtorEventsWebSocketDataSource(
                                 }
                                 "AUTH_REQUIRED" -> {
                                     val dto = json.decodeFromString<AuthRequiredFrameDto>(text)
-                                    if (connectionId == activeConnectionId) {
+                                    if (connectionId == activeConnectionId.load()) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(connectionId, IncomingWsFrame.AuthRequired(dto)),
                                         )
@@ -303,7 +305,7 @@ class KtorEventsWebSocketDataSource(
                                 }
                                 "ACCESS_INVALIDATED" -> {
                                     val dto = json.decodeFromString<AccessInvalidatedFrameDto>(text)
-                                    if (connectionId == activeConnectionId) {
+                                    if (connectionId == activeConnectionId.load()) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(
                                                 connectionId,
@@ -366,11 +368,18 @@ class KtorEventsWebSocketDataSource(
         }
     }
 
-    override suspend fun disconnect() {
+    override suspend fun disconnect(connectionId: Long?) {
         connectionMutex.withLock {
+            if (connectionId != null && activeConnectionId.load() != connectionId) {
+                return
+            }
             val sessionToDisconnect = currentSession
+            if (connectionId != null && sessionToDisconnect != null && sessionToDisconnect.id != connectionId) {
+                return
+            }
             currentSession = null
-            activeConnectionId = ++connectionSequence
+            val nextSeq = connectionSequence.addAndFetch(1L)
+            activeConnectionId.store(nextSeq)
 
             if (sessionToDisconnect != null) {
                 if (sessionToDisconnect.job.isActive) {

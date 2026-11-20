@@ -90,12 +90,14 @@ class EventsViewModel(
         val currentCompany = _state.value.companyId
         if (currentCompany == companyId && feedSession != null) {
             if (_state.value.access != accessCapabilities) {
+                val wasRead = _state.value.access.eventsRead
                 // Fail-closed updates when capabilities change
                 val shouldClearFeed = !accessCapabilities.eventsRead
                 val shouldClearReview = !accessCapabilities.eventsReview
                 val shouldClearExport = !accessCapabilities.reportsExport
 
                 if (shouldClearFeed) {
+                    ++filterOptionsGeneration
                     filterOptionsJob?.cancel()
                 }
                 if (shouldClearReview) {
@@ -148,6 +150,9 @@ class EventsViewModel(
                     }
                 }
                 feedSession?.updateAccessCapabilities(accessCapabilities)
+                if (!wasRead && accessCapabilities.eventsRead) {
+                    loadFilterOptions(companyId)
+                }
             }
             return
         }
@@ -187,11 +192,14 @@ class EventsViewModel(
             )
         }
 
-        loadFilterOptions(companyId)
+        if (accessCapabilities.eventsRead) {
+            loadFilterOptions(companyId)
+        }
         restartFeedSession()
     }
 
     private fun loadFilterOptions(companyId: String) {
+        if (!_state.value.access.eventsRead) return
         filterOptionsJob?.cancel()
         val sessionCompanyGen = companyGeneration
         val gen = ++filterOptionsGeneration
@@ -257,7 +265,7 @@ class EventsViewModel(
                             pendingNewerCount = if (canRead) feedState.pendingNewerCount else 0,
                             pendingHistoryCount = if (canRead) feedState.pendingHistoryCount else 0,
                             summary = if (canRead) feedState.summary else null,
-                            access = feedState.access,
+                            access = current.access,
                         )
                     }
                 }
@@ -594,10 +602,15 @@ class EventsViewModel(
                         status.status == EventsExportStatusCode.PROCESSING
                     ) {
                         observeExport(status.exportId, requestCompanyId, currentCompanyGen)
-                    } else {
-                        // Terminal status: COMPLETED, FAILED, EXPIRED, or UNKNOWN
+                    } else if (status.status == EventsExportStatusCode.COMPLETED ||
+                        status.status == EventsExportStatusCode.FAILED ||
+                        status.status == EventsExportStatusCode.EXPIRED
+                    ) {
+                        // Truly terminal statuses
                         activeExportKey = null
                         activeExportRequest = null
+                    } else {
+                        // UNKNOWN or unrecognized: retain activeExportKey and activeExportRequest so retry uses same key
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -671,11 +684,13 @@ class EventsViewModel(
                         _state.update { it.copy(exportJobStatus = status) }
                         if (status.status == EventsExportStatusCode.COMPLETED ||
                             status.status == EventsExportStatusCode.FAILED ||
-                            status.status == EventsExportStatusCode.EXPIRED ||
-                            status.status == EventsExportStatusCode.UNKNOWN
+                            status.status == EventsExportStatusCode.EXPIRED
                         ) {
                             activeExportKey = null
                             activeExportRequest = null
+                            return@launch
+                        } else if (status.status == EventsExportStatusCode.UNKNOWN) {
+                            // Non-terminal unknown status: retain activeExportKey and finish polling
                             return@launch
                         }
                     } catch (e: CancellationException) {

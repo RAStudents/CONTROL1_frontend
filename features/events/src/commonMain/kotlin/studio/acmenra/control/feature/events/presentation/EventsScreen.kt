@@ -62,11 +62,12 @@ import studio.acmenra.control.feature.events.presentation.platform.ExternalMedia
 fun EventsRouteContent(
     companyId: String = "",
     accessCapabilities: EventsAccessCapabilities = EventsAccessCapabilities(),
+    queryHash: String? = null,
     modifier: Modifier = Modifier,
     viewModel: EventsViewModel = koinViewModel(key = companyId),
 ) {
-    LaunchedEffect(companyId, accessCapabilities) {
-        viewModel.initialize(companyId, accessCapabilities)
+    LaunchedEffect(companyId, accessCapabilities, queryHash) {
+        viewModel.initialize(companyId, accessCapabilities, queryHash)
     }
 
     val state by viewModel.state.collectAsState()

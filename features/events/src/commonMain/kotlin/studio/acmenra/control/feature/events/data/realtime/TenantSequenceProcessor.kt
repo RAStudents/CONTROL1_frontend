@@ -21,6 +21,16 @@ sealed interface SequenceValidationResult {
     ) : SequenceValidationResult
 }
 
+sealed interface ReplayGenerationResult {
+    data class Next(
+        val replayId: Long,
+    ) : ReplayGenerationResult
+
+    data class RequiresFreshAuth(
+        val initialReplayId: Long = 1L,
+    ) : ReplayGenerationResult
+}
+
 class TenantSequenceProcessor(
     private var lastProcessedSequence: Long = 0L,
     private var activeReplayId: Long = 1L,
@@ -69,11 +79,21 @@ class TenantSequenceProcessor(
         recentHashes.clear()
     }
 
-    fun nextReplayGeneration(): Long {
-        val next = checkedAdd(activeReplayId, 1L)
-        activeReplayId = next
-        return next
-    }
+    fun tryNextReplayGeneration(): ReplayGenerationResult =
+        if (activeReplayId >= MAX_SAFE_JS_INTEGER) {
+            ReplayGenerationResult.RequiresFreshAuth(1L)
+        } else {
+            val next = activeReplayId + 1L
+            activeReplayId = next
+            ReplayGenerationResult.Next(next)
+        }
+
+    fun nextReplayGeneration(): Long =
+        when (val res = tryNextReplayGeneration()) {
+            is ReplayGenerationResult.Next -> res.replayId
+            is ReplayGenerationResult.RequiresFreshAuth ->
+                throw ArithmeticException("Safe integer overflow: replayId $activeReplayId >= $MAX_SAFE_JS_INTEGER")
+        }
 
     fun nextReplayId(): Long = nextReplayGeneration()
 
@@ -100,20 +120,11 @@ class TenantSequenceProcessor(
 
         return when {
             incomingSequence <= lastProcessedSequence -> {
-                if (payloadSha256 != null) {
-                    val normalizedHash = payloadSha256.lowercase()
-                    if (recentHashes.containsKey(incomingSequence)) {
-                        val existingHash = recentHashes[incomingSequence]
-                        if (existingHash != null && existingHash.lowercase() != normalizedHash) {
-                            return SequenceValidationResult.IntegrityViolation(
-                                "Payload SHA256 mismatch for sequence $incomingSequence: expected $existingHash, got $payloadSha256",
-                            )
-                        }
-                    } else {
-                        // Sequence duplicate is older than the recentHashes retention window (1000 items).
-                        // Fail-safe per contract: trigger rebootstrap instead of blindly accepting unchecked payload
+                if (payloadSha256 != null && recentHashes.containsKey(incomingSequence)) {
+                    val existingHash = recentHashes[incomingSequence]
+                    if (existingHash != null && existingHash.lowercase() != payloadSha256.lowercase()) {
                         return SequenceValidationResult.IntegrityViolation(
-                            "Duplicate sequence $incomingSequence is evicted from recentHashes cache; rebootstrap required",
+                            "Payload SHA256 mismatch for sequence $incomingSequence: expected $existingHash, got $payloadSha256",
                         )
                     }
                 }

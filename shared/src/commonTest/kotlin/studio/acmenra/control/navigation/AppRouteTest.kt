@@ -47,6 +47,15 @@ class AppRouteTest {
     }
 
     @Test
+    fun testEventsRouteSerializationRoundTripWithQueryHash() {
+        val route = EventsRoute(companyId = "company-123", queryHash = "#events?companyId=company-123")
+        val json = Json.encodeToString(route)
+        val decoded = Json.decodeFromString<EventsRoute>(json)
+        assertEquals(route, decoded)
+        assertEquals("#events?companyId=company-123", decoded.queryHash)
+    }
+
+    @Test
     fun testCompaniesDashboardRouteSerializationRoundTrip() {
         val json = Json.encodeToString(CompaniesDashboardRoute)
         assertEquals("{}", json)

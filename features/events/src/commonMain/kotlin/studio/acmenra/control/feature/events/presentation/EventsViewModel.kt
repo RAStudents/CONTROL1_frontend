@@ -39,6 +39,7 @@ import studio.acmenra.control.feature.events.domain.model.EventsFilter
 import studio.acmenra.control.feature.events.domain.model.EventsMutationError
 import studio.acmenra.control.feature.events.domain.model.EventsOperationResult
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
+import studio.acmenra.control.feature.events.domain.model.EventsQueryRouteCodec
 import studio.acmenra.control.feature.events.domain.model.LocationFilterGroup
 import studio.acmenra.control.feature.events.domain.model.LocationToggleState
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
@@ -86,6 +87,7 @@ class EventsViewModel(
     fun initialize(
         companyId: String,
         accessCapabilities: EventsAccessCapabilities,
+        queryHash: String? = null,
     ) {
         val currentCompany = _state.value.companyId
         if (currentCompany == companyId && feedSession != null) {
@@ -182,6 +184,14 @@ class EventsViewModel(
         feedSession?.close()
         feedSession = null
 
+        val decodedFilter =
+            if (!queryHash.isNullOrBlank()) {
+                val (_, decodedQuery) = EventsQueryRouteCodec.decodeHash(queryHash)
+                decodedQuery.filter
+            } else {
+                EventsFilter()
+            }
+
         _state.update {
             EventsState(
                 companyId = companyId,
@@ -190,7 +200,7 @@ class EventsViewModel(
                 initialLoadError = null,
                 visibleEvents = emptyList(),
                 selectedEventId = null,
-                filter = EventsFilter(),
+                filter = decodedFilter,
                 filterOptions = null,
                 isExportModeActive = false,
                 exportJobStatus = null,

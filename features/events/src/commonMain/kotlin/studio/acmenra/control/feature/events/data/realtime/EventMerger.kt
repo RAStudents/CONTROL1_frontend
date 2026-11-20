@@ -1,16 +1,104 @@
 package studio.acmenra.control.feature.events.data.realtime
 
+import studio.acmenra.control.feature.events.data.model.MAX_SAFE_JS_INTEGER
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementStatus
 import kotlin.time.Instant
 
+sealed interface EventMergeResult {
+    data class Success(
+        val merged: Event,
+    ) : EventMergeResult
+
+    data object Stale : EventMergeResult
+
+    data class IntegrityViolation(
+        val reason: String,
+    ) : EventMergeResult
+}
+
 object EventMerger {
-    fun merge(
+    fun validateAndMerge(
         current: Event,
         incoming: Event,
-    ): Event {
+    ): EventMergeResult {
+        // 1. Invariant bounds check: versions must be in 1..MAX_SAFE_JS_INTEGER
+        if (incoming.eventVersion !in 1..MAX_SAFE_JS_INTEGER ||
+            incoming.classificationVersion !in 1..MAX_SAFE_JS_INTEGER ||
+            incoming.acknowledgementVersion !in 1..MAX_SAFE_JS_INTEGER ||
+            current.eventVersion !in 1..MAX_SAFE_JS_INTEGER ||
+            current.classificationVersion !in 1..MAX_SAFE_JS_INTEGER ||
+            current.acknowledgementVersion !in 1..MAX_SAFE_JS_INTEGER
+        ) {
+            return EventMergeResult.IntegrityViolation(
+                "Version out of bounds [1, $MAX_SAFE_JS_INTEGER]: " +
+                    "incoming(ev=${incoming.eventVersion}, cl=${incoming.classificationVersion}, " +
+                    "ack=${incoming.acknowledgementVersion}), " +
+                    "current(ev=${current.eventVersion}, cl=${current.classificationVersion}, " +
+                    "ack=${current.acknowledgementVersion})",
+            )
+        }
+
+        // 2. Invariant I.2.1: specialized versions must not exceed overall eventVersion
+        if (incoming.classificationVersion > incoming.eventVersion ||
+            incoming.acknowledgementVersion > incoming.eventVersion
+        ) {
+            return EventMergeResult.IntegrityViolation(
+                "Incoming specialized version exceeds eventVersion: " +
+                    "ev=${incoming.eventVersion}, cl=${incoming.classificationVersion}, ack=${incoming.acknowledgementVersion}",
+            )
+        }
+
+        // 3. Immutable core identity validation
+        if (current.id != incoming.id ||
+            current.eventTypeId != incoming.eventTypeId ||
+            current.categoryCode != incoming.categoryCode ||
+            current.locationId != incoming.locationId ||
+            current.deviceId != incoming.deviceId ||
+            current.occurredAt != incoming.occurredAt ||
+            current.receivedAt != incoming.receivedAt ||
+            current.previewUrl != incoming.previewUrl ||
+            current.videoUrl != incoming.videoUrl
+        ) {
+            return EventMergeResult.IntegrityViolation(
+                "Immutable core mismatch for event ${incoming.id}",
+            )
+        }
+
+        // 4. Equal specialized version identity check (G.4)
+        if (incoming.classificationVersion == current.classificationVersion) {
+            if (incoming.isErroneous != current.isErroneous ||
+                incoming.erroneousMarkedAt != current.erroneousMarkedAt ||
+                incoming.erroneousMarkedBy != current.erroneousMarkedBy
+            ) {
+                return EventMergeResult.IntegrityViolation(
+                    "Classification version ${incoming.classificationVersion} equality with content mismatch",
+                )
+            }
+        }
+
+        if (incoming.acknowledgementVersion == current.acknowledgementVersion) {
+            if (incoming.status != current.status ||
+                incoming.acknowledgedAt != current.acknowledgedAt ||
+                incoming.acknowledgedBy != current.acknowledgedBy
+            ) {
+                return EventMergeResult.IntegrityViolation(
+                    "Acknowledgement version ${incoming.acknowledgementVersion} equality with content mismatch",
+                )
+            }
+        }
+
+        // 5. Check if incoming has no newer data (Stale)
+        if (incoming.eventVersion <= current.eventVersion &&
+            incoming.classificationVersion <= current.classificationVersion &&
+            incoming.acknowledgementVersion <= current.acknowledgementVersion
+        ) {
+            return EventMergeResult.Stale
+        }
+
+        // 6. Merge specialized groups
         val classificationPart =
-            if (incoming.classificationVersion >= current.classificationVersion) {
+            if (incoming.classificationVersion > current.classificationVersion) {
                 ClassificationFields(
                     classificationVersion = incoming.classificationVersion,
                     isErroneous = incoming.isErroneous,
@@ -27,7 +115,7 @@ object EventMerger {
             }
 
         val acknowledgementPart =
-            if (incoming.acknowledgementVersion >= current.acknowledgementVersion) {
+            if (incoming.acknowledgementVersion > current.acknowledgementVersion) {
                 AcknowledgementFields(
                     acknowledgementVersion = incoming.acknowledgementVersion,
                     status = incoming.status,
@@ -45,22 +133,36 @@ object EventMerger {
 
         val displaySource = if (incoming.eventVersion >= current.eventVersion) incoming else current
 
-        return current.copy(
-            eventVersion = maxOf(current.eventVersion, incoming.eventVersion),
-            eventTypeName = displaySource.eventTypeName,
-            locationName = displaySource.locationName,
-            deviceName = displaySource.deviceName,
-            iconKey = displaySource.iconKey,
-            classificationVersion = classificationPart.classificationVersion,
-            isErroneous = classificationPart.isErroneous,
-            erroneousMarkedAt = classificationPart.erroneousMarkedAt,
-            erroneousMarkedBy = classificationPart.erroneousMarkedBy,
-            acknowledgementVersion = acknowledgementPart.acknowledgementVersion,
-            status = acknowledgementPart.status,
-            acknowledgedAt = acknowledgementPart.acknowledgedAt,
-            acknowledgedBy = acknowledgementPart.acknowledgedBy,
-        )
+        val merged =
+            current.copy(
+                eventVersion = maxOf(current.eventVersion, incoming.eventVersion),
+                eventTypeName = displaySource.eventTypeName,
+                locationName = displaySource.locationName,
+                deviceName = displaySource.deviceName,
+                iconKey = displaySource.iconKey,
+                classificationVersion = classificationPart.classificationVersion,
+                isErroneous = classificationPart.isErroneous,
+                erroneousMarkedAt = classificationPart.erroneousMarkedAt,
+                erroneousMarkedBy = classificationPart.erroneousMarkedBy,
+                acknowledgementVersion = acknowledgementPart.acknowledgementVersion,
+                status = acknowledgementPart.status,
+                acknowledgedAt = acknowledgementPart.acknowledgedAt,
+                acknowledgedBy = acknowledgementPart.acknowledgedBy,
+            )
+
+        return EventMergeResult.Success(merged)
     }
+
+    fun merge(
+        current: Event,
+        incoming: Event,
+    ): Event =
+        when (val res = validateAndMerge(current, incoming)) {
+            is EventMergeResult.Success -> res.merged
+            is EventMergeResult.Stale,
+            is EventMergeResult.IntegrityViolation,
+            -> current
+        }
 
     private data class ClassificationFields(
         val classificationVersion: Long,

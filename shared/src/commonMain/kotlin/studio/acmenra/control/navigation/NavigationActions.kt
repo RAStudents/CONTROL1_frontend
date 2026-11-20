@@ -11,8 +11,11 @@ fun NavController.navigateToLogin() {
     }
 }
 
-fun NavController.navigateToEvents(companyId: String? = null) {
-    navigate(EventsRoute(companyId = companyId)) {
+fun NavController.navigateToEvents(
+    companyId: String? = null,
+    queryHash: String? = null,
+) {
+    navigate(EventsRoute(companyId = companyId, queryHash = queryHash)) {
         popUpTo(graph.id) {
             inclusive = true
         }

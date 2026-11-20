@@ -139,6 +139,11 @@ class EventsFeedSessionImpl(
                 onFilterOptionsInvalidated?.invoke()
                 _filterOptionsInvalidated.tryEmit(Unit)
             },
+            onFreshAuthNeeded = { afterSeq, replayId ->
+                sessionScope.launch {
+                    connectWebSocket(afterSequence = afterSeq, replayId = replayId)
+                }
+            },
         )
 
     override val state: StateFlow<EventsFeedState> = processor.state

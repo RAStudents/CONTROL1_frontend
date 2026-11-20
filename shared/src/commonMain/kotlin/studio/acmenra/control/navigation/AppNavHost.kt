@@ -85,6 +85,7 @@ fun AppNavHost(
                     EventsRouteContent(
                         companyId = tenantContext.companyId,
                         accessCapabilities = accessCapabilities,
+                        queryHash = route.queryHash,
                     )
                 }
             } else {

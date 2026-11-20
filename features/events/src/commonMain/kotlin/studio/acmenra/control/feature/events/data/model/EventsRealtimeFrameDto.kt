@@ -194,14 +194,14 @@ data class HeartbeatAckFrameDto(
     @SerialName("type") val type: String = "HEARTBEAT_ACK",
     @Serializable(with = SafeJsLongSerializer::class)
     @SerialName("replay_id") val replayId: Long,
-    @Serializable(with = SafeJsNullableLongSerializer::class)
-    @SerialName("replay_base_seq") val replayBaseSeq: Long? = null,
+    @Serializable(with = SafeJsLongSerializer::class)
+    @SerialName("replay_base_seq") val replayBaseSeq: Long = 0L,
     @Serializable(with = SafeJsNullableLongSerializer::class)
     @SerialName("last_replay_written_seq") val lastReplayWrittenSeq: Long? = null,
     @Serializable(with = SafeJsNullableLongSerializer::class)
     @SerialName("last_socket_written_seq") val lastSocketWrittenSeq: Long? = null,
-    @Serializable(with = SafeJsNullableLongSerializer::class)
-    @SerialName("client_confirmed_seq") val clientConfirmedSeq: Long? = null,
+    @Serializable(with = SafeJsLongSerializer::class)
+    @SerialName("client_confirmed_seq") val clientConfirmedSeq: Long,
 )
 
 @Serializable

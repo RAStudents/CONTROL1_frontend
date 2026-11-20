@@ -1,8 +1,6 @@
 package studio.acmenra.control.feature.events.presentation.components
 
 import android.net.Uri
-import android.widget.MediaController
-import android.widget.VideoView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -27,8 +25,12 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import io.ktor.client.call.body
 import io.ktor.client.request.get
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.painterResource
@@ -57,20 +59,24 @@ actual fun EventMediaPlayer(
 
     LaunchedEffect(previewUrl, isValidHttpsPreview) {
         if (isValidHttpsPreview && previewUrl != null) {
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    val client = HttpClientFactory.createExternalClient()
-                    try {
-                        val bytes: ByteArray = client.get(previewUrl).body()
-                        android.graphics.BitmapFactory
-                            .decodeByteArray(bytes, 0, bytes.size)
-                            ?.asImageBitmap()
-                    } finally {
-                        client.close()
+            try {
+                val bitmap =
+                    withContext(Dispatchers.IO) {
+                        val client = HttpClientFactory.createExternalClient()
+                        try {
+                            val bytes: ByteArray = client.get(previewUrl).body()
+                            android.graphics.BitmapFactory
+                                .decodeByteArray(bytes, 0, bytes.size)
+                                ?.asImageBitmap()
+                        } finally {
+                            client.close()
+                        }
                     }
-                }.getOrNull()?.let {
-                    previewBitmap = it
-                }
+                previewBitmap = bitmap
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                previewBitmap = null
             }
         } else {
             previewBitmap = null
@@ -87,27 +93,28 @@ actual fun EventMediaPlayer(
         contentAlignment = Alignment.Center,
     ) {
         if (isPlaying && isValidHttpsVideo && !videoUrl.isNullOrBlank()) {
-            var videoViewRef by remember(videoUrl) { mutableStateOf<VideoView?>(null) }
+            var exoPlayerRef by remember(videoUrl) { mutableStateOf<ExoPlayer?>(null) }
             AndroidView(
                 factory = { context ->
-                    VideoView(context).apply {
-                        val controller = MediaController(context)
-                        controller.setAnchorView(this)
-                        setMediaController(controller)
-                        setVideoURI(Uri.parse(videoUrl))
-                        setOnPreparedListener { mp ->
-                            mp.isLooping = true
-                            start()
+                    val exoPlayer =
+                        ExoPlayer.Builder(context).build().apply {
+                            setMediaItem(MediaItem.fromUri(Uri.parse(videoUrl)))
+                            repeatMode = ExoPlayer.REPEAT_MODE_ALL
+                            prepare()
+                            playWhenReady = true
                         }
-                        videoViewRef = this
+                    exoPlayerRef = exoPlayer
+                    PlayerView(context).apply {
+                        player = exoPlayer
+                        useController = true
                     }
                 },
                 modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(AmberCorners.Large)),
             )
             DisposableEffect(videoUrl) {
                 onDispose {
-                    videoViewRef?.stopPlayback()
-                    videoViewRef = null
+                    exoPlayerRef?.release()
+                    exoPlayerRef = null
                     isPlaying = false
                 }
             }

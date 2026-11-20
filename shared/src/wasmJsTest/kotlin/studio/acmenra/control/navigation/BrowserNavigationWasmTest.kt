@@ -61,21 +61,21 @@ class BrowserNavigationWasmTest {
             // 1. Navigate to Events with default null companyId
             navController.navigateToEvents()
             waitUntil(message = "Navigate to events with null companyId") {
-                window.location.hash == "#events?companyId=null" &&
+                window.location.hash == "#events?companyId=null&queryHash=null" &&
                     navController.currentDestination?.hasRoute<EventsRoute>() == true
             }
 
             // 2. Navigate to Events with specific companyId
             navController.navigateToEvents(companyId = "company-123")
             waitUntil(message = "Navigate to events with companyId") {
-                window.location.hash == "#events?companyId=company-123" &&
+                window.location.hash == "#events?companyId=company-123&queryHash=null" &&
                     navController.currentDestination?.hasRoute<EventsRoute>() == true
             }
 
             // 3. Browser Back
             window.history.back()
             waitUntil(message = "Browser back to events null companyId") {
-                window.location.hash == "#events?companyId=null" &&
+                window.location.hash == "#events?companyId=null&queryHash=null" &&
                     navController.currentDestination?.hasRoute<EventsRoute>() == true
             }
 
@@ -89,7 +89,7 @@ class BrowserNavigationWasmTest {
             // 5. Browser Forward
             window.history.forward()
             waitUntil(message = "Browser forward to events") {
-                window.location.hash == "#events?companyId=null" &&
+                window.location.hash == "#events?companyId=null&queryHash=null" &&
                     navController.currentDestination?.hasRoute<EventsRoute>() == true
             }
 
@@ -117,7 +117,7 @@ class BrowserNavigationWasmTest {
                 }
 
             waitUntil(message = "Direct URL navigation to #events") {
-                window.location.hash == "#events?companyId=null" &&
+                window.location.hash == "#events?companyId=null&queryHash=null" &&
                     navController.currentDestination?.hasRoute<EventsRoute>() == true
             }
 

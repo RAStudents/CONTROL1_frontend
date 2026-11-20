@@ -130,7 +130,16 @@ object RealtimeOverlayReducer {
 
         val effectiveEvent =
             if (currentEvent != null) {
-                EventMerger.merge(current = currentEvent, incoming = event)
+                when (val mergeRes = EventMerger.validateAndMerge(current = currentEvent, incoming = event)) {
+                    is EventMergeResult.IntegrityViolation -> {
+                        return currentOverlay.copy(requiresRefresh = true) to
+                            (existingEntry?.membership ?: OverlayMembership.INCLUDED)
+                    }
+                    is EventMergeResult.Stale -> {
+                        return currentOverlay to (existingEntry?.membership ?: OverlayMembership.INCLUDED)
+                    }
+                    is EventMergeResult.Success -> mergeRes.merged
+                }
             } else {
                 event
             }

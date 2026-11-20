@@ -7,6 +7,7 @@ import io.ktor.websocket.Frame
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -152,7 +153,7 @@ internal class HeartbeatTracker(
     fun onAckReceived(
         incomingReplayId: Long,
         activeReplayId: Long,
-        incomingConfirmedSeq: Long? = null,
+        incomingConfirmedSeq: Long,
         mark: kotlin.time.ComparableTimeMark = timeSource.markNow(),
     ): Boolean {
         if (incomingReplayId != activeReplayId) {
@@ -161,12 +162,17 @@ internal class HeartbeatTracker(
         if (!hasPendingAck.load()) {
             return false
         }
+        if (incomingConfirmedSeq < 0L ||
+            incomingConfirmedSeq > studio.acmenra.control.feature.events.data.model.MAX_SAFE_JS_INTEGER
+        ) {
+            return false
+        }
         val sentMark = pendingAckSentMark
         if (sentMark != null && (mark - sentMark) > ackWindow) {
             return false
         }
         val expectedSeq = pendingClientConfirmedSeq.load()
-        if (incomingConfirmedSeq != null && expectedSeq >= 0L && incomingConfirmedSeq != expectedSeq) {
+        if (expectedSeq >= 0L && incomingConfirmedSeq != expectedSeq) {
             return false
         }
         if (hasPendingAck.compareAndSet(true, false)) {
@@ -187,10 +193,23 @@ class KtorEventsWebSocketDataSource(
     private val json: Json = Json { ignoreUnknownKeys = true },
     private val wsEndpointBase: String = "",
 ) : EventsWebSocketDataSource {
+    private sealed interface OutgoingMessage {
+        val frame: Frame
+
+        data class Regular(
+            override val frame: Frame,
+        ) : OutgoingMessage
+
+        data class Heartbeat(
+            override val frame: Frame,
+            val sentDeferred: CompletableDeferred<kotlin.time.ComparableTimeMark>,
+        ) : OutgoingMessage
+    }
+
     private data class ConnectionSession(
         val id: Long,
         val job: Job,
-        val outgoing: Channel<Frame>,
+        val outgoing: Channel<OutgoingMessage>,
         val activeReplayGeneration: kotlin.concurrent.atomics.AtomicLong,
     )
 
@@ -231,7 +250,7 @@ class KtorEventsWebSocketDataSource(
         getClientConfirmedSeq: () -> Long,
         onDisconnected: (reason: WsCloseReason, message: String?) -> Unit,
     ): Long {
-        val outChan = Channel<Frame>(Channel.BUFFERED)
+        val outChan = Channel<OutgoingMessage>(Channel.BUFFERED)
 
         val connectionId = activeConnectionId.addAndFetch(1L)
 
@@ -277,8 +296,14 @@ class KtorEventsWebSocketDataSource(
                     // Start outgoing pump
                     localOutgoingJob =
                         launch {
-                            for (frame in outChan) {
-                                send(frame)
+                            for (msg in outChan) {
+                                send(msg.frame)
+                                if (msg is OutgoingMessage.Heartbeat) {
+                                    msg.sentDeferred.complete(
+                                        kotlin.time.TimeSource.Monotonic
+                                            .markNow(),
+                                    )
+                                }
                             }
                         }
 
@@ -288,13 +313,16 @@ class KtorEventsWebSocketDataSource(
                         launch {
                             delay(25_000L)
                             while (isActive) {
-                                val sendMark =
-                                    kotlin.time.TimeSource.Monotonic
-                                        .markNow()
                                 val confirmedSeq = getClientConfirmedSeq()
                                 val hbFrame = HeartbeatFrameDto(clientConfirmedSeq = confirmedSeq)
+                                val sentDeferred = CompletableDeferred<kotlin.time.ComparableTimeMark>()
                                 try {
-                                    outChan.send(Frame.Text(json.encodeToString(hbFrame)))
+                                    outChan.send(
+                                        OutgoingMessage.Heartbeat(
+                                            frame = Frame.Text(json.encodeToString(hbFrame)),
+                                            sentDeferred = sentDeferred,
+                                        ),
+                                    )
                                 } catch (e: CancellationException) {
                                     heartbeatTracker.onSendFailed()
                                     throw e
@@ -302,6 +330,17 @@ class KtorEventsWebSocketDataSource(
                                     heartbeatTracker.onSendFailed()
                                     break
                                 }
+
+                                val sendMark =
+                                    try {
+                                        sentDeferred.await()
+                                    } catch (e: CancellationException) {
+                                        heartbeatTracker.onSendFailed()
+                                        throw e
+                                    } catch (_: Throwable) {
+                                        heartbeatTracker.onSendFailed()
+                                        break
+                                    }
 
                                 heartbeatTracker.onHeartbeatSent(sendMark, confirmedSeq)
 
@@ -334,6 +373,7 @@ class KtorEventsWebSocketDataSource(
                                     json.decodeFromString<GenericRealtimeFrameDto>(text)
                                 }.getOrNull() ?: continue
 
+                            if (generic.schemaVersion != 1) continue
                             if (connectionId != activeConnectionId.load()) break
 
                             when (generic.type) {
@@ -344,7 +384,11 @@ class KtorEventsWebSocketDataSource(
                                                 text,
                                             )
                                         }.getOrNull()
-                                    if (dto != null && connectionId == activeConnectionId.load()) {
+                                    if (dto != null &&
+                                        dto.schemaVersion == 1 &&
+                                        dto.type == "SUBSCRIBED" &&
+                                        connectionId == activeConnectionId.load()
+                                    ) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(connectionId, IncomingWsFrame.Subscribed(dto)),
                                         )
@@ -355,10 +399,13 @@ class KtorEventsWebSocketDataSource(
                                     val frameToSend =
                                         decodeResult.fold(
                                             onSuccess = { dto ->
-                                                if (!dto.validateEnvelope()) {
+                                                if (dto.schemaVersion != 1 ||
+                                                    dto.type != "TENANT_COMMIT" ||
+                                                    !dto.validateEnvelope()
+                                                ) {
                                                     IncomingWsFrame.MalformedCommit(
                                                         dto.replayId,
-                                                        "Invalid commit envelope",
+                                                        "Invalid commit envelope or schema_version",
                                                     )
                                                 } else {
                                                     IncomingWsFrame.TenantCommit(dto)
@@ -366,7 +413,7 @@ class KtorEventsWebSocketDataSource(
                                             },
                                             onFailure = { err ->
                                                 IncomingWsFrame.MalformedCommit(
-                                                    generic.replayId,
+                                                    generic.replayId ?: 0L,
                                                     err.message ?: "Failed to decode TENANT_COMMIT",
                                                 )
                                             },
@@ -378,7 +425,11 @@ class KtorEventsWebSocketDataSource(
                                 "REPLAY_COMPLETED" -> {
                                     val dto =
                                         runCatching { json.decodeFromString<ReplayCompletedFrameDto>(text) }.getOrNull()
-                                    if (dto != null && connectionId == activeConnectionId.load()) {
+                                    if (dto != null &&
+                                        dto.schemaVersion == 1 &&
+                                        dto.type == "REPLAY_COMPLETED" &&
+                                        connectionId == activeConnectionId.load()
+                                    ) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(connectionId, IncomingWsFrame.ReplayCompleted(dto)),
                                         )
@@ -391,7 +442,11 @@ class KtorEventsWebSocketDataSource(
                                                 text,
                                             )
                                         }.getOrNull()
-                                    if (dto != null && connectionId == activeConnectionId.load()) {
+                                    if (dto != null &&
+                                        dto.schemaVersion == 1 &&
+                                        dto.type == "RESYNC_REQUIRED" &&
+                                        connectionId == activeConnectionId.load()
+                                    ) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(connectionId, IncomingWsFrame.ResyncRequired(dto)),
                                         )
@@ -404,7 +459,7 @@ class KtorEventsWebSocketDataSource(
                                                 text,
                                             )
                                         }.getOrNull()
-                                    if (dto != null) {
+                                    if (dto != null && dto.schemaVersion == 1 && dto.type == "HEARTBEAT_ACK") {
                                         val activeGen = activeReplayGen.load()
                                         heartbeatTracker.onAckReceived(
                                             incomingReplayId = dto.replayId,
@@ -423,7 +478,11 @@ class KtorEventsWebSocketDataSource(
                                         runCatching {
                                             json.decodeFromString<AccessCheckUnavailableFrameDto>(text)
                                         }.getOrNull()
-                                    if (dto != null && connectionId == activeConnectionId.load()) {
+                                    if (dto != null &&
+                                        dto.schemaVersion == 1 &&
+                                        dto.type == "ACCESS_CHECK_UNAVAILABLE" &&
+                                        connectionId == activeConnectionId.load()
+                                    ) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(
                                                 connectionId,
@@ -439,7 +498,11 @@ class KtorEventsWebSocketDataSource(
                                                 text,
                                             )
                                         }.getOrNull()
-                                    if (dto != null && connectionId == activeConnectionId.load()) {
+                                    if (dto != null &&
+                                        dto.schemaVersion == 1 &&
+                                        dto.type == "AUTH_REQUIRED" &&
+                                        connectionId == activeConnectionId.load()
+                                    ) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(connectionId, IncomingWsFrame.AuthRequired(dto)),
                                         )
@@ -450,7 +513,11 @@ class KtorEventsWebSocketDataSource(
                                         runCatching {
                                             json.decodeFromString<AccessInvalidatedFrameDto>(text)
                                         }.getOrNull()
-                                    if (dto != null && connectionId == activeConnectionId.load()) {
+                                    if (dto != null &&
+                                        dto.schemaVersion == 1 &&
+                                        dto.type == "ACCESS_INVALIDATED" &&
+                                        connectionId == activeConnectionId.load()
+                                    ) {
                                         rawFramesChannel.send(
                                             IncomingWsEnvelope(
                                                 connectionId,
@@ -498,14 +565,14 @@ class KtorEventsWebSocketDataSource(
         val text = json.encodeToString(frame)
         val session = currentSession ?: throw IllegalStateException("WebSocket outgoing channel is not connected")
         session.activeReplayGeneration.store(replayId)
-        session.outgoing.send(Frame.Text(text))
+        session.outgoing.send(OutgoingMessage.Regular(Frame.Text(text)))
     }
 
     override suspend fun sendHeartbeat(clientConfirmedSeq: Long) {
         val frame = HeartbeatFrameDto(clientConfirmedSeq = clientConfirmedSeq)
         val text = json.encodeToString(frame)
         try {
-            currentSession?.outgoing?.send(Frame.Text(text))
+            currentSession?.outgoing?.send(OutgoingMessage.Regular(Frame.Text(text)))
         } catch (e: CancellationException) {
             throw e
         } catch (_: Throwable) {

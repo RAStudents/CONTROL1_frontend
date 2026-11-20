@@ -34,6 +34,12 @@ kotlin {
             implementation(libs.ktor.client.mock)
             implementation(libs.koin.test)
         }
+        val androidMain by getting {
+            dependencies {
+                implementation("androidx.media3:media3-exoplayer:1.5.1")
+                implementation("androidx.media3:media3-ui:1.5.1")
+            }
+        }
         val wasmJsMain by getting {
             dependencies {
                 implementation(npm("@js-joda/timezone", "2.3.0"))

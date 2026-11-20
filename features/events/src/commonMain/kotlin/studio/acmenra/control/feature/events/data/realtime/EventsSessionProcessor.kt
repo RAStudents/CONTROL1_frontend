@@ -138,6 +138,7 @@ class EventsSessionProcessor(
     private val onEventsReadRevoked: () -> Unit = {},
     private val onEventsReadGranted: () -> Unit = {},
     private val onFilterOptionsUpdated: ((EventsFilterOptionsDto) -> Unit)? = null,
+    private val onFreshAuthNeeded: ((afterSequence: Long, replayId: Long) -> Unit)? = null,
     private val timeSource: TimeSource.Monotonic = TimeSource.Monotonic,
     private val companyId: String = "",
 ) {
@@ -466,13 +467,27 @@ class EventsSessionProcessor(
             }
             is SessionCommand.NextReplayGeneration -> {
                 maxClosedReplayGeneration = maxOf(maxClosedReplayGeneration, sequenceProcessor.currentReplayId)
-                val gen = sequenceProcessor.nextReplayGeneration()
-                if (isRebootstrapping) {
-                    bufferReplayId = gen
-                    rebootstrapBuffer.clear()
+                when (val res = sequenceProcessor.tryNextReplayGeneration()) {
+                    is ReplayGenerationResult.Next -> {
+                        if (isRebootstrapping) {
+                            bufferReplayId = res.replayId
+                            rebootstrapBuffer.clear()
+                        }
+                        _state.update { it.copy(replayId = res.replayId) }
+                        command.response.complete(res.replayId)
+                    }
+                    is ReplayGenerationResult.RequiresFreshAuth -> {
+                        maxClosedReplayGeneration = MAX_SAFE_JS_INTEGER
+                        sequenceProcessor.resetSequence(sequenceProcessor.currentSequence, res.initialReplayId)
+                        if (isRebootstrapping) {
+                            bufferReplayId = res.initialReplayId
+                            rebootstrapBuffer.clear()
+                        }
+                        _state.update { it.copy(replayId = res.initialReplayId) }
+                        onFreshAuthNeeded?.invoke(sequenceProcessor.currentSequence, res.initialReplayId)
+                        command.response.complete(res.initialReplayId)
+                    }
                 }
-                _state.update { it.copy(replayId = gen) }
-                command.response.complete(gen)
             }
             is SessionCommand.ResetSequence -> {
                 sequenceProcessor.resetSequence(command.sequence)
@@ -640,12 +655,15 @@ class EventsSessionProcessor(
 
                 val newSummary = commit.summaryUpdated?.let { EventsDtoMapper.mapSummary(it) }
                 if (newSummary != null) {
-                    candidateSummary =
-                        when {
-                            candidateSummary == null -> newSummary
-                            newSummary.summaryAsOfSequence >= candidateSummary.summaryAsOfSequence -> newSummary
-                            else -> candidateSummary
-                        }
+                    if (newSummary.summaryAsOfSequence > commit.tenantSequence) {
+                        isRebootstrapping = true
+                        bufferReplayId = sequenceProcessor.currentReplayId
+                        response.complete(BootstrapApplyResult.RetryRequired)
+                        return
+                    }
+                    if (newSummary.summaryAsOfSequence >= candidateSummary.summaryAsOfSequence) {
+                        candidateSummary = newSummary
+                    }
                 }
 
                 commit.filterOptionsUpdated?.let { optionsDto ->
@@ -683,7 +701,16 @@ class EventsSessionProcessor(
         }
 
         maxClosedReplayGeneration = maxOf(maxClosedReplayGeneration, sequenceProcessor.currentReplayId)
-        val newReplayId = sequenceProcessor.nextReplayGeneration()
+        val newReplayId =
+            when (val res = sequenceProcessor.tryNextReplayGeneration()) {
+                is ReplayGenerationResult.Next -> res.replayId
+                is ReplayGenerationResult.RequiresFreshAuth -> {
+                    maxClosedReplayGeneration = MAX_SAFE_JS_INTEGER
+                    sequenceProcessor.resetSequence(bootstrap.streamCursor, res.initialReplayId)
+                    onFreshAuthNeeded?.invoke(bootstrap.streamCursor, res.initialReplayId)
+                    res.initialReplayId
+                }
+            }
 
         val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
         val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
@@ -765,7 +792,14 @@ class EventsSessionProcessor(
 
         val finalEvent =
             if (currentEvent != null) {
-                EventMerger.merge(current = currentEvent, incoming = mutatedEvent)
+                when (val mergeRes = EventMerger.validateAndMerge(current = currentEvent, incoming = mutatedEvent)) {
+                    is EventMergeResult.IntegrityViolation -> {
+                        onTriggerRebootstrap()
+                        return
+                    }
+                    is EventMergeResult.Stale -> return
+                    is EventMergeResult.Success -> mergeRes.merged
+                }
             } else {
                 mutatedEvent
             }
@@ -811,7 +845,14 @@ class EventsSessionProcessor(
 
         val finalEvent =
             if (currentEvent != null) {
-                EventMerger.merge(current = currentEvent, incoming = ackEvent)
+                when (val mergeRes = EventMerger.validateAndMerge(current = currentEvent, incoming = ackEvent)) {
+                    is EventMergeResult.IntegrityViolation -> {
+                        onTriggerRebootstrap()
+                        return
+                    }
+                    is EventMergeResult.Stale -> return
+                    is EventMergeResult.Success -> mergeRes.merged
+                }
             } else {
                 ackEvent
             }
@@ -907,17 +948,21 @@ class EventsSessionProcessor(
                     }
                     is SequenceValidationResult.GapDetected -> {
                         maxClosedReplayGeneration = maxOf(maxClosedReplayGeneration, sequenceProcessor.currentReplayId)
-                        val nextReplay =
-                            try {
-                                sequenceProcessor.nextReplayGeneration()
-                            } catch (e: ArithmeticException) {
-                                isRebootstrapping = true
-                                rebootstrapBuffer.clear()
-                                onTriggerRebootstrap()
-                                return
+                        when (val genResult = sequenceProcessor.tryNextReplayGeneration()) {
+                            is ReplayGenerationResult.Next -> {
+                                _state.update { it.copy(replayId = genResult.replayId) }
+                                onSendReplayRequest(genResult.replayId, sequenceProcessor.currentSequence)
                             }
-                        _state.update { it.copy(replayId = nextReplay) }
-                        onSendReplayRequest(nextReplay, sequenceProcessor.currentSequence)
+                            is ReplayGenerationResult.RequiresFreshAuth -> {
+                                maxClosedReplayGeneration = MAX_SAFE_JS_INTEGER
+                                sequenceProcessor.resetSequence(
+                                    sequenceProcessor.currentSequence,
+                                    genResult.initialReplayId,
+                                )
+                                _state.update { it.copy(replayId = genResult.initialReplayId) }
+                                onFreshAuthNeeded?.invoke(sequenceProcessor.currentSequence, genResult.initialReplayId)
+                            }
+                        }
                     }
                     is SequenceValidationResult.IntegrityViolation,
                     is SequenceValidationResult.InvalidSequence,
@@ -1072,6 +1117,15 @@ class EventsSessionProcessor(
 
         val currentSummary = _state.value.summary
         val newSummary = commit.summaryUpdated?.let { EventsDtoMapper.mapSummary(it) }
+        if (newSummary != null && newSummary.summaryAsOfSequence > commit.tenantSequence) {
+            // Causality violation: summary from future sequence!
+            if (!isRebootstrapping) {
+                isRebootstrapping = true
+                bufferReplayId = sequenceProcessor.currentReplayId
+                onTriggerRebootstrap()
+            }
+            return
+        }
         val updatedSummary: EventsSummary? =
             when {
                 newSummary == null -> currentSummary

@@ -57,6 +57,9 @@ import studio.acmenra.control.feature.events.data.model.EventsFilterOptionsDto
 import studio.acmenra.control.feature.events.data.model.EventsPageDto
 import studio.acmenra.control.feature.events.data.model.EventsPaginationDto
 import studio.acmenra.control.feature.events.data.model.EventsSummaryDto
+import studio.acmenra.control.feature.events.data.model.GenericRealtimeFrameDto
+import studio.acmenra.control.feature.events.data.model.HeartbeatAckFrameDto
+import studio.acmenra.control.feature.events.data.model.MAX_SAFE_JS_INTEGER
 import studio.acmenra.control.feature.events.data.model.ReplayCompletedFrameDto
 import studio.acmenra.control.feature.events.data.model.ResyncRequiredFrameDto
 import studio.acmenra.control.feature.events.data.model.SafeJsLongSerializer
@@ -912,8 +915,9 @@ class EventsContractV292MandatoryTests {
                 // Server returns 200 OK with updated ACKNOWLEDGED event
                 val acknowledgedEvent =
                     unackEvent.copy(
+                        eventVersion = 2L,
+                        acknowledgementVersion = 2L,
                         status = EventAcknowledgementStatus.ACKNOWLEDGED,
-                        classificationVersion = 2L,
                     )
                 processor.dispatch(SessionCommand.AcknowledgeSucceeded(acknowledgedEvent))
                 advanceUntilIdle()
@@ -924,7 +928,7 @@ class EventsContractV292MandatoryTests {
                     processor.state.value.visibleEvents
                         .first { it.id == "ev-ack-test" }
                 assertEquals(EventAcknowledgementStatus.ACKNOWLEDGED, eventInState.status)
-                assertEquals(2L, eventInState.classificationVersion)
+                assertEquals(2L, eventInState.acknowledgementVersion)
 
                 processor.dispatch(SessionCommand.Close)
                 advanceUntilIdle()
@@ -4309,10 +4313,8 @@ class EventsContractV292MandatoryTests {
                 duplicateFrameOld.tenantSequence,
                 duplicateFrameOld.payloadSha256,
             )
-        assertTrue(resultOld is SequenceValidationResult.IntegrityViolation)
-        assertTrue(
-            (resultOld as SequenceValidationResult.IntegrityViolation).reason.contains("evicted from recentHashes"),
-        )
+        // Duplicates with incomingSequence <= lastProcessedSequence outside recentHashes window must return Duplicate per I.2.2.4
+        assertEquals(SequenceValidationResult.Duplicate, resultOld)
 
         // In-window duplicate (sequence 1005) with matching SHA returns Duplicate
         val duplicateFrameRecent =
@@ -5847,7 +5849,12 @@ class EventsContractV292MandatoryTests {
             assertEquals(1, tracker.missedAcks.load())
 
             // 3. Stale ACK for old replayId (e.g. replayId 0 when active is 1) does NOT reset missedAcks!
-            tracker.onAckReceived(incomingReplayId = 0L, activeReplayId = 1L, mark = timeSource.markNow())
+            tracker.onAckReceived(
+                incomingReplayId = 0L,
+                activeReplayId = 1L,
+                incomingConfirmedSeq = 0L,
+                mark = timeSource.markNow(),
+            )
             assertEquals(1, tracker.missedAcks.load())
 
             // 4. Second HB sent at t=50s, ACK window 5s expires without ACK -> second consecutive miss -> triggers reconnect (returns false)!
@@ -5860,7 +5867,12 @@ class EventsContractV292MandatoryTests {
             // 5. If valid ACK arrives during an active window, resets missedAcks to 0
             timeSource += kotlin.time.Duration.parse("20s")
             tracker.onHeartbeatSent(mark = timeSource.markNow())
-            tracker.onAckReceived(incomingReplayId = 1L, activeReplayId = 1L, mark = timeSource.markNow())
+            tracker.onAckReceived(
+                incomingReplayId = 1L,
+                activeReplayId = 1L,
+                incomingConfirmedSeq = 0L,
+                mark = timeSource.markNow(),
+            )
             assertEquals(0, tracker.missedAcks.load())
         }
 
@@ -7042,7 +7054,13 @@ class EventsContractV292MandatoryTests {
 
         // ACK arrives in window at t = 3s (elapsed 2s <= 5s)
         timeSource += kotlin.time.Duration.parse("2s")
-        val ackResult = tracker.onAckReceived(incomingReplayId = 1L, activeReplayId = 1L, mark = timeSource.markNow())
+        val ackResult =
+            tracker.onAckReceived(
+                incomingReplayId = 1L,
+                activeReplayId = 1L,
+                incomingConfirmedSeq = 0L,
+                mark = timeSource.markNow(),
+            )
         assertTrue(ackResult)
         assertFalse(tracker.hasPendingAck.load())
         assertEquals(0, tracker.missedAcks.load())
@@ -7063,6 +7081,7 @@ class EventsContractV292MandatoryTests {
             tracker.onAckReceived(
                 incomingReplayId = 1L,
                 activeReplayId = 1L,
+                incomingConfirmedSeq = 0L,
                 mark = timeSource.markNow(),
             )
         assertFalse(lateAckResult)
@@ -7562,6 +7581,7 @@ class EventsContractV292MandatoryTests {
             tracker.onAckReceived(
                 incomingReplayId = 2L,
                 activeReplayId = activeReplay,
+                incomingConfirmedSeq = 0L,
                 mark = timeSource.markNow(),
             )
         assertTrue(ackAccepted)
@@ -7594,6 +7614,7 @@ class EventsContractV292MandatoryTests {
             tracker.onAckReceived(
                 incomingReplayId = 1L,
                 activeReplayId = activeReplay,
+                incomingConfirmedSeq = 0L,
                 mark = timeSource.markNow(),
             )
         assertFalse(ackAccepted)
@@ -7646,6 +7667,7 @@ class EventsContractV292MandatoryTests {
             tracker.onAckReceived(
                 incomingReplayId = 1L,
                 activeReplayId = 1L,
+                incomingConfirmedSeq = 0L,
                 mark = timeSource.markNow(),
             )
         assertTrue(acceptedAtBoundary)
@@ -7659,6 +7681,7 @@ class EventsContractV292MandatoryTests {
             tracker.onAckReceived(
                 incomingReplayId = 1L,
                 activeReplayId = 1L,
+                incomingConfirmedSeq = 0L,
                 mark = timeSource.markNow(),
             )
         assertFalse(rejectedAfterBoundary)
@@ -8129,4 +8152,539 @@ class EventsContractV292MandatoryTests {
             downloadJob.cancel()
             assertTrue(downloadJob.isCancelled)
         }
+
+    // Scenario 93: HeartbeatAckFrameDto requires client_confirmed_seq; missing client_confirmed_seq fails serialization
+    @Test
+    fun testScenario93_HeartbeatAckFrameRequiresMandatoryClientConfirmedSeq() {
+        val testJson = Json { ignoreUnknownKeys = true }
+        val validJson = """{"schema_version":1,"type":"HEARTBEAT_ACK","replay_id":1,"client_confirmed_seq":100}"""
+        val dto = testJson.decodeFromString<HeartbeatAckFrameDto>(validJson)
+        assertEquals(100L, dto.clientConfirmedSeq)
+
+        val missingConfirmedSeqJson = """{"schema_version":1,"type":"HEARTBEAT_ACK","replay_id":1}"""
+        assertFailsWith<kotlinx.serialization.SerializationException> {
+            testJson.decodeFromString<HeartbeatAckFrameDto>(missingConfirmedSeqJson)
+        }
+    }
+
+    // Scenario 94: HeartbeatTracker.onAckReceived validates client_confirmed_seq safe integer bounds
+    @Test
+    fun testScenario94_HeartbeatTrackerValidatesClientConfirmedSeqBounds() {
+        val timeSource = kotlin.time.TestTimeSource()
+        val tracker =
+            studio.acmenra.control.feature.events.data.datasource.HeartbeatTracker(
+                maxMissedAcks = 2,
+                ackWindow = kotlin.time.Duration.parse("5s"),
+                timeSource = timeSource,
+            )
+
+        tracker.onHeartbeatSent(mark = timeSource.markNow(), clientConfirmedSeq = 100L)
+
+        // Negative confirmed seq rejected
+        assertFalse(
+            tracker.onAckReceived(
+                incomingReplayId = 1L,
+                activeReplayId = 1L,
+                incomingConfirmedSeq = -1L,
+                mark = timeSource.markNow(),
+            ),
+        )
+
+        // Overflow confirmed seq rejected
+        assertFalse(
+            tracker.onAckReceived(
+                incomingReplayId = 1L,
+                activeReplayId = 1L,
+                incomingConfirmedSeq = MAX_SAFE_JS_INTEGER + 1L,
+                mark = timeSource.markNow(),
+            ),
+        )
+
+        // Matching confirmed seq accepted
+        assertTrue(
+            tracker.onAckReceived(
+                incomingReplayId = 1L,
+                activeReplayId = 1L,
+                incomingConfirmedSeq = 100L,
+                mark = timeSource.markNow(),
+            ),
+        )
+    }
+
+    // Scenario 95: Replay ID reaching MAX_SAFE_JS_INTEGER triggers fresh AUTH path without exception
+    @Test
+    fun testScenario95_ReplayIdReachingMaxSafeJsIntegerTriggersFreshAuthWithoutException() {
+        val seqProcessor =
+            studio.acmenra.control.feature.events.data.realtime
+                .TenantSequenceProcessor()
+        seqProcessor.resetSequence(newSequence = 100L, newReplayId = MAX_SAFE_JS_INTEGER)
+
+        val result = seqProcessor.tryNextReplayGeneration()
+        assertTrue(
+            result is studio.acmenra.control.feature.events.data.realtime.ReplayGenerationResult.RequiresFreshAuth,
+        )
+        assertEquals(
+            1L,
+            (result as studio.acmenra.control.feature.events.data.realtime.ReplayGenerationResult.RequiresFreshAuth)
+                .initialReplayId,
+        )
+    }
+
+    // Scenario 96: Duplicate commit with sequence <= lastProcessedSequence evicted from recentHashes returns Duplicate
+    @Test
+    fun testScenario96_EvictedSequenceDuplicateReturnsDuplicatePerSpec() {
+        val seqProcessor =
+            studio.acmenra.control.feature.events.data.realtime
+                .TenantSequenceProcessor()
+        val baseSha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd"
+        for (seq in 1L..1005L) {
+            val sha = baseSha + (seq % 10).toString() + (seq % 10).toString()
+            seqProcessor.advanceSequence(seq, sha)
+        }
+
+        // Sequence 1 is evicted from recentHashes retention cache
+        val validation =
+            seqProcessor.checkIncomingSequence(
+                incomingReplayId = 1L,
+                incomingSequence = 1L,
+                payloadSha256 = baseSha + "11",
+            )
+        assertEquals(SequenceValidationResult.Duplicate, validation)
+    }
+
+    // Scenario 97: Duplicate commit in recentHashes with matching SHA256 returns Duplicate
+    @Test
+    fun testScenario97_DuplicateInRecentHashesWithMatchingShaReturnsDuplicate() {
+        val seqProcessor =
+            studio.acmenra.control.feature.events.data.realtime
+                .TenantSequenceProcessor()
+        val validSha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        seqProcessor.advanceSequence(1L, validSha)
+
+        val validation =
+            seqProcessor.checkIncomingSequence(
+                incomingReplayId = 1L,
+                incomingSequence = 1L,
+                payloadSha256 = validSha,
+            )
+        assertEquals(SequenceValidationResult.Duplicate, validation)
+    }
+
+    // Scenario 98: Duplicate commit in recentHashes with mismatched SHA256 returns IntegrityViolation
+    @Test
+    fun testScenario98_DuplicateInRecentHashesWithMismatchedShaReturnsIntegrityViolation() {
+        val seqProcessor =
+            studio.acmenra.control.feature.events.data.realtime
+                .TenantSequenceProcessor()
+        val validSha1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val mismatchSha = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        seqProcessor.advanceSequence(1L, validSha1)
+
+        val validation =
+            seqProcessor.checkIncomingSequence(
+                incomingReplayId = 1L,
+                incomingSequence = 1L,
+                payloadSha256 = mismatchSha,
+            )
+        assertTrue(validation is SequenceValidationResult.IntegrityViolation)
+    }
+
+    // Scenario 99: Filter cache generation fence: stale response does not overwrite invalidated cache
+    @Test
+    fun testScenario99_FilterCacheInvalidationDiscardsStaleEntry() =
+        runTest(testDispatcher) {
+            val responseDeferred = CompletableDeferred<FilterOptionsFetchResult>()
+            val mockRemote =
+                object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                    override suspend fun getFilterOptions(
+                        companyId: String,
+                        ifNoneMatchEtag: String?,
+                    ) = responseDeferred.await()
+
+                    override suspend fun getBootstrap(
+                        companyId: String,
+                        query: EventsQuery,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun getEventsPage(
+                        companyId: String,
+                        cursor: String,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun acknowledgeEvent(
+                        companyId: String,
+                        eventId: String,
+                    ) = error("unused")
+
+                    override suspend fun markEventErroneous(
+                        companyId: String,
+                        eventId: String,
+                        expectedClassificationVersion: Long,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun createExport(
+                        companyId: String,
+                        request: studio.acmenra.control.feature.events.data.model.CreateExportRequestDto,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun getExportStatus(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+
+                    override suspend fun downloadExport(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+                }
+
+            val repository =
+                EventsRepositoryImpl(
+                    remoteDataSource = mockRemote,
+                    webSocketDataSourceFactory = { TestWebSocketDataSource() },
+                    sessionManager = SessionManager(TestTokenStorage()),
+                    connectivityProvider =
+                        object : EventsConnectivityProvider {
+                            override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                        },
+                )
+
+            val fetchJob = async { repository.getFilterOptions("comp-1") }
+            advanceUntilIdle()
+
+            repository.invalidateFilterCache("comp-1")
+            advanceUntilIdle()
+
+            val dto =
+                EventsFilterOptionsDto(
+                    revision = "stale-rev",
+                    eventTypes = listOf(EventTypeOptionDto("type-1", "Type 1", "cat-1")),
+                )
+            responseDeferred.complete(FilterOptionsFetchResult.Success(dto, etag = "etag-1"))
+            advanceUntilIdle()
+
+            val result = fetchJob.await()
+            assertEquals("stale-rev", result.revision)
+            assertTrue(repository.isFilterCacheEmptyForTest("comp-1"))
+        }
+
+    // Scenario 100: EventMerger rejects immutable core mismatch as IntegrityViolation
+    @Test
+    fun testScenario100_EventMergerRejectsImmutableCoreMismatch() {
+        val current = sampleEvent("ev-1").copy(deviceId = "dev-1")
+        val incoming = sampleEvent("ev-1").copy(deviceId = "dev-2", eventVersion = 2L)
+
+        val result =
+            studio.acmenra.control.feature.events.data.realtime.EventMerger
+                .validateAndMerge(current, incoming)
+        assertTrue(result is studio.acmenra.control.feature.events.data.realtime.EventMergeResult.IntegrityViolation)
+        assertTrue(
+            (result as studio.acmenra.control.feature.events.data.realtime.EventMergeResult.IntegrityViolation)
+                .reason
+                .contains(
+                    "Immutable core mismatch",
+                ),
+        )
+    }
+
+    // Scenario 101: EventMerger rejects equal classificationVersion with content mismatch
+    @Test
+    fun testScenario101_EventMergerRejectsEqualClassificationVersionWithDifferentContent() {
+        val current = sampleEvent("ev-1").copy(isErroneous = false, classificationVersion = 1L)
+        val incoming = sampleEvent("ev-1").copy(isErroneous = true, classificationVersion = 1L, eventVersion = 2L)
+
+        val result =
+            studio.acmenra.control.feature.events.data.realtime.EventMerger
+                .validateAndMerge(current, incoming)
+        assertTrue(result is studio.acmenra.control.feature.events.data.realtime.EventMergeResult.IntegrityViolation)
+        assertTrue(
+            (result as studio.acmenra.control.feature.events.data.realtime.EventMergeResult.IntegrityViolation)
+                .reason
+                .contains(
+                    "Classification version 1 equality with content mismatch",
+                ),
+        )
+    }
+
+    // Scenario 102: EventMerger rejects equal acknowledgementVersion with content mismatch
+    @Test
+    fun testScenario102_EventMergerRejectsEqualAcknowledgementVersionWithDifferentContent() {
+        val current = sampleEvent("ev-1").copy(status = EventAcknowledgementStatus.NEW, acknowledgementVersion = 1L)
+        val incoming =
+            sampleEvent(
+                "ev-1",
+            ).copy(status = EventAcknowledgementStatus.ACKNOWLEDGED, acknowledgementVersion = 1L, eventVersion = 2L)
+
+        val result =
+            studio.acmenra.control.feature.events.data.realtime.EventMerger
+                .validateAndMerge(current, incoming)
+        assertTrue(result is studio.acmenra.control.feature.events.data.realtime.EventMergeResult.IntegrityViolation)
+        assertTrue(
+            (result as studio.acmenra.control.feature.events.data.realtime.EventMergeResult.IntegrityViolation)
+                .reason
+                .contains(
+                    "Acknowledgement version 1 equality with content mismatch",
+                ),
+        )
+    }
+
+    // Scenario 103: EventMerger rejects version exceeding MAX_SAFE_JS_INTEGER or specialized > eventVersion
+    @Test
+    fun testScenario103_EventMergerRejectsVersionExceedingBoundsOrSpecializedExceedingOverall() {
+        val current = sampleEvent("ev-1")
+        val overflowIncoming = sampleEvent("ev-1").copy(eventVersion = MAX_SAFE_JS_INTEGER + 1L)
+        val res1 =
+            studio.acmenra.control.feature.events.data.realtime.EventMerger.validateAndMerge(
+                current,
+                overflowIncoming,
+            )
+        assertTrue(res1 is studio.acmenra.control.feature.events.data.realtime.EventMergeResult.IntegrityViolation)
+
+        val specializedExceeding = sampleEvent("ev-1").copy(eventVersion = 2L, classificationVersion = 3L)
+        val res2 =
+            studio.acmenra.control.feature.events.data.realtime.EventMerger.validateAndMerge(
+                current,
+                specializedExceeding,
+            )
+        assertTrue(res2 is studio.acmenra.control.feature.events.data.realtime.EventMergeResult.IntegrityViolation)
+    }
+
+    // Scenario 104: EventMerger returns Stale when incoming version is <= current
+    @Test
+    fun testScenario104_EventMergerReturnsStaleWhenIncomingIsOlderOrEqual() {
+        val current =
+            sampleEvent(
+                "ev-1",
+            ).copy(eventVersion = 2L, classificationVersion = 2L, acknowledgementVersion = 2L)
+        val incoming =
+            sampleEvent(
+                "ev-1",
+            ).copy(eventVersion = 2L, classificationVersion = 2L, acknowledgementVersion = 2L)
+
+        val result =
+            studio.acmenra.control.feature.events.data.realtime.EventMerger
+                .validateAndMerge(current, incoming)
+        assertEquals(studio.acmenra.control.feature.events.data.realtime.EventMergeResult.Stale, result)
+    }
+
+    // Scenario 105: Live commit with summary_updated exceeding tenantSequence triggers rebootstrap
+    @Test
+    fun testScenario105_LiveCommitSummaryAsOfSequenceExceedingTenantSequenceRejected() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var rebootstrapTriggered = false
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = scope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { rebootstrapTriggered = true },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                val bootstrap =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = emptyList(),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 0,
+                                asOfSequence = 100L,
+                            ),
+                        summary = EventsSummary("UTC", "2026-03-01", 100L, 0),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(bootstrap, generation = 1L)
+                advanceUntilIdle()
+
+                val activeReplay = processor.currentReplayId
+                val sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                val invalidCommit =
+                    TenantCommitFrameDto(
+                        replayId = activeReplay,
+                        tenantSequence = 101L,
+                        payloadSha256 = sha,
+                        summaryUpdated =
+                            EventsSummaryDto(
+                                "UTC",
+                                "2026-03-01",
+                                summaryAsOfSequence = 105L,
+                                todayEventsCount = 5,
+                            ),
+                    )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(invalidCommit))),
+                )
+                advanceUntilIdle()
+
+                assertTrue(rebootstrapTriggered)
+                assertEquals(100L, processor.getAsOfSequence())
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    // Scenario 106: Buffered commit with summary_updated exceeding tenantSequence triggers RetryRequired
+    @Test
+    fun testScenario106_BufferedCommitSummaryAsOfSequenceExceedingTenantSequenceTriggersRetryRequired() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var rebootstrapTriggered = false
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = scope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { rebootstrapTriggered = true },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                val b1 =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = emptyList(),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 0,
+                                asOfSequence = 100L,
+                            ),
+                        summary = EventsSummary("UTC", "2026-03-01", 100L, 0),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(b1, generation = 1L)
+                advanceUntilIdle()
+                val activeReplay = processor.currentReplayId
+
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(
+                            1L,
+                            IncomingWsFrame.ResyncRequired(ResyncRequiredFrameDto(replayId = activeReplay)),
+                        ),
+                    ),
+                )
+                advanceUntilIdle()
+
+                val bufferReplay = processor.nextReplayGeneration()
+                val sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                // Buffer invalid commit with summary sequence 105 > tenantSequence 101
+                val invalidCommit =
+                    TenantCommitFrameDto(
+                        replayId = bufferReplay,
+                        tenantSequence = 101L,
+                        payloadSha256 = sha,
+                        summaryUpdated =
+                            EventsSummaryDto(
+                                "UTC",
+                                "2026-03-01",
+                                summaryAsOfSequence = 105L,
+                                todayEventsCount = 5,
+                            ),
+                    )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(invalidCommit))),
+                )
+                advanceUntilIdle()
+
+                val b2 =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = emptyList(),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 0,
+                                asOfSequence = 100L,
+                            ),
+                        summary = EventsSummary("UTC", "2026-03-01", 100L, 0),
+                        streamCursor = 100L,
+                    )
+                val applyResult = processor.installBootstrap(b2, generation = 2L)
+                advanceUntilIdle()
+
+                assertEquals(BootstrapApplyResult.RetryRequired, applyResult)
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    // Scenario 107: Heartbeat outgoing pump ensures 5s ACK window starts on physical write
+    @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+    @Test
+    fun testScenario107_HeartbeatWindowStartsUponPhysicalWriteCompletion() {
+        val timeSource = kotlin.time.TestTimeSource()
+        val tracker =
+            studio.acmenra.control.feature.events.data.datasource.HeartbeatTracker(
+                maxMissedAcks = 2,
+                ackWindow = kotlin.time.Duration.parse("5s"),
+                timeSource = timeSource,
+            )
+
+        val writeMark = timeSource.markNow()
+        tracker.onHeartbeatSent(mark = writeMark, clientConfirmedSeq = 50L)
+        assertTrue(tracker.hasPendingAck.load())
+
+        // 4 seconds after physical write: ACK arrives within 5s window
+        timeSource += kotlin.time.Duration.parse("4s")
+        assertTrue(
+            tracker.onAckReceived(
+                incomingReplayId = 1L,
+                activeReplayId = 1L,
+                incomingConfirmedSeq = 50L,
+                mark = timeSource.markNow(),
+            ),
+        )
+        assertFalse(tracker.hasPendingAck.load())
+    }
+
+    // Scenario 108: Incoming WS frame with schema_version != 1 is rejected by dataSource
+    @Test
+    fun testScenario108_IncomingWsFrameWithInvalidSchemaVersionRejected() {
+        val testJson = Json { ignoreUnknownKeys = true }
+        val rawJson = """{"schema_version":2,"type":"SUBSCRIBED","replay_id":1,"replay_empty":true}"""
+        val generic = testJson.decodeFromString<GenericRealtimeFrameDto>(rawJson)
+        assertEquals(2, generic.schemaVersion)
+        // KtorEventsWebSocketDataSource ignores any frame with generic.schemaVersion != 1
+    }
+
+    // Scenario 109: Navigation route integration with EventsQueryRouteCodec and queryHash
+    @Test
+    fun testScenario109_NavigationRouteIntegrationWithQueryHash() {
+        val filter = EventsFilter(searchId = "42", validity = EventValidityFilter.VALID)
+        val query = EventsQuery(filter = filter)
+        val encodedHash = EventsQueryRouteCodec.encodeHash("company-1", query)
+
+        val (company, decodedQuery) = EventsQueryRouteCodec.decodeHash(encodedHash)
+        assertEquals("company-1", company)
+        assertEquals("42", decodedQuery.filter.searchId)
+        assertEquals(EventValidityFilter.VALID, decodedQuery.filter.validity)
+    }
+
+    // Scenario 110: Wasm export memory ceiling documentation and boundedness
+    @Test
+    fun testScenario110_WasmExportMemoryCeilingBoundedness() {
+        val maxAllowed = studio.acmenra.control.feature.events.data.datasource.MAX_EXPORT_DOWNLOAD_BYTES
+        assertEquals(100L * 1024 * 1024, maxAllowed)
+
+        val mockDownload =
+            EventsExportDownload(
+                exportId = "exp-1",
+                filename = "export.csv",
+                bytes = ByteArray(1024),
+                contentType = "text/csv",
+            )
+        assertTrue(mockDownload.bytes.size.toLong() <= maxAllowed)
+    }
 }

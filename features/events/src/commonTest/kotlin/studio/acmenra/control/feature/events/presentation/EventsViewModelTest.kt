@@ -108,6 +108,10 @@ class EventsViewModelTest {
             pendingAcks.remove(event.id)
         }
 
+        override fun applyEventMutationResult(event: Event) {
+            appliedAcks.add(event)
+        }
+
         override fun retryRebootstrap() {}
 
         override fun updateAccessCapabilities(access: EventsAccessCapabilities) {
@@ -272,8 +276,21 @@ class EventsViewModelTest {
     @Test
     fun testMarkErroneousFlow() =
         runTest(testDispatcher) {
-            val vm = createViewModel()
+            val sampleEvent = createSampleEvent("ev-1")
+            val feed =
+                FakeFeedSession(
+                    companyId = "comp-1",
+                    query = EventsQuery(),
+                    initialAccess = EventsAccessCapabilities(eventsRead = true, eventsReview = true),
+                    initialFeedState =
+                        EventsFeedState(
+                            visibleEvents = listOf(sampleEvent),
+                            access = EventsAccessCapabilities(eventsRead = true, eventsReview = true),
+                        ),
+                )
+            val vm = createViewModel(feedSession = feed)
             vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true, eventsReview = true))
+            advanceUntilIdle()
 
             assertNull(vm.state.value.erroneousConfirmationEventId)
             vm.requestMarkErroneous("ev-1")
@@ -282,7 +299,7 @@ class EventsViewModelTest {
             vm.cancelMarkErroneous()
             assertNull(vm.state.value.erroneousConfirmationEventId)
 
-            vm.requestMarkErroneous("ev-1")
+            vm.requestMarkErroneous(sampleEvent)
             vm.confirmMarkErroneous("ev-1", expectedVersion = 1L)
             assertNull(vm.state.value.erroneousConfirmationEventId)
             advanceUntilIdle()

@@ -64,6 +64,7 @@ import studio.acmenra.control.feature.events.data.repository.EventsRepositoryImp
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementStatus
 import studio.acmenra.control.feature.events.domain.model.EventIconKey
+import studio.acmenra.control.feature.events.domain.model.EventTypeOption
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
 import studio.acmenra.control.feature.events.domain.model.EventsBootstrap
 import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
@@ -71,8 +72,10 @@ import studio.acmenra.control.feature.events.domain.model.EventsExportRequest
 import studio.acmenra.control.feature.events.domain.model.EventsExportStatus
 import studio.acmenra.control.feature.events.domain.model.EventsExportStatusCode
 import studio.acmenra.control.feature.events.domain.model.EventsFilterOptions
+import studio.acmenra.control.feature.events.domain.model.EventsMutationError
 import studio.acmenra.control.feature.events.domain.model.EventsOperationResult
 import studio.acmenra.control.feature.events.domain.model.EventsPage
+import studio.acmenra.control.feature.events.domain.model.EventsPaginationError
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
 import studio.acmenra.control.feature.events.domain.model.EventsSummary
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
@@ -4230,6 +4233,24 @@ class EventsContractV292MandatoryTests {
                     .find { it.id == "ev-2" },
             )
 
+            // Revoke access in state
+            processor.dispatch(SessionCommand.AccessUpdated(EventsAccessCapabilities(eventsRead = false)))
+            advanceUntilIdle()
+            assertTrue(
+                processor.state.value.visibleEvents
+                    .isEmpty(),
+            )
+
+            // Commands that recompute visible events MUST NOT republish old events when deny-latch is active
+            processor.dispatch(SessionCommand.ViewportAtTop)
+            processor.dispatch(SessionCommand.AcknowledgeSucceeded(sampleEvent("ev-1")))
+            processor.dispatch(SessionCommand.EventMutationApplied(sampleEvent("ev-1")))
+            advanceUntilIdle()
+            assertTrue(
+                processor.state.value.visibleEvents
+                    .isEmpty(),
+            )
+
             // installBootstrap returns Stale immediately
             val staleResult = processor.installBootstrap(bootstrap, generation = 2L)
             assertTrue(staleResult is BootstrapApplyResult.Stale)
@@ -4299,6 +4320,527 @@ class EventsContractV292MandatoryTests {
         assertTrue(resultMismatch is SequenceValidationResult.IntegrityViolation)
     }
 
+    // Scenario 48: Revoking EVENTS_READ immediately clears all event-derived state in ViewModel
+    @Test
+    fun testScenario48_RevokingEventsReadClearsCompleteViewModelState() =
+        runTest(testDispatcher) {
+            val sampleEv = sampleEvent("ev-1")
+            val fakeFeed =
+                FakeFeedSession(
+                    companyId = "comp-1",
+                    initialEvents = listOf(sampleEv),
+                )
+            fakeFeed.state.update {
+                it.copy(
+                    summary =
+                        EventsSummary(
+                            businessTimezone = "UTC",
+                            businessDate = "2026-03-01",
+                            summaryAsOfSequence = 100L,
+                            todayEventsCount = 10,
+                        ),
+                    snapshotTotalCount = 42,
+                    asOfSequence = 100L,
+                    hasMore = true,
+                    isLoadingNextPage = true,
+                    pendingNewerCount = 3,
+                    pendingHistoryCount = 5,
+                    paginationError = EventsPaginationError.Network,
+                    realtimeOverlay = RealtimeOverlay(pendingAckIds = setOf("ev-1")),
+                )
+            }
+
+            val viewModel =
+                createTestViewModel(
+                    feed = fakeFeed,
+                    loadEventFilterOptionsUseCase =
+                        object : LoadEventFilterOptionsUseCase {
+                            override suspend fun invoke(companyId: String) =
+                                EventsFilterOptions(
+                                    revision = "rev-1",
+                                    eventTypes =
+                                        listOf(
+                                            EventTypeOption("type-1", "Type 1", EventIconKey.GENERIC_ALERT),
+                                        ),
+                                )
+                        },
+                )
+            viewModel.initialize(
+                "comp-1",
+                EventsAccessCapabilities(eventsRead = true, eventsReview = true, reportsExport = true),
+            )
+            advanceUntilIdle()
+
+            // Verify ViewModel received full state
+            assertEquals(1, viewModel.state.value.visibleEvents.size)
+            assertNotNull(viewModel.state.value.summary)
+            assertEquals(
+                10,
+                viewModel.state.value.summary
+                    ?.todayEventsCount,
+            )
+            assertEquals(42, viewModel.state.value.snapshotTotalCount)
+            assertEquals(100L, viewModel.state.value.asOfSequence)
+            assertTrue(viewModel.state.value.hasMore)
+            assertEquals(3, viewModel.state.value.pendingNewerCount)
+            assertEquals(5, viewModel.state.value.pendingHistoryCount)
+            assertNotNull(viewModel.state.value.paginationError)
+            assertEquals(setOf("ev-1"), viewModel.state.value.realtimeOverlay.pendingAckIds)
+
+            viewModel.selectEvent("ev-1")
+            assertEquals("ev-1", viewModel.state.value.selectedEventId)
+
+            // Now revoke EVENTS_READ
+            viewModel.initialize(
+                "comp-1",
+                EventsAccessCapabilities(eventsRead = false, eventsReview = false, reportsExport = false),
+            )
+            advanceUntilIdle()
+
+            // Verify all event-derived state is cleared immediately!
+            val state = viewModel.state.value
+            assertFalse(state.access.eventsRead)
+            assertTrue(state.visibleEvents.isEmpty())
+            assertNull(state.summary)
+            assertNull(state.snapshotTotalCount)
+            assertEquals(0L, state.asOfSequence)
+            assertFalse(state.hasMore)
+            assertFalse(state.isLoadingNextPage)
+            assertNull(state.paginationError)
+            assertEquals(0, state.pendingNewerCount)
+            assertEquals(0, state.pendingHistoryCount)
+            assertNull(state.selectedEventId)
+            assertFalse(state.isViewerOpenInCompact)
+            assertNull(state.filterOptions)
+            assertTrue(state.realtimeOverlay.pendingAckIds.isEmpty())
+            assertTrue(state.realtimeOverlay.entries.isEmpty())
+        }
+
+    // Scenario 49: Ktor WebSocket DataSource atomic session management protects connect() during disconnect()
+    @Test
+    fun testScenario49_ConnectDuringDisconnectDoesNotCloseNewConnection() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val disconnectJoined = CompletableDeferred<Unit>()
+                val disconnectBlocker = CompletableDeferred<Unit>()
+
+                val wsDataSource =
+                    KtorEventsWebSocketDataSource(
+                        realtimeClient =
+                            HttpClient(
+                                MockEngine {
+                                    // Suspend until disconnectBlocker allows completing
+                                    disconnectBlocker.await()
+                                    respond("OK")
+                                },
+                            ) {
+                                install(io.ktor.client.plugins.websocket.WebSockets)
+                            },
+                        wsEndpointBase = "ws://localhost:8080",
+                    )
+
+                // 1. Initial connection
+                var disconnectedReason1: WsCloseReason? = null
+                wsDataSource.connect(
+                    companyId = "comp-1",
+                    accessToken = "tok-1",
+                    replayId = 1L,
+                    afterSequence = 100L,
+                    scope = testScope,
+                    getClientConfirmedSeq = { 100L },
+                    onDisconnected = { reason, _ -> disconnectedReason1 = reason },
+                )
+                testDispatcher.scheduler.runCurrent()
+
+                // 2. Start disconnect in background (it will wait for old job join)
+                val disconnectJob =
+                    testScope.launch {
+                        wsDataSource.disconnect()
+                        disconnectJoined.complete(Unit)
+                    }
+                testDispatcher.scheduler.runCurrent()
+
+                // 3. While disconnect is in-flight, invoke connect() for a newer session
+                var disconnectedReason2: WsCloseReason? = null
+                val newConnId =
+                    wsDataSource.connect(
+                        companyId = "comp-1",
+                        accessToken = "tok-2",
+                        replayId = 2L,
+                        afterSequence = 200L,
+                        scope = testScope,
+                        getClientConfirmedSeq = { 200L },
+                        onDisconnected = { reason, _ -> disconnectedReason2 = reason },
+                    )
+
+                // 4. Unblock old connection so disconnect finishes
+                disconnectBlocker.complete(Unit)
+                disconnectJob.join()
+                testDispatcher.scheduler.runCurrent()
+
+                // Old connection was closed
+                assertEquals(WsCloseReason.SESSION_CLOSED, disconnectedReason1)
+                // New connection was not closed by old disconnect
+                assertNull(disconnectedReason2)
+                assertTrue(newConnId > 0L)
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 50: Connectivity coming online while disconnectJob is in flight waits for disconnect to complete
+    @Test
+    fun testScenario50_ConnectivityOnlineAwaitsDisconnectJob() =
+        runTest(testDispatcher) {
+            val parentScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val testWs = TestWebSocketDataSource()
+                val connectivityFlow = MutableStateFlow(true)
+                val session =
+                    EventsFeedSessionImpl(
+                        companyId = "comp-1",
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        remoteDataSource =
+                            object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                                override suspend fun getBootstrap(
+                                    companyId: String,
+                                    query: EventsQuery,
+                                    limit: Int,
+                                ): EventsBootstrapDto = sampleBootstrapDto(cursor = 100L)
+
+                                override suspend fun getEventsPage(
+                                    companyId: String,
+                                    cursor: String,
+                                    limit: Int,
+                                ) = error("unused")
+
+                                override suspend fun getFilterOptions(
+                                    companyId: String,
+                                    ifNoneMatchEtag: String?,
+                                ) = error("unused")
+
+                                override suspend fun acknowledgeEvent(
+                                    companyId: String,
+                                    eventId: String,
+                                ) = error("unused")
+
+                                override suspend fun markEventErroneous(
+                                    companyId: String,
+                                    eventId: String,
+                                    expectedClassificationVersion: Long,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun createExport(
+                                    companyId: String,
+                                    request: studio.acmenra.control.feature.events.data.model.CreateExportRequestDto,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun getExportStatus(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+
+                                override suspend fun downloadExport(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+                            },
+                        webSocketDataSource = testWs,
+                        sessionManager = SessionManager(TestTokenStorage()),
+                        connectivityProvider =
+                            object : EventsConnectivityProvider {
+                                override val isOnline = connectivityFlow
+                            },
+                        accessInvalidationListener = { _, _ -> },
+                        parentScope = parentScope,
+                    )
+                advanceUntilIdle()
+                assertEquals(1, testWs.connectCount)
+
+                // Network disconnects
+                connectivityFlow.value = false
+                advanceUntilIdle()
+
+                // Network comes back online -> reconnectWithBackoff is triggered
+                connectivityFlow.value = true
+                advanceUntilIdle()
+
+                assertTrue(testWs.connectCount >= 1)
+                session.close()
+                advanceUntilIdle()
+            } finally {
+                parentScope.cancel()
+            }
+        }
+
+    // Scenario 51: PermissionDenied and Generic 403 in EventsRepositoryImpl are classified as EventsMutationError.PermissionDenied
+    @Test
+    fun testScenario51_PermissionDeniedClassificationInRepository() =
+        runTest(testDispatcher) {
+            val mockRemote =
+                object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                    var throwGeneric403 = false
+
+                    override suspend fun acknowledgeEvent(
+                        companyId: String,
+                        eventId: String,
+                    ): EventDto {
+                        if (throwGeneric403) {
+                            throw EventsApiException.Generic(
+                                code = "403",
+                                serverMessage = "Forbidden",
+                                retryable = false,
+                            )
+                        } else {
+                            throw EventsApiException.PermissionDenied("PERMISSION_DENIED")
+                        }
+                    }
+
+                    override suspend fun markEventErroneous(
+                        companyId: String,
+                        eventId: String,
+                        expectedClassificationVersion: Long,
+                        idempotencyKey: String,
+                    ): EventDto {
+                        if (throwGeneric403) {
+                            throw EventsApiException.Generic(
+                                code = "PERMISSION_DENIED",
+                                serverMessage = "Forbidden",
+                                retryable = false,
+                            )
+                        } else {
+                            throw EventsApiException.PermissionDenied("PERMISSION_DENIED")
+                        }
+                    }
+
+                    override suspend fun getBootstrap(
+                        companyId: String,
+                        query: EventsQuery,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun getEventsPage(
+                        companyId: String,
+                        cursor: String,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun getFilterOptions(
+                        companyId: String,
+                        ifNoneMatchEtag: String?,
+                    ) = error("unused")
+
+                    override suspend fun createExport(
+                        companyId: String,
+                        request: studio.acmenra.control.feature.events.data.model.CreateExportRequestDto,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun getExportStatus(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+
+                    override suspend fun downloadExport(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+                }
+
+            val repository =
+                EventsRepositoryImpl(
+                    remoteDataSource = mockRemote,
+                    webSocketDataSourceFactory = { TestWebSocketDataSource() },
+                    sessionManager = SessionManager(TestTokenStorage()),
+                    connectivityProvider =
+                        object : EventsConnectivityProvider {
+                            override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                        },
+                )
+
+            // Test PermissionDenied typed exception
+            val ackResult1 = repository.acknowledgeEvent("comp-1", "ev-1")
+            assertTrue(ackResult1 is EventsOperationResult.Failure)
+            assertEquals(EventsMutationError.PermissionDenied, (ackResult1 as EventsOperationResult.Failure).error)
+
+            val markResult1 = repository.markEventErroneous("comp-1", "ev-1", 1L, "idem-1")
+            assertTrue(markResult1 is EventsOperationResult.Failure)
+            assertEquals(EventsMutationError.PermissionDenied, (markResult1 as EventsOperationResult.Failure).error)
+
+            // Test Generic 403 exception
+            mockRemote.throwGeneric403 = true
+            val ackResult2 = repository.acknowledgeEvent("comp-1", "ev-1")
+            assertTrue(ackResult2 is EventsOperationResult.Failure)
+            assertEquals(EventsMutationError.PermissionDenied, (ackResult2 as EventsOperationResult.Failure).error)
+
+            val markResult2 = repository.markEventErroneous("comp-1", "ev-1", 1L, "idem-2")
+            assertTrue(markResult2 is EventsOperationResult.Failure)
+            assertEquals(EventsMutationError.PermissionDenied, (markResult2 as EventsOperationResult.Failure).error)
+        }
+
+    // Scenario 52: Concurrent getFilterOptions requests prevent late older response from overwriting fresh cache
+    @Test
+    fun testScenario52_ConcurrentFilterFetchPreventsStaleCacheOverwrite() =
+        runTest(testDispatcher) {
+            val responseADeferred = CompletableDeferred<FilterOptionsFetchResult>()
+            val responseBDeferred = CompletableDeferred<FilterOptionsFetchResult>()
+            var callIndex = 0
+
+            val mockRemote =
+                object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                    override suspend fun getFilterOptions(
+                        companyId: String,
+                        ifNoneMatchEtag: String?,
+                    ): FilterOptionsFetchResult {
+                        callIndex++
+                        return if (callIndex == 1) {
+                            responseADeferred.await()
+                        } else {
+                            responseBDeferred.await()
+                        }
+                    }
+
+                    override suspend fun getBootstrap(
+                        companyId: String,
+                        query: EventsQuery,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun getEventsPage(
+                        companyId: String,
+                        cursor: String,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun acknowledgeEvent(
+                        companyId: String,
+                        eventId: String,
+                    ) = error("unused")
+
+                    override suspend fun markEventErroneous(
+                        companyId: String,
+                        eventId: String,
+                        expectedClassificationVersion: Long,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun createExport(
+                        companyId: String,
+                        request: studio.acmenra.control.feature.events.data.model.CreateExportRequestDto,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun getExportStatus(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+
+                    override suspend fun downloadExport(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+                }
+
+            val repository =
+                EventsRepositoryImpl(
+                    remoteDataSource = mockRemote,
+                    webSocketDataSourceFactory = { TestWebSocketDataSource() },
+                    sessionManager = SessionManager(TestTokenStorage()),
+                    connectivityProvider =
+                        object : EventsConnectivityProvider {
+                            override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                        },
+                )
+
+            // Start Request A (older)
+            val deferredA = async { repository.getFilterOptions("comp-1") }
+            advanceUntilIdle()
+
+            // Start Request B (newer)
+            val deferredB = async { repository.getFilterOptions("comp-1") }
+            advanceUntilIdle()
+
+            // Request B finishes first with NEW options
+            val dtoB =
+                EventsFilterOptionsDto(
+                    revision = "rev-B",
+                    eventTypes = listOf(EventTypeOptionDto("type-B", "Type B", "category-b")),
+                )
+            responseBDeferred.complete(FilterOptionsFetchResult.Success(dtoB, etag = "etag-B"))
+            advanceUntilIdle()
+
+            val resultB = deferredB.await()
+            assertEquals(1, resultB.eventTypes.size)
+            assertEquals("type-B", resultB.eventTypes.first().id)
+
+            // Request A finishes second with OLD options
+            val dtoA =
+                EventsFilterOptionsDto(
+                    revision = "rev-A",
+                    eventTypes = listOf(EventTypeOptionDto("type-A", "Type A", "category-a")),
+                )
+            responseADeferred.complete(FilterOptionsFetchResult.Success(dtoA, etag = "etag-A"))
+            advanceUntilIdle()
+
+            val resultA = deferredA.await()
+            assertEquals("type-A", resultA.eventTypes.first().id)
+
+            // Verify cache was NOT overwritten by late Request A: calling with 304 NotModified returns cached B!
+            val cachedResult =
+                repository.getFilterOptions("comp-1")
+            assertEquals("type-B", cachedResult.eventTypes.first().id)
+        }
+
+    // Scenario 53: startExport clears activeExportKey on UNKNOWN status allowing new export requests
+    @Test
+    fun testScenario53_StartExportClearsKeyOnUnknownStatus() =
+        runTest(testDispatcher) {
+            var exportCallCount = 0
+            val capturedKeys = mutableListOf<String>()
+
+            val viewModel =
+                createTestViewModel(
+                    createEventsExportUseCase =
+                        object : CreateEventsExportUseCase {
+                            override suspend fun invoke(
+                                companyId: String,
+                                request: EventsExportRequest,
+                                idempotencyKey: String,
+                            ): EventsExportStatus {
+                                exportCallCount++
+                                capturedKeys.add(idempotencyKey)
+                                return EventsExportStatus(
+                                    exportId = "exp-$exportCallCount",
+                                    status = EventsExportStatusCode.UNKNOWN,
+                                    createdAt = Instant.parse("2026-03-01T12:00:00Z"),
+                                )
+                            }
+                        },
+                )
+            viewModel.initialize("comp-1", EventsAccessCapabilities(eventsRead = true, reportsExport = true))
+            advanceUntilIdle()
+
+            viewModel.startExport()
+            advanceUntilIdle()
+            assertEquals(1, exportCallCount)
+            assertEquals(1, capturedKeys.size)
+            val firstKey = capturedKeys[0]
+
+            // Trigger second export with same parameters
+            viewModel.startExport()
+            advanceUntilIdle()
+            assertEquals(2, exportCallCount)
+            assertEquals(2, capturedKeys.size)
+            val secondKey = capturedKeys[1]
+
+            // Because UNKNOWN is terminal, activeExportKey was cleared, generating a new distinct key!
+            assertTrue(firstKey != secondKey)
+        }
+
     private class FakeFeedSession(
         override val companyId: String = "comp-1",
         override val query: EventsQuery = EventsQuery(),
@@ -4352,7 +4894,25 @@ class EventsContractV292MandatoryTests {
         override fun retryRebootstrap() {}
 
         override fun updateAccessCapabilities(access: EventsAccessCapabilities) {
-            state.update { it.copy(access = access) }
+            state.update {
+                if (!access.eventsRead) {
+                    it.copy(
+                        access = access,
+                        visibleEvents = emptyList(),
+                        realtimeOverlay = RealtimeOverlay(),
+                        asOfSequence = 0L,
+                        snapshotTotalCount = 0,
+                        hasMore = false,
+                        isLoadingNextPage = false,
+                        paginationError = null,
+                        summary = null,
+                        pendingNewerCount = 0,
+                        pendingHistoryCount = 0,
+                    )
+                } else {
+                    it.copy(access = access)
+                }
+            }
         }
 
         override fun close() {}

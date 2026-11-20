@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import studio.acmenra.control.feature.events.data.datasource.IncomingWsEnvelope
 import studio.acmenra.control.feature.events.data.datasource.IncomingWsFrame
 import studio.acmenra.control.feature.events.data.mapper.EventsDtoMapper
 import studio.acmenra.control.feature.events.data.model.EventsFilterOptionsDto
@@ -64,8 +65,12 @@ sealed interface SessionCommand {
         val isLoading: Boolean,
     ) : SessionCommand
 
+    data class WsConnectionActivated(
+        val connectionId: Long,
+    ) : SessionCommand
+
     data class WsFrameReceived(
-        val frame: IncomingWsFrame,
+        val envelope: IncomingWsEnvelope,
     ) : SessionCommand
 
     data class ConnectionStateChanged(
@@ -146,7 +151,8 @@ class EventsSessionProcessor(
     private var isRebootstrapping = false
     private var bufferReplayId: Long? = null
     private val rebootstrapBuffer = mutableListOf<BufferedCommit>()
-    private val closedReplayGenerations = mutableSetOf<Long>()
+    private var maxClosedReplayGeneration: Long = 0L
+    private var activeConnectionId: Long = 0L
     private var nextCursor: String? = null
 
     val currentReplayId: Long get() = sequenceProcessor.currentReplayId
@@ -276,7 +282,21 @@ class EventsSessionProcessor(
             is SessionCommand.SetLoadingNextPage -> {
                 _state.update { it.copy(isLoadingNextPage = command.isLoading) }
             }
-            is SessionCommand.WsFrameReceived -> handleWsFrame(command.frame)
+            is SessionCommand.WsConnectionActivated -> {
+                if (command.connectionId > activeConnectionId) {
+                    activeConnectionId = command.connectionId
+                }
+            }
+            is SessionCommand.WsFrameReceived -> {
+                val (connId, frame) = command.envelope
+                if (connId < activeConnectionId) {
+                    return
+                }
+                if (connId > activeConnectionId) {
+                    activeConnectionId = connId
+                }
+                handleWsFrame(frame)
+            }
             is SessionCommand.ConnectionStateChanged -> {
                 _state.update { it.copy(connectionState = command.state) }
             }
@@ -312,6 +332,8 @@ class EventsSessionProcessor(
                             summary = null,
                             snapshotTotalCount = 0,
                             hasMore = false,
+                            isLoadingNextPage = false,
+                            paginationError = null,
                             pendingNewerCount = 0,
                             pendingHistoryCount = 0,
                         )
@@ -334,7 +356,7 @@ class EventsSessionProcessor(
                 }
             }
             is SessionCommand.NextReplayGeneration -> {
-                closedReplayGenerations.add(sequenceProcessor.currentReplayId)
+                maxClosedReplayGeneration = maxOf(maxClosedReplayGeneration, sequenceProcessor.currentReplayId)
                 val gen = sequenceProcessor.nextReplayGeneration()
                 if (isRebootstrapping) {
                     bufferReplayId = gen
@@ -409,18 +431,13 @@ class EventsSessionProcessor(
             for (item in validCommits) {
                 val existing = deduplicatedCommits.lastOrNull()
                 if (existing != null && existing.tenantSequence == item.commit.tenantSequence) {
-                    if (existing.payloadSha256 != null && item.commit.payloadSha256 != null) {
-                        if (existing.payloadSha256 == item.commit.payloadSha256) {
-                            // Verified duplicate frame -> drop
-                            continue
-                        } else {
-                            // Same sequence with different SHA -> integrity violation!
-                            deduplicationError = true
-                            break
-                        }
-                    } else {
-                        // Duplicate sequence without SHA -> treat as duplicate
+                    if (existing.payloadSha256 == item.commit.payloadSha256) {
+                        // Verified duplicate frame with identical SHA -> drop
                         continue
+                    } else {
+                        // Same sequence with different SHA -> integrity violation!
+                        deduplicationError = true
+                        break
                     }
                 }
                 deduplicatedCommits.add(item.commit)
@@ -457,7 +474,7 @@ class EventsSessionProcessor(
             }
         }
 
-        closedReplayGenerations.add(sequenceProcessor.currentReplayId)
+        maxClosedReplayGeneration = maxOf(maxClosedReplayGeneration, sequenceProcessor.currentReplayId)
         val newReplayId = sequenceProcessor.nextReplayGeneration()
 
         val currentSummary = _state.value.summary
@@ -595,7 +612,7 @@ class EventsSessionProcessor(
         when (frame) {
             is IncomingWsFrame.TenantCommit -> {
                 val commit = frame.frame
-                if (commit.replayId in closedReplayGenerations) {
+                if (commit.replayId <= maxClosedReplayGeneration) {
                     return
                 }
 
@@ -645,7 +662,7 @@ class EventsSessionProcessor(
             }
             is IncomingWsFrame.ResyncRequired -> {
                 val replayId = frame.frame.replayId
-                if (replayId in closedReplayGenerations || replayId != sequenceProcessor.currentReplayId) {
+                if (replayId <= maxClosedReplayGeneration || replayId != sequenceProcessor.currentReplayId) {
                     return // Ignore stale ResyncRequired from previous generation
                 }
                 isRebootstrapping = true
@@ -655,7 +672,7 @@ class EventsSessionProcessor(
             }
             is IncomingWsFrame.Subscribed -> {
                 if (frame.frame.replayId != sequenceProcessor.currentReplayId ||
-                    frame.frame.replayId in closedReplayGenerations
+                    frame.frame.replayId <= maxClosedReplayGeneration
                 ) {
                     return
                 }
@@ -666,7 +683,7 @@ class EventsSessionProcessor(
             is IncomingWsFrame.ReplayCompleted -> {
                 val completedFrame = frame.frame
                 if (completedFrame.replayId != sequenceProcessor.currentReplayId ||
-                    completedFrame.replayId in closedReplayGenerations
+                    completedFrame.replayId <= maxClosedReplayGeneration
                 ) {
                     return
                 }
@@ -679,7 +696,7 @@ class EventsSessionProcessor(
             }
             is IncomingWsFrame.HeartbeatAck -> {
                 if (frame.frame.replayId != sequenceProcessor.currentReplayId ||
-                    frame.frame.replayId in closedReplayGenerations
+                    frame.frame.replayId <= maxClosedReplayGeneration
                 ) {
                     return
                 }
@@ -688,7 +705,7 @@ class EventsSessionProcessor(
             is IncomingWsFrame.AccessCheckUnavailable -> {
                 // Transient: do not invalidate cache, check generation
                 if (frame.frame.replayId != sequenceProcessor.currentReplayId ||
-                    frame.frame.replayId in closedReplayGenerations
+                    frame.frame.replayId <= maxClosedReplayGeneration
                 ) {
                     return
                 }

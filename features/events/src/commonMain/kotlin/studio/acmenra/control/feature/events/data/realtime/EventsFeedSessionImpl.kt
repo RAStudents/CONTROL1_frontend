@@ -81,6 +81,9 @@ class EventsFeedSessionImpl(
     val isClosed: Boolean get() = isTerminal || isCleanupStarted
     private var isOnline = true
 
+    private var accessTransitionGeneration = 0L
+    private var disconnectJob: Job? = null
+
     private var consecutiveWsFailures = 0
     private var consecutiveHttpFailures = 0
 
@@ -96,7 +99,13 @@ class EventsFeedSessionImpl(
             initialAccess = initialAccess,
             scope = sessionScope,
             onSendReplayRequest = { replayId, afterSequence ->
-                webSocketDataSource.sendReplayRequest(replayId, afterSequence)
+                try {
+                    webSocketDataSource.sendReplayRequest(replayId, afterSequence)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    triggerRebootstrap()
+                }
             },
             onTriggerRebootstrap = {
                 triggerRebootstrap()
@@ -151,8 +160,8 @@ class EventsFeedSessionImpl(
         wsFramesJob?.cancel()
         wsFramesJob =
             sessionScope.launch {
-                webSocketDataSource.incomingFrames.collect { frame ->
-                    processor.dispatch(SessionCommand.WsFrameReceived(frame))
+                webSocketDataSource.incomingFrames.collect { envelope ->
+                    processor.dispatch(SessionCommand.WsFrameReceived(envelope))
                 }
             }
     }
@@ -341,19 +350,21 @@ class EventsFeedSessionImpl(
 
                 processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.CONNECTING))
 
-                webSocketDataSource.connect(
-                    companyId = companyId,
-                    accessToken = token,
-                    replayId = replayId,
-                    afterSequence = afterSequence,
-                    scope = sessionScope,
-                    getClientConfirmedSeq = { processor.getAsOfSequence() },
-                    onDisconnected = { reason, _ ->
-                        if (!isClosed && generation == connectionGeneration) {
-                            handleDisconnect(reason)
-                        }
-                    },
-                )
+                val connectionId =
+                    webSocketDataSource.connect(
+                        companyId = companyId,
+                        accessToken = token,
+                        replayId = replayId,
+                        afterSequence = afterSequence,
+                        scope = sessionScope,
+                        getClientConfirmedSeq = { processor.getAsOfSequence() },
+                        onDisconnected = { reason, _ ->
+                            if (!isClosed && generation == connectionGeneration) {
+                                handleDisconnect(reason)
+                            }
+                        },
+                    )
+                processor.dispatch(SessionCommand.WsConnectionActivated(connectionId))
             }
     }
 
@@ -451,17 +462,31 @@ class EventsFeedSessionImpl(
     }
 
     private fun handleEventsReadRevoked() {
+        val gen = ++accessTransitionGeneration
         bootstrapJob?.cancel()
         rebootstrapJob?.cancel()
         loadNextPageJob?.cancel()
         connectJob?.cancel()
-        sessionScope.launch {
-            webSocketDataSource.disconnect()
-        }
+        disconnectJob?.cancel()
+        disconnectJob =
+            sessionScope.launch {
+                try {
+                    webSocketDataSource.disconnect()
+                } catch (_: CancellationException) {
+                }
+            }
     }
 
     private fun handleEventsReadGranted() {
-        triggerBootstrap()
+        val gen = ++accessTransitionGeneration
+        bootstrapJob?.cancel()
+        rebootstrapJob?.cancel()
+        connectJob?.cancel()
+        sessionScope.launch {
+            disconnectJob?.join()
+            if (gen != accessTransitionGeneration || !isActive) return@launch
+            triggerBootstrap()
+        }
     }
 
     override fun loadNextPage() {
@@ -480,6 +505,7 @@ class EventsFeedSessionImpl(
                     consecutiveHttpFailures = 0
                     processor.dispatch(SessionCommand.NextPageLoaded(page, snapshotId = currentSnapshotId))
                 } catch (e: CancellationException) {
+                    processor.dispatch(SessionCommand.SetLoadingNextPage(false))
                     throw e
                 } catch (e: EventsApiException.SnapshotExpired) {
                     processor.dispatch(SessionCommand.PaginationFailed(EventsPaginationError.SnapshotExpired))
@@ -532,6 +558,9 @@ class EventsFeedSessionImpl(
         if (isCleanupStarted) return
         isCleanupStarted = true
         isTerminal = true
+
+        val gen = ++accessTransitionGeneration
+        disconnectJob?.cancel()
 
         processor.close()
         connectJob?.cancel()

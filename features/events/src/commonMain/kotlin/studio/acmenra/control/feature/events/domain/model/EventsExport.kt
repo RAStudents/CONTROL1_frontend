@@ -8,6 +8,7 @@ enum class EventsExportStatusCode {
     COMPLETED,
     FAILED,
     EXPIRED,
+    UNKNOWN,
 }
 
 enum class EventsExportFormatPreset {

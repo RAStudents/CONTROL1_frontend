@@ -12,7 +12,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -67,6 +66,11 @@ sealed interface IncomingWsFrame {
     ) : IncomingWsFrame
 }
 
+data class IncomingWsEnvelope(
+    val connectionId: Long,
+    val frame: IncomingWsFrame,
+)
+
 enum class WsCloseReason {
     REMOTE_CLOSE,
     NETWORK_ERROR,
@@ -76,7 +80,7 @@ enum class WsCloseReason {
 }
 
 interface EventsWebSocketDataSource {
-    val incomingFrames: Flow<IncomingWsFrame>
+    val incomingFrames: Flow<IncomingWsEnvelope>
 
     fun connect(
         companyId: String,
@@ -86,7 +90,7 @@ interface EventsWebSocketDataSource {
         scope: CoroutineScope,
         getClientConfirmedSeq: () -> Long = { afterSequence },
         onDisconnected: (reason: WsCloseReason, message: String?) -> Unit,
-    )
+    ): Long
 
     suspend fun sendReplayRequest(
         replayId: Long,
@@ -103,12 +107,11 @@ class KtorEventsWebSocketDataSource(
     private val json: Json = Json { ignoreUnknownKeys = true },
     private val wsEndpointBase: String = "",
 ) : EventsWebSocketDataSource {
-    private val rawFramesChannel = Channel<Pair<Long, IncomingWsFrame>>(Channel.BUFFERED)
-    override val incomingFrames: Flow<IncomingWsFrame> =
+    private val rawFramesChannel = Channel<IncomingWsEnvelope>(Channel.BUFFERED)
+    override val incomingFrames: Flow<IncomingWsEnvelope> =
         rawFramesChannel
             .receiveAsFlow()
-            .filter { (connId, _) -> connId == activeConnectionId }
-            .map { (_, frame) -> frame }
+            .filter { env -> env.connectionId == activeConnectionId }
 
     private val connectionMutex = Mutex()
     private var sessionJob: Job? = null
@@ -120,7 +123,7 @@ class KtorEventsWebSocketDataSource(
         connectionId: Long,
         frame: IncomingWsFrame,
     ) {
-        rawFramesChannel.trySend(connectionId to frame)
+        rawFramesChannel.trySend(IncomingWsEnvelope(connectionId, frame))
     }
 
     internal fun getActiveConnectionIdForTest(): Long = activeConnectionId
@@ -139,22 +142,25 @@ class KtorEventsWebSocketDataSource(
         scope: CoroutineScope,
         getClientConfirmedSeq: () -> Long,
         onDisconnected: (reason: WsCloseReason, message: String?) -> Unit,
-    ) {
+    ): Long {
         val oldJob = sessionJob
         val outChan = Channel<Frame>(Channel.BUFFERED)
         outgoingChannel?.close()
         outgoingChannel = outChan
         lastConfirmedSeq = afterSequence
 
+        val connectionId = ++activeConnectionId
+
         sessionJob =
             scope.launch {
-                var connectionId = 0L
                 connectionMutex.withLock {
                     if (oldJob != null && oldJob.isActive) {
                         oldJob.cancel(CancellationException(WsCloseReason.REPLACED.name))
                         oldJob.join()
                     }
-                    connectionId = ++activeConnectionId
+                    if (connectionId != activeConnectionId) {
+                        return@launch
+                    }
                     drainFramesChannel()
                 }
 
@@ -224,53 +230,71 @@ class KtorEventsWebSocketDataSource(
                                     "SUBSCRIBED" -> {
                                         val dto = json.decodeFromString<SubscribedFrameDto>(text)
                                         if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(connectionId to IncomingWsFrame.Subscribed(dto))
+                                            rawFramesChannel.send(
+                                                IncomingWsEnvelope(connectionId, IncomingWsFrame.Subscribed(dto)),
+                                            )
                                         }
                                     }
                                     "TENANT_COMMIT" -> {
                                         val dto = json.decodeFromString<TenantCommitFrameDto>(text)
                                         if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(connectionId to IncomingWsFrame.TenantCommit(dto))
+                                            rawFramesChannel.send(
+                                                IncomingWsEnvelope(connectionId, IncomingWsFrame.TenantCommit(dto)),
+                                            )
                                         }
                                     }
                                     "REPLAY_COMPLETED" -> {
                                         val dto = json.decodeFromString<ReplayCompletedFrameDto>(text)
                                         if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(connectionId to IncomingWsFrame.ReplayCompleted(dto))
+                                            rawFramesChannel.send(
+                                                IncomingWsEnvelope(connectionId, IncomingWsFrame.ReplayCompleted(dto)),
+                                            )
                                         }
                                     }
                                     "RESYNC_REQUIRED" -> {
                                         val dto = json.decodeFromString<ResyncRequiredFrameDto>(text)
                                         if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(connectionId to IncomingWsFrame.ResyncRequired(dto))
+                                            rawFramesChannel.send(
+                                                IncomingWsEnvelope(connectionId, IncomingWsFrame.ResyncRequired(dto)),
+                                            )
                                         }
                                     }
                                     "HEARTBEAT_ACK" -> {
                                         missedAcks = 0
                                         val dto = json.decodeFromString<HeartbeatAckFrameDto>(text)
                                         if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(connectionId to IncomingWsFrame.HeartbeatAck(dto))
+                                            rawFramesChannel.send(
+                                                IncomingWsEnvelope(connectionId, IncomingWsFrame.HeartbeatAck(dto)),
+                                            )
                                         }
                                     }
                                     "ACCESS_CHECK_UNAVAILABLE" -> {
                                         val dto = json.decodeFromString<AccessCheckUnavailableFrameDto>(text)
                                         if (connectionId == activeConnectionId) {
                                             rawFramesChannel.send(
-                                                connectionId to IncomingWsFrame.AccessCheckUnavailable(dto),
+                                                IncomingWsEnvelope(
+                                                    connectionId,
+                                                    IncomingWsFrame.AccessCheckUnavailable(dto),
+                                                ),
                                             )
                                         }
                                     }
                                     "AUTH_REQUIRED" -> {
                                         val dto = json.decodeFromString<AuthRequiredFrameDto>(text)
                                         if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(connectionId to IncomingWsFrame.AuthRequired(dto))
+                                            rawFramesChannel.send(
+                                                IncomingWsEnvelope(connectionId, IncomingWsFrame.AuthRequired(dto)),
+                                            )
                                         }
                                     }
                                     "ACCESS_INVALIDATED" -> {
                                         val dto = json.decodeFromString<AccessInvalidatedFrameDto>(text)
                                         if (connectionId == activeConnectionId) {
                                             rawFramesChannel.send(
-                                                connectionId to IncomingWsFrame.AccessInvalidated(dto),
+                                                IncomingWsEnvelope(
+                                                    connectionId,
+                                                    IncomingWsFrame.AccessInvalidated(dto),
+                                                ),
                                             )
                                         }
                                     }
@@ -299,6 +323,7 @@ class KtorEventsWebSocketDataSource(
                     onDisconnected(disconnectReason, disconnectMessage)
                 }
             }
+        return connectionId
     }
 
     override suspend fun sendReplayRequest(
@@ -307,13 +332,8 @@ class KtorEventsWebSocketDataSource(
     ) {
         val frame = ReplayRequestFrameDto(replayId = replayId, afterSequence = afterSequence)
         val text = json.encodeToString(frame)
-        try {
-            outgoingChannel?.send(Frame.Text(text))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Throwable) {
-            // Outgoing channel closed or failed
-        }
+        val channel = outgoingChannel ?: throw IllegalStateException("WebSocket outgoing channel is not connected")
+        channel.send(Frame.Text(text))
     }
 
     override suspend fun sendHeartbeat(clientConfirmedSeq: Long) {

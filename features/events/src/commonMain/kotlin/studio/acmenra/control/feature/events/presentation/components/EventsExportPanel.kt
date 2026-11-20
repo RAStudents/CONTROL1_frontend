@@ -257,7 +257,9 @@ fun EventsExportPanel(
                                 Text(text = stringResource(Res.string.events_export_download_btn))
                             }
                         }
-                        EventsExportStatusCode.FAILED -> {
+                        EventsExportStatusCode.FAILED,
+                        EventsExportStatusCode.UNKNOWN,
+                        -> {
                             Text(
                                 text = stringResource(Res.string.events_export_status_failed),
                                 style = MaterialTheme.typography.bodyMedium,

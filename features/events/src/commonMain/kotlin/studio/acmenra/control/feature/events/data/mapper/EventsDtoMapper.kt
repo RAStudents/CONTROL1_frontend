@@ -184,7 +184,7 @@ object EventsDtoMapper {
                 "COMPLETED" -> EventsExportStatusCode.COMPLETED
                 "FAILED" -> EventsExportStatusCode.FAILED
                 "EXPIRED" -> EventsExportStatusCode.EXPIRED
-                else -> EventsExportStatusCode.FAILED
+                else -> EventsExportStatusCode.UNKNOWN
             }
         val createdAt =
             try {

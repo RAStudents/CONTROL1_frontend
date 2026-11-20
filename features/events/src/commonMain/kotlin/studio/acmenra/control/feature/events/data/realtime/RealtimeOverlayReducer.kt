@@ -62,6 +62,8 @@ object RealtimeOverlayReducer {
         event: Event,
         query: EventsQuery,
         snapshotItems: List<Event>,
+        isEventCreated: Boolean = true,
+        hasMore: Boolean = false,
     ): Pair<RealtimeOverlay, OverlayMembership> {
         val existingEntry = currentOverlay.entries[event.id]
         val existingInSnapshot = snapshotItems.firstOrNull { it.id == event.id }
@@ -82,6 +84,21 @@ object RealtimeOverlayReducer {
         }
 
         if (currentEvent != null) {
+            // Check immutable core
+            if (event.id != currentEvent.id ||
+                event.eventTypeId != currentEvent.eventTypeId ||
+                event.categoryCode != currentEvent.categoryCode ||
+                event.locationId != currentEvent.locationId ||
+                event.deviceId != currentEvent.deviceId ||
+                event.occurredAt != currentEvent.occurredAt ||
+                event.receivedAt != currentEvent.receivedAt ||
+                event.previewUrl != currentEvent.previewUrl ||
+                event.videoUrl != currentEvent.videoUrl
+            ) {
+                return currentOverlay.copy(requiresRefresh = true) to
+                    (existingEntry?.membership ?: OverlayMembership.INCLUDED)
+            }
+
             if (event.eventVersion <= currentEvent.eventVersion) {
                 // Strict event_version gating: older or equal event_version cannot update overlay
                 return currentOverlay to (existingEntry?.membership ?: OverlayMembership.INCLUDED)
@@ -89,7 +106,11 @@ object RealtimeOverlayReducer {
 
             // Same specialized version MUST mean identical data
             if (event.classificationVersion == currentEvent.classificationVersion &&
-                event.isErroneous != currentEvent.isErroneous
+                (
+                    event.isErroneous != currentEvent.isErroneous ||
+                        event.erroneousMarkedAt != currentEvent.erroneousMarkedAt ||
+                        event.erroneousMarkedBy != currentEvent.erroneousMarkedBy
+                )
             ) {
                 return currentOverlay.copy(requiresRefresh = true) to
                     (existingEntry?.membership ?: OverlayMembership.INCLUDED)
@@ -118,10 +139,15 @@ object RealtimeOverlayReducer {
         val membership =
             when {
                 !matches -> OverlayMembership.REMOVED
-                snapshotItems.isEmpty() -> OverlayMembership.INCLUDED
                 existingInSnapshot != null || existingEntry?.membership == OverlayMembership.INCLUDED -> {
                     OverlayMembership.INCLUDED
                 }
+                !isEventCreated && snapshotItems.isNotEmpty() && hasMore -> {
+                    // Update of an item not in visible snapshot while deeper pages exist:
+                    // Position cannot be determined reliably without rebootstrap
+                    return currentOverlay.copy(requiresRefresh = true) to OverlayMembership.INCLUDED
+                }
+                snapshotItems.isEmpty() -> OverlayMembership.INCLUDED
                 else -> {
                     val oldestSnapshot = snapshotItems.last()
                     val newestSnapshot = snapshotItems.first()
@@ -131,8 +157,10 @@ object RealtimeOverlayReducer {
                     when {
                         // Newer than newest visible item -> queue as pending newer
                         cmpNewest < 0 -> OverlayMembership.PENDING_NEWER
-                        // Older than oldest snapshot item -> queue as pending history
-                        cmpOldest > 0 -> OverlayMembership.PENDING_HISTORY
+                        // Older than oldest snapshot item
+                        cmpOldest > 0 -> {
+                            if (hasMore) OverlayMembership.PENDING_HISTORY else OverlayMembership.INCLUDED
+                        }
                         // Between existing snapshot range
                         else -> OverlayMembership.INCLUDED
                     }

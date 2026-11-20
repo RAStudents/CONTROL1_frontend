@@ -63,6 +63,8 @@ data class Event(
     val acknowledgedAt: Instant?,
     val acknowledgedBy: String?,
     val isErroneous: Boolean,
+    val erroneousMarkedAt: Instant? = null,
+    val erroneousMarkedBy: String? = null,
     val previewUrl: String,
     val videoUrl: String?,
 ) {

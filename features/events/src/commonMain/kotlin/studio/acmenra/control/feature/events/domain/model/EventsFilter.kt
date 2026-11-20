@@ -54,6 +54,7 @@ sealed interface DateSelection {
 
 object DateFilterUtils {
     fun parseSafeTimeZone(zoneId: String?): TimeZone {
+        ensureTimezoneDatabaseInitialized()
         if (zoneId.isNullOrBlank()) return TimeZone.currentSystemDefault()
         return runCatching { TimeZone.of(zoneId) }.getOrElse {
             runCatching { TimeZone.of("UTC") }.getOrDefault(TimeZone.currentSystemDefault())

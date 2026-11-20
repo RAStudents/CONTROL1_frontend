@@ -91,6 +91,7 @@ import studio.acmenra.control.feature.events.domain.model.EventsPage
 import studio.acmenra.control.feature.events.domain.model.EventsPaginationError
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
 import studio.acmenra.control.feature.events.domain.model.EventsQueryRouteCodec
+import studio.acmenra.control.feature.events.domain.model.EventsSort
 import studio.acmenra.control.feature.events.domain.model.EventsSummary
 import studio.acmenra.control.feature.events.domain.model.OverlayMembership
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
@@ -126,6 +127,8 @@ class EventsContractV292MandatoryTests {
     @BeforeTest
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
+        studio.acmenra.control.feature.events.domain.model
+            .ensureTimezoneDatabaseInitialized()
     }
 
     @AfterTest
@@ -4815,7 +4818,7 @@ class EventsContractV292MandatoryTests {
             advanceUntilIdle()
 
             val resultA = deferredA.await()
-            assertEquals("type-A", resultA.eventTypes.first().id)
+            assertEquals("type-B", resultA.eventTypes.first().id)
 
             // Verify cache was NOT overwritten by late Request A: calling with 304 NotModified returns cached B!
             val cachedResult =
@@ -5823,39 +5826,42 @@ class EventsContractV292MandatoryTests {
             }
         }
 
-    // Scenario 67: Heartbeat off-by-one verification: 1 missed ACK does not close, 2 missed close only after 2nd window
+    // Scenario 67: Heartbeat requires 2 consecutive missed 5s ACK windows before timeout
     @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
     @Test
     fun testScenario67_HeartbeatRequiresFullSecondWindowBeforeTimeout() =
         runTest(testDispatcher) {
+            val timeSource = kotlin.time.TestTimeSource()
             val tracker =
                 studio.acmenra.control.feature.events.data.datasource
-                    .HeartbeatTracker(maxMissedAcks = 2)
+                    .HeartbeatTracker(maxMissedAcks = 2, timeSource = timeSource)
 
             // 1. Initial state: missedAcks = 0
             assertEquals(0, tracker.missedAcks.load())
 
-            // 2. First tick (25s): sends HB #1, missedAcks becomes 1 -> connection stays open!
-            assertTrue(tracker.onTick())
+            // 2. First HB sent at t=25s, ACK window 5s expires without ACK -> missedAcks becomes 1 -> connection stays open!
+            timeSource += kotlin.time.Duration.parse("25s")
+            tracker.onHeartbeatSent(mark = timeSource.markNow())
+            timeSource += kotlin.time.Duration.parse("5s")
+            assertTrue(tracker.onAckWindowTimeout())
             assertEquals(1, tracker.missedAcks.load())
 
-            // 3. Second tick (50s): server missed ACK for HB #1; sends HB #2, missedAcks becomes 2 ->
-            // connection STILL stays open to allow full window for HB #2 ACK!
-            assertTrue(tracker.onTick())
+            // 3. Stale ACK for old replayId (e.g. replayId 0 when active is 1) does NOT reset missedAcks!
+            tracker.onAckReceived(incomingReplayId = 0L, activeReplayId = 1L, mark = timeSource.markNow())
+            assertEquals(1, tracker.missedAcks.load())
+
+            // 4. Second HB sent at t=50s, ACK window 5s expires without ACK -> second consecutive miss -> triggers reconnect (returns false)!
+            timeSource += kotlin.time.Duration.parse("20s")
+            tracker.onHeartbeatSent(mark = timeSource.markNow())
+            timeSource += kotlin.time.Duration.parse("5s")
+            assertFalse(tracker.onAckWindowTimeout())
             assertEquals(2, tracker.missedAcks.load())
 
-            // 4. Stale ACK for old replayId (e.g. replayId 0 when active is 1) does NOT reset missedAcks!
-            tracker.onAckReceived(incomingReplayId = 0L, activeReplayId = 1L)
-            assertEquals(2, tracker.missedAcks.load())
-
-            // 5. Third tick (75s): full window elapsed without valid ACK -> onTick() returns false (timeout)!
-            assertFalse(tracker.onTick())
-
-            // 6. Valid ACK for active replayId resets missedAcks to 0
-            tracker.onAckReceived(incomingReplayId = 1L, activeReplayId = 1L)
+            // 5. If valid ACK arrives during an active window, resets missedAcks to 0
+            timeSource += kotlin.time.Duration.parse("20s")
+            tracker.onHeartbeatSent(mark = timeSource.markNow())
+            tracker.onAckReceived(incomingReplayId = 1L, activeReplayId = 1L, mark = timeSource.markNow())
             assertEquals(0, tracker.missedAcks.load())
-            assertTrue(tracker.onTick())
-            assertEquals(1, tracker.missedAcks.load())
         }
 
     // Scenario 68: EventsViewModel preserves idempotencyKey across transient network failures and resets on success
@@ -7021,39 +7027,53 @@ class EventsContractV292MandatoryTests {
     @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
     @Test
     fun testScenario84_HeartbeatAck5SecondWindow() {
+        val timeSource = kotlin.time.TestTimeSource()
         val tracker =
             studio.acmenra.control.feature.events.data.datasource.HeartbeatTracker(
                 maxMissedAcks = 2,
-                ackWindowMs = 5_000L,
+                ackWindow = kotlin.time.Duration.parse("5s"),
+                timeSource = timeSource,
             )
 
-        // Send HB at t = 1000
-        tracker.onHeartbeatSent(nowMs = 1000L)
+        // Send HB at t = 1s
+        timeSource += kotlin.time.Duration.parse("1s")
+        tracker.onHeartbeatSent(mark = timeSource.markNow())
         assertTrue(tracker.hasPendingAck.load())
 
-        // ACK arrives in window at t = 3000
-        val ackResult = tracker.onAckReceived(incomingReplayId = 1L, activeReplayId = 1L, nowMs = 3000L)
+        // ACK arrives in window at t = 3s (elapsed 2s <= 5s)
+        timeSource += kotlin.time.Duration.parse("2s")
+        val ackResult = tracker.onAckReceived(incomingReplayId = 1L, activeReplayId = 1L, mark = timeSource.markNow())
         assertTrue(ackResult)
         assertFalse(tracker.hasPendingAck.load())
         assertEquals(0, tracker.missedAcks.load())
 
-        // Next HB sent at t = 10000
-        tracker.onHeartbeatSent(nowMs = 10000L)
+        // Next HB sent at t = 10s
+        timeSource += kotlin.time.Duration.parse("7s")
+        tracker.onHeartbeatSent(mark = timeSource.markNow())
 
-        // Window timeout at t = 15000 (5s elapsed)
+        // Window timeout at t = 15s (5s elapsed)
+        timeSource += kotlin.time.Duration.parse("5s")
         val canContinue1 = tracker.onAckWindowTimeout()
         assertTrue(canContinue1)
         assertEquals(1, tracker.missedAcks.load())
 
-        // Stale ACK arrives late at t = 16000 -> rejected, missedAcks stays 1
-        val lateAckResult = tracker.onAckReceived(incomingReplayId = 1L, activeReplayId = 1L, nowMs = 16000L)
+        // Stale ACK arrives late at t = 16s (6s elapsed > 5s window) -> rejected, missedAcks stays 1
+        timeSource += kotlin.time.Duration.parse("1s")
+        val lateAckResult =
+            tracker.onAckReceived(
+                incomingReplayId = 1L,
+                activeReplayId = 1L,
+                mark = timeSource.markNow(),
+            )
         assertFalse(lateAckResult)
         assertEquals(1, tracker.missedAcks.load())
 
-        // Next HB sent at t = 20000
-        tracker.onHeartbeatSent(nowMs = 20000L)
+        // Next HB sent at t = 20s
+        timeSource += kotlin.time.Duration.parse("4s")
+        tracker.onHeartbeatSent(mark = timeSource.markNow())
 
-        // Second consecutive window timeout at t = 25000 -> must trigger reconnect!
+        // Second consecutive window timeout at t = 25s (5s elapsed) -> must trigger reconnect!
+        timeSource += kotlin.time.Duration.parse("5s")
         val canContinue2 = tracker.onAckWindowTimeout()
         assertFalse(canContinue2)
         assertEquals(2, tracker.missedAcks.load())
@@ -7361,5 +7381,752 @@ class EventsContractV292MandatoryTests {
                 }
             assertNotNull(ex)
             assertEquals(maxBytes, ex.maxBytes)
+        }
+
+    // Scenario 91: Player modal closes while selectedEventId remains unchanged
+    @Test
+    fun testScenario91_PlayerModalClosesWhileSelectedEventIdRemainsUnchanged() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val vm = createTestViewModel()
+                val event1 = sampleEvent("ev-1")
+                val event2 = sampleEvent("ev-2")
+
+                // 1. Select event-1: selectedEventId is set, compact viewer is open
+                vm.selectEvent(event1.id)
+                assertEquals("ev-1", vm.state.value.selectedEventId)
+                assertTrue(vm.state.value.isViewerOpenInCompact)
+
+                // 2. Close compact viewer: selectedEventId is preserved (retains anchor/selection), modal closes
+                vm.closeViewerCompact()
+                assertEquals("ev-1", vm.state.value.selectedEventId)
+                assertFalse(vm.state.value.isViewerOpenInCompact)
+
+                // 3. Switch to event-2: updates selectedEventId and reopens viewer
+                vm.selectEvent(event2.id)
+                assertEquals("ev-2", vm.state.value.selectedEventId)
+                assertTrue(vm.state.value.isViewerOpenInCompact)
+
+                // 4. Clear selection: clears both
+                vm.selectEvent(null)
+                assertNull(vm.state.value.selectedEventId)
+                assertFalse(vm.state.value.isViewerOpenInCompact)
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    // Scenario 92: CSV formula neutralizer normative vectors
+    @Test
+    fun testScenario92_CsvFormulaNeutralizerNormativeVectors() {
+        // Direct formula prefixes
+        assertEquals(
+            "'=cmd",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("=cmd"),
+        )
+        assertEquals(
+            "'+123",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("+123"),
+        )
+        assertEquals(
+            "'-sum(1,2)",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("-sum(1,2)"),
+        )
+        assertEquals(
+            "'@import",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("@import"),
+        )
+
+        // Leading TAB, CR, LF, spaces followed by formula prefix
+        assertEquals(
+            "'\t=1+2",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("\t=1+2"),
+        )
+        assertEquals(
+            "'\n-5",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("\n-5"),
+        )
+        assertEquals(
+            "'\r\n@SUM",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("\r\n@SUM"),
+        )
+        assertEquals(
+            "'   +cmd",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("   +cmd"),
+        )
+
+        // Leading Unicode whitespace
+        assertEquals(
+            "'\u00A0=1+2",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("\u00A0=1+2"),
+        )
+        assertEquals(
+            "'\u2000+calc",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("\u2000+calc"),
+        )
+        assertEquals(
+            "'\u3000@alert",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("\u3000@alert"),
+        )
+
+        // Leading C0 / C1 control characters
+        assertEquals(
+            "'\u0007=beep",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("\u0007=beep"),
+        )
+        assertEquals(
+            "'\u001B-esc",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("\u001B-esc"),
+        )
+        assertEquals(
+            "'\u0085=nel",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("\u0085=nel"),
+        )
+
+        // Safe values must remain untouched
+        assertEquals(
+            "Normal text",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("Normal text"),
+        )
+        assertEquals(
+            "12345",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("12345"),
+        )
+        assertEquals(
+            "Hello = World",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize("Hello = World"),
+        )
+        assertEquals(
+            "",
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer
+                .neutralize(""),
+        )
+
+        // RFC 4180 quoting
+        val cellWithComma =
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer.quoteCsvCell(
+                "=sum,total",
+            )
+        assertEquals("\"'=sum,total\"", cellWithComma)
+
+        val cellWithQuotes =
+            studio.acmenra.control.feature.events.domain.model.CsvFormulaNeutralizer.quoteCsvCell(
+                "=cmd\"run\"",
+            )
+        assertEquals("\"'=cmd\"\"run\"\"\"", cellWithQuotes)
+    }
+
+    // HB-1: Auth replay 1, then replay request replay 2, ACK 2 accepted and resets missed count
+    @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+    @Test
+    fun testHB1_AuthReplay1ThenReplayRequestReplay2ThenAck2AcceptedAndResetsMissedCount() {
+        val timeSource = kotlin.time.TestTimeSource()
+        val tracker =
+            studio.acmenra.control.feature.events.data.datasource.HeartbeatTracker(
+                maxMissedAcks = 2,
+                ackWindow = kotlin.time.Duration.parse("5s"),
+                timeSource = timeSource,
+            )
+
+        var activeReplay = 1L
+        tracker.onHeartbeatSent(mark = timeSource.markNow())
+
+        timeSource += kotlin.time.Duration.parse("5s")
+        assertTrue(tracker.onAckWindowTimeout())
+        assertEquals(1, tracker.missedAcks.load())
+
+        activeReplay = 2L
+        tracker.onHeartbeatSent(mark = timeSource.markNow())
+        assertTrue(tracker.hasPendingAck.load())
+
+        timeSource += kotlin.time.Duration.parse("2s")
+        val ackAccepted =
+            tracker.onAckReceived(
+                incomingReplayId = 2L,
+                activeReplayId = activeReplay,
+                mark = timeSource.markNow(),
+            )
+        assertTrue(ackAccepted)
+        assertFalse(tracker.hasPendingAck.load())
+        assertEquals(0, tracker.missedAcks.load())
+    }
+
+    // HB-2: Stale ACK from old replay generation does not reset missed count
+    @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+    @Test
+    fun testHB2_StaleAckOldReplayDoesNotResetMissedCount() {
+        val timeSource = kotlin.time.TestTimeSource()
+        val tracker =
+            studio.acmenra.control.feature.events.data.datasource.HeartbeatTracker(
+                maxMissedAcks = 2,
+                ackWindow = kotlin.time.Duration.parse("5s"),
+                timeSource = timeSource,
+            )
+
+        tracker.onHeartbeatSent(mark = timeSource.markNow())
+        timeSource += kotlin.time.Duration.parse("5s")
+        tracker.onAckWindowTimeout()
+        assertEquals(1, tracker.missedAcks.load())
+
+        val activeReplay = 2L
+        tracker.onHeartbeatSent(mark = timeSource.markNow())
+
+        timeSource += kotlin.time.Duration.parse("1s")
+        val ackAccepted =
+            tracker.onAckReceived(
+                incomingReplayId = 1L,
+                activeReplayId = activeReplay,
+                mark = timeSource.markNow(),
+            )
+        assertFalse(ackAccepted)
+        assertEquals(1, tracker.missedAcks.load())
+        assertTrue(tracker.hasPendingAck.load())
+    }
+
+    // HB-3: Two consecutive missed 5s ACKs trigger reconnect (return false)
+    @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+    @Test
+    fun testHB3_Cadence25sSendToSendAndTwoConsecutiveMissed5sAcksReconnect() {
+        val timeSource = kotlin.time.TestTimeSource()
+        val tracker =
+            studio.acmenra.control.feature.events.data.datasource.HeartbeatTracker(
+                maxMissedAcks = 2,
+                ackWindow = kotlin.time.Duration.parse("5s"),
+                timeSource = timeSource,
+            )
+
+        tracker.onHeartbeatSent(mark = timeSource.markNow())
+        timeSource += kotlin.time.Duration.parse("5s")
+        val canContinue1 = tracker.onAckWindowTimeout()
+        assertTrue(canContinue1)
+        assertEquals(1, tracker.missedAcks.load())
+
+        timeSource += kotlin.time.Duration.parse("20s")
+        tracker.onHeartbeatSent(mark = timeSource.markNow())
+        timeSource += kotlin.time.Duration.parse("5s")
+        val canContinue2 = tracker.onAckWindowTimeout()
+        assertFalse(canContinue2)
+        assertEquals(2, tracker.missedAcks.load())
+    }
+
+    // HB-4: Monotonic clock timeout boundary at exactly 5 seconds
+    @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+    @Test
+    fun testHB4_MonotonicClockAndTimeoutBoundary5s() {
+        val timeSource = kotlin.time.TestTimeSource()
+        val tracker =
+            studio.acmenra.control.feature.events.data.datasource.HeartbeatTracker(
+                maxMissedAcks = 2,
+                ackWindow = kotlin.time.Duration.parse("5s"),
+                timeSource = timeSource,
+            )
+
+        // Boundary <= 5s: accepted
+        tracker.onHeartbeatSent(mark = timeSource.markNow())
+        timeSource += kotlin.time.Duration.parse("5s")
+        val acceptedAtBoundary =
+            tracker.onAckReceived(
+                incomingReplayId = 1L,
+                activeReplayId = 1L,
+                mark = timeSource.markNow(),
+            )
+        assertTrue(acceptedAtBoundary)
+        assertEquals(0, tracker.missedAcks.load())
+
+        // Boundary > 5s: rejected
+        timeSource += kotlin.time.Duration.parse("5s")
+        tracker.onHeartbeatSent(mark = timeSource.markNow())
+        timeSource += kotlin.time.Duration.parse("5001ms")
+        val rejectedAfterBoundary =
+            tracker.onAckReceived(
+                incomingReplayId = 1L,
+                activeReplayId = 1L,
+                mark = timeSource.markNow(),
+            )
+        assertFalse(rejectedAfterBoundary)
+    }
+
+    // RT-1: Invalid event payload requires refresh and triggers rebootstrap without advancing sequence
+    @Test
+    fun testRT1_InvalidEventPayloadRequiresRefreshTriggersRebootstrapWithoutAdvancingSequence() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var rebootstrapTriggered = false
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = scope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { rebootstrapTriggered = true },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                val page = EventsPage(listOf(sampleEvent("ev-1")), null, false, 1, 100L, "snap-1")
+                val summary = EventsSummary("UTC", "2026-03-01", 100L, 1)
+                processor.installBootstrap(EventsBootstrap(page, summary, 100L), 1L)
+
+                val invalidEvent = sampleEventDto("ev-1").copy(eventVersion = 0L)
+                val commit =
+                    TenantCommitFrameDto(
+                        replayId = 2L,
+                        tenantSequence = 101L,
+                        payloadSha256 = "0".repeat(64),
+                        eventCreated = invalidEvent,
+                    )
+
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(commit))),
+                )
+                testScheduler.runCurrent()
+
+                assertTrue(rebootstrapTriggered)
+                assertEquals(100L, processor.getAsOfSequence())
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    // RT-2: Invalid envelope (missing payload or both payloads present) rejected before sequence advance
+    @Test
+    fun testRT2_InvalidEnvelopeDoesNotLeavePartialCommitOrAdvanceSequence() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var rebootstrapTriggered = false
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = scope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { rebootstrapTriggered = true },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                val page = EventsPage(listOf(sampleEvent("ev-1")), null, false, 1, 10L, "snap-1")
+                val summary = EventsSummary("UTC", "2026-03-01", 10L, 1)
+                processor.installBootstrap(EventsBootstrap(page, summary, 10L), 1L)
+
+                val ev = sampleEventDto("ev-2")
+                val invalidCommit =
+                    TenantCommitFrameDto(
+                        replayId = 2L,
+                        tenantSequence = 11L,
+                        payloadSha256 = "0".repeat(64),
+                        eventCreated = ev,
+                        eventUpdated = ev,
+                    )
+                assertFalse(invalidCommit.validateEnvelope())
+
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(invalidCommit))),
+                )
+                testScheduler.runCurrent()
+
+                assertEquals(10L, processor.getAsOfSequence())
+                assertTrue(rebootstrapTriggered)
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    // RT-3: Equal classification version with different erroneous fields violates integrity
+    @Test
+    fun testRT3_ClassificationVersionEqualityRequiresIdenticalErroneousFields() {
+        val query = EventsQuery()
+        val currentEvent =
+            sampleEvent("ev-1").copy(
+                eventVersion = 2L,
+                classificationVersion = 1L,
+                isErroneous = false,
+            )
+        val initialOverlay =
+            RealtimeOverlay(
+                entries =
+                    mapOf(
+                        "ev-1" to
+                            studio.acmenra.control.feature.events.domain.model.OverlayEntry(
+                                eventId = "ev-1",
+                                event = currentEvent,
+                                eventVersion = 2L,
+                                membership = OverlayMembership.INCLUDED,
+                            ),
+                    ),
+            )
+
+        val conflictingCommit =
+            currentEvent.copy(
+                eventVersion = 3L,
+                classificationVersion = 1L,
+                isErroneous = true,
+            )
+        val (overlay, _) =
+            RealtimeOverlayReducer.applyEventCommit(
+                currentOverlay = initialOverlay,
+                event = conflictingCommit,
+                query = query,
+                snapshotItems = listOf(currentEvent),
+            )
+        assertTrue(overlay.requiresRefresh)
+    }
+
+    // RT-4: Mismatch in immutable core fields triggers requiresRefresh
+    @Test
+    fun testRT4_ImmutableCoreMismatchBlocked() {
+        val query = EventsQuery()
+        val currentEvent =
+            sampleEvent("ev-1").copy(
+                eventVersion = 1L,
+                locationId = "loc-original",
+            )
+        val initialOverlay =
+            RealtimeOverlay(
+                entries =
+                    mapOf(
+                        "ev-1" to
+                            studio.acmenra.control.feature.events.domain.model.OverlayEntry(
+                                eventId = "ev-1",
+                                event = currentEvent,
+                                eventVersion = 1L,
+                                membership = OverlayMembership.INCLUDED,
+                            ),
+                    ),
+            )
+
+        val mutatedCommit =
+            currentEvent.copy(
+                eventVersion = 2L,
+                locationId = "loc-TAMPERED",
+            )
+        val (overlay, _) =
+            RealtimeOverlayReducer.applyEventCommit(
+                currentOverlay = initialOverlay,
+                event = mutatedCommit,
+                query = query,
+                snapshotItems = listOf(currentEvent),
+            )
+        assertTrue(overlay.requiresRefresh)
+    }
+
+    // RT-5: Valid newer event version preserves orthogonal fields during merge
+    @Test
+    fun testRT5_ValidNewEventVersionPreservesOrthogonalFields() {
+        val existing =
+            sampleEvent("ev-1").copy(
+                eventVersion = 3L,
+                acknowledgementVersion = 2L,
+                status = EventAcknowledgementStatus.ACKNOWLEDGED,
+                acknowledgedBy = "user-1",
+                classificationVersion = 1L,
+                isErroneous = false,
+            )
+
+        val incoming =
+            existing.copy(
+                eventVersion = 4L,
+                classificationVersion = 2L,
+                isErroneous = true,
+                erroneousMarkedBy = "reviewer-1",
+                acknowledgementVersion = 1L,
+                status = EventAcknowledgementStatus.NEW,
+            )
+
+        val merged =
+            studio.acmenra.control.feature.events.data.realtime.EventMerger
+                .merge(existing, incoming)
+        assertEquals(2L, merged.classificationVersion)
+        assertTrue(merged.isErroneous)
+        assertEquals("reviewer-1", merged.erroneousMarkedBy)
+        assertEquals(2L, merged.acknowledgementVersion)
+        assertEquals(EventAcknowledgementStatus.ACKNOWLEDGED, merged.status)
+        assertEquals("user-1", merged.acknowledgedBy)
+    }
+
+    // CACHE-1: Stale response returning after cache invalidation does not return stale data to caller
+    @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+    @Test
+    fun testCACHE1_StaleResponseNotReturnedToCallerAsCurrentResult() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val callCount = kotlin.concurrent.atomics.AtomicInt(0)
+                val slowFetchBlocker = CompletableDeferred<Unit>()
+
+                val mockRemote =
+                    object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                        override suspend fun getBootstrap(
+                            companyId: String,
+                            query: EventsQuery,
+                            limit: Int,
+                        ) = error("unused")
+
+                        override suspend fun getEventsPage(
+                            companyId: String,
+                            cursor: String,
+                            limit: Int,
+                        ) = error("unused")
+
+                        override suspend fun getFilterOptions(
+                            companyId: String,
+                            ifNoneMatchEtag: String?,
+                        ): FilterOptionsFetchResult {
+                            val count = callCount.addAndFetch(1)
+                            return if (count == 1) {
+                                slowFetchBlocker.await()
+                                FilterOptionsFetchResult.Success(
+                                    options = EventsFilterOptionsDto(revision = "rev-OLD"),
+                                    etag = "etag-OLD",
+                                )
+                            } else {
+                                FilterOptionsFetchResult.Success(
+                                    options = EventsFilterOptionsDto(revision = "rev-FRESH"),
+                                    etag = "etag-FRESH",
+                                )
+                            }
+                        }
+
+                        override suspend fun acknowledgeEvent(
+                            companyId: String,
+                            eventId: String,
+                        ) = error("unused")
+
+                        override suspend fun markEventErroneous(
+                            companyId: String,
+                            eventId: String,
+                            expectedClassificationVersion: Long,
+                            idempotencyKey: String,
+                        ) = error("unused")
+
+                        override suspend fun createExport(
+                            companyId: String,
+                            request: CreateExportRequestDto,
+                            idempotencyKey: String,
+                        ) = error("unused")
+
+                        override suspend fun getExportStatus(
+                            companyId: String,
+                            exportId: String,
+                        ) = error("unused")
+
+                        override suspend fun downloadExport(
+                            companyId: String,
+                            exportId: String,
+                        ) = error("unused")
+                    }
+
+                val repo =
+                    EventsRepositoryImpl(
+                        remoteDataSource = mockRemote,
+                        webSocketDataSourceFactory = { error("unused") },
+                        sessionManager = SessionManager(TestTokenStorage()),
+                        connectivityProvider =
+                            object : EventsConnectivityProvider {
+                                override val isOnline = MutableStateFlow(true)
+                            },
+                    )
+
+                val deferred1 = async { repo.getFilterOptions("comp-1") }
+                testScheduler.runCurrent()
+
+                val freshResult = repo.getFilterOptions("comp-1")
+                assertEquals("rev-FRESH", freshResult.revision)
+
+                slowFetchBlocker.complete(Unit)
+                val result1 = deferred1.await()
+
+                assertEquals("rev-FRESH", result1.revision)
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    // EXPORT-1: Unknown total_records in PROCESSING yields null progressPercent, not 0%
+    @Test
+    fun testEXPORT1_UnknownTotalRecordsYieldsNullProgressPercentNotZero() {
+        val dto =
+            EventsExportStatusDto(
+                exportId = "exp-1",
+                status = "PROCESSING",
+                createdAt = "2026-11-20T10:00:00Z",
+                totalRecords = null,
+                processedRecords = 0,
+            )
+        val status = EventsDtoMapper.mapExportStatus(dto)
+        assertNull(status.progressPercent)
+        assertEquals(EventsExportStatusCode.PROCESSING, status.status)
+    }
+
+    // EXPORT-2: Download forbidden unless COMPLETED, downloadUrl is present, and unexpired
+    @Test
+    fun testEXPORT2_DownloadForbiddenUnlessCompletedAndUnexpired() {
+        val now = Instant.parse("2026-11-20T12:00:00Z")
+        val future = Instant.parse("2026-11-20T13:00:00Z")
+        val past = Instant.parse("2026-11-20T11:00:00Z")
+
+        val processing =
+            EventsExportStatus(
+                exportId = "exp-1",
+                status = EventsExportStatusCode.PROCESSING,
+                createdAt = now,
+                progressPercent = 50,
+                downloadUrl = "https://example.com/file.csv",
+                expiresAt = future,
+            )
+        assertFalse(processing.isDownloadable(now))
+
+        val noUrl = processing.copy(status = EventsExportStatusCode.COMPLETED, downloadUrl = null)
+        assertFalse(noUrl.isDownloadable(now))
+
+        val expired = processing.copy(status = EventsExportStatusCode.COMPLETED, expiresAt = past)
+        assertFalse(expired.isDownloadable(now))
+
+        val valid = processing.copy(status = EventsExportStatusCode.COMPLETED, expiresAt = future)
+        assertTrue(valid.isDownloadable(now))
+    }
+
+    // TIME-1: IANA timezone parsing and DST 23h/25h day handling
+    @Test
+    fun testTIME1_WasmJsIanaTimezoneAndDst23h25hDays() {
+        val rigaTz = kotlinx.datetime.TimeZone.of("Europe/Riga")
+        assertEquals("Europe/Riga", rigaTz.id)
+
+        // Spring forward in Europe/Riga (23 hour day): 2026-03-29
+        val springSelection = DateSelection.Single(kotlinx.datetime.LocalDate(2026, 3, 29))
+        val (springStart, springEnd) =
+            studio.acmenra.control.feature.events.domain.model.DateFilterUtils
+                .dateSelectionToUtcBounds(
+                    springSelection,
+                    rigaTz,
+                )
+        assertNotNull(springStart)
+        assertNotNull(springEnd)
+        val springDuration = springEnd - springStart
+        assertEquals(23L, springDuration.inWholeHours)
+
+        // Fall back in Europe/Riga (25 hour day): 2026-10-25
+        val fallSelection = DateSelection.Single(kotlinx.datetime.LocalDate(2026, 10, 25))
+        val (fallStart, fallEnd) =
+            studio.acmenra.control.feature.events.domain.model.DateFilterUtils
+                .dateSelectionToUtcBounds(
+                    fallSelection,
+                    rigaTz,
+                )
+        assertNotNull(fallStart)
+        assertNotNull(fallEnd)
+        val fallDuration = fallEnd - fallStart
+        assertEquals(25L, fallDuration.inWholeHours)
+
+        // Round trip back from UTC bounds to local date selection
+        val reconstructedSpring =
+            studio.acmenra.control.feature.events.domain.model.DateFilterUtils
+                .utcBoundsToDateSelection(
+                    springStart,
+                    springEnd,
+                    rigaTz,
+                )
+        assertEquals(springSelection, reconstructedSpring)
+
+        val reconstructedFall =
+            studio.acmenra.control.feature.events.domain.model.DateFilterUtils
+                .utcBoundsToDateSelection(
+                    fallStart,
+                    fallEnd,
+                    rigaTz,
+                )
+        assertEquals(fallSelection, reconstructedFall)
+    }
+
+    // ROUTE-1: Route codec preserves UTC boundaries and enforces company isolation
+    @Test
+    fun testROUTE1_RouteCodecUtcBoundariesAndCompanyIsolation() {
+        val from = Instant.parse("2026-11-20T00:00:00Z")
+        val to = Instant.parse("2026-11-20T23:59:59Z")
+        val query =
+            EventsQuery(
+                filter = EventsFilter(dateFrom = from, dateTo = to),
+                sort = EventsSort.OCCURRED_AT_DESC,
+            )
+
+        val encodedCompanyA = EventsQueryRouteCodec.encodeHash("company-A", query)
+        val (decodedCompanyA, decodedQueryA) = EventsQueryRouteCodec.decodeHash(encodedCompanyA)
+        assertEquals("company-A", decodedCompanyA)
+        assertEquals(from, decodedQueryA.filter.dateFrom)
+        assertEquals(to, decodedQueryA.filter.dateTo)
+        assertEquals(EventsSort.OCCURRED_AT_DESC, decodedQueryA.sort)
+
+        val encodedCompanyB = EventsQueryRouteCodec.encodeHash("company-B", query)
+        val (decodedCompanyB, _) = EventsQueryRouteCodec.decodeHash(encodedCompanyB)
+        assertEquals("company-B", decodedCompanyB)
+        assertNotEquals(encodedCompanyA, encodedCompanyB)
+    }
+
+    // FILE-1: Streaming download boundary checks and cancellation
+    @Test
+    fun testFILE1_StreamingDownloadSizeThresholdPlusOneAndCancel() =
+        runTest(testDispatcher) {
+            val maxBytes = 100L * 1024 * 1024
+
+            val mockEngine =
+                MockEngine { request ->
+                    respond(
+                        content =
+                            io.ktor.utils.io
+                                .ByteReadChannel(ByteArray(0)),
+                        status = HttpStatusCode.OK,
+                        headers =
+                            headersOf(
+                                HttpHeaders.ContentType to listOf("text/csv"),
+                                HttpHeaders.ContentLength to listOf((maxBytes + 1L).toString()),
+                            ),
+                    )
+                }
+
+            val remote = KtorEventsRemoteDataSource(HttpClient(mockEngine))
+            val ex =
+                assertFailsWith<EventsApiException.ExportDownloadTooLarge> {
+                    remote.downloadExport("comp-1", "exp-1")
+                }
+            assertEquals(maxBytes, ex.maxBytes)
+
+            val slowEngine =
+                MockEngine { _ ->
+                    delay(50_000L)
+                    respond(
+                        content =
+                            io.ktor.utils.io
+                                .ByteReadChannel("data"),
+                        status = HttpStatusCode.OK,
+                    )
+                }
+            val slowRemote = KtorEventsRemoteDataSource(HttpClient(slowEngine))
+            val downloadJob =
+                launch {
+                    slowRemote.downloadExport("comp-1", "exp-1")
+                }
+            testScheduler.advanceTimeBy(1_000L)
+            downloadJob.cancel()
+            assertTrue(downloadJob.isCancelled)
         }
 }

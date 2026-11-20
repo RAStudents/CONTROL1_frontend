@@ -75,6 +75,17 @@ object EventsDtoMapper {
                     throw IllegalArgumentException("Invalid acknowledged_at timestamp '$raw' for event ${dto.id}", e)
                 }
             }
+        val erroneousMarkedAt =
+            dto.erroneousMarkedAt?.let { raw ->
+                try {
+                    Instant.parse(raw)
+                } catch (e: Exception) {
+                    throw IllegalArgumentException(
+                        "Invalid erroneous_marked_at timestamp '$raw' for event ${dto.id}",
+                        e,
+                    )
+                }
+            }
 
         return Event(
             id = dto.id,
@@ -95,6 +106,8 @@ object EventsDtoMapper {
             acknowledgedAt = acknowledgedAt,
             acknowledgedBy = dto.acknowledgedBy,
             isErroneous = dto.isErroneous,
+            erroneousMarkedAt = erroneousMarkedAt,
+            erroneousMarkedBy = dto.erroneousMarkedBy,
             previewUrl = dto.previewUrl,
             videoUrl = dto.videoUrl,
         )
@@ -236,7 +249,7 @@ object EventsDtoMapper {
                 ?: if (dto.totalRecords != null && dto.totalRecords > 0L && dto.processedRecords != null) {
                     ((dto.processedRecords.toDouble() / dto.totalRecords.toDouble()) * 100).toInt().coerceIn(0, 100)
                 } else {
-                    0
+                    null
                 }
 
         return EventsExportStatus(

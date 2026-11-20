@@ -2,7 +2,6 @@ package studio.acmenra.control.feature.events.data.realtime
 
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementStatus
-import studio.acmenra.control.feature.events.domain.model.EventIconKey
 import kotlin.time.Instant
 
 object EventMerger {
@@ -15,19 +14,15 @@ object EventMerger {
                 ClassificationFields(
                     classificationVersion = incoming.classificationVersion,
                     isErroneous = incoming.isErroneous,
-                    eventTypeId = incoming.eventTypeId,
-                    eventTypeName = incoming.eventTypeName,
-                    categoryCode = incoming.categoryCode,
-                    iconKey = incoming.iconKey,
+                    erroneousMarkedAt = incoming.erroneousMarkedAt,
+                    erroneousMarkedBy = incoming.erroneousMarkedBy,
                 )
             } else {
                 ClassificationFields(
                     classificationVersion = current.classificationVersion,
                     isErroneous = current.isErroneous,
-                    eventTypeId = current.eventTypeId,
-                    eventTypeName = current.eventTypeName,
-                    categoryCode = current.categoryCode,
-                    iconKey = current.iconKey,
+                    erroneousMarkedAt = current.erroneousMarkedAt,
+                    erroneousMarkedBy = current.erroneousMarkedBy,
                 )
             }
 
@@ -48,16 +43,18 @@ object EventMerger {
                 )
             }
 
-        val baseEvent = if (incoming.eventVersion >= current.eventVersion) incoming else current
+        val displaySource = if (incoming.eventVersion >= current.eventVersion) incoming else current
 
-        return baseEvent.copy(
+        return current.copy(
             eventVersion = maxOf(current.eventVersion, incoming.eventVersion),
+            eventTypeName = displaySource.eventTypeName,
+            locationName = displaySource.locationName,
+            deviceName = displaySource.deviceName,
+            iconKey = displaySource.iconKey,
             classificationVersion = classificationPart.classificationVersion,
             isErroneous = classificationPart.isErroneous,
-            eventTypeId = classificationPart.eventTypeId,
-            eventTypeName = classificationPart.eventTypeName,
-            categoryCode = classificationPart.categoryCode,
-            iconKey = classificationPart.iconKey,
+            erroneousMarkedAt = classificationPart.erroneousMarkedAt,
+            erroneousMarkedBy = classificationPart.erroneousMarkedBy,
             acknowledgementVersion = acknowledgementPart.acknowledgementVersion,
             status = acknowledgementPart.status,
             acknowledgedAt = acknowledgementPart.acknowledgedAt,
@@ -68,10 +65,8 @@ object EventMerger {
     private data class ClassificationFields(
         val classificationVersion: Long,
         val isErroneous: Boolean,
-        val eventTypeId: String,
-        val eventTypeName: String,
-        val categoryCode: String,
-        val iconKey: EventIconKey,
+        val erroneousMarkedAt: Instant?,
+        val erroneousMarkedBy: String?,
     )
 
     private data class AcknowledgementFields(

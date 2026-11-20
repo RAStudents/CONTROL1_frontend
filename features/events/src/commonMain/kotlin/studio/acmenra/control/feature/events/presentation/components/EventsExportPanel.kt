@@ -225,18 +225,27 @@ fun EventsExportPanel(
                             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                         }
                         EventsExportStatusCode.PROCESSING -> {
-                            Text(
-                                text =
-                                    stringResource(
-                                        Res.string.events_export_status_processing,
-                                        status.progressPercent,
-                                    ),
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                            LinearProgressIndicator(
-                                progress = { status.progressPercent / 100f },
-                                modifier = Modifier.fillMaxWidth(),
-                            )
+                            val percent = status.progressPercent
+                            if (percent != null) {
+                                Text(
+                                    text =
+                                        stringResource(
+                                            Res.string.events_export_status_processing,
+                                            percent,
+                                        ),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                LinearProgressIndicator(
+                                    progress = { percent / 100f },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            } else {
+                                Text(
+                                    text = stringResource(Res.string.events_export_status_queued),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            }
                         }
                         EventsExportStatusCode.COMPLETED -> {
                             Text(
@@ -246,6 +255,7 @@ fun EventsExportPanel(
                             )
                             Button(
                                 onClick = { onDownload(status.exportId) },
+                                enabled = status.isDownloadable,
                                 modifier = Modifier.fillMaxWidth().height(AmberDimens.ButtonHeight),
                             ) {
                                 Icon(

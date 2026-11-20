@@ -27,10 +27,13 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.viewinterop.AndroidView
+import io.ktor.client.call.body
+import io.ktor.client.request.get
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
+import studio.acmenra.control.core.network.client.HttpClientFactory
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.events_media_preview_desc
 import studio.acmenra.control.core.ui.generated.resources.events_video_play
@@ -56,15 +59,14 @@ actual fun EventMediaPlayer(
         if (isValidHttpsPreview && previewUrl != null) {
             withContext(Dispatchers.IO) {
                 runCatching {
-                    val conn = java.net.URL(previewUrl).openConnection() as java.net.HttpURLConnection
-                    conn.requestMethod = "GET"
-                    conn.connectTimeout = 5000
-                    conn.readTimeout = 5000
-                    // Public media URL: strictly no Bearer / Authorization headers added
-                    conn.inputStream.use { stream ->
+                    val client = HttpClientFactory.createExternalClient()
+                    try {
+                        val bytes: ByteArray = client.get(previewUrl).body()
                         android.graphics.BitmapFactory
-                            .decodeStream(stream)
+                            .decodeByteArray(bytes, 0, bytes.size)
                             ?.asImageBitmap()
+                    } finally {
+                        client.close()
                     }
                 }.getOrNull()?.let {
                     previewBitmap = it

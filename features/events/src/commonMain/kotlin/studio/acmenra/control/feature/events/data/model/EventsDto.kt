@@ -26,6 +26,8 @@ data class EventDto(
     @SerialName("acknowledged_at") val acknowledgedAt: String? = null,
     @SerialName("acknowledged_by") val acknowledgedBy: String? = null,
     @SerialName("is_erroneous") val isErroneous: Boolean,
+    @SerialName("erroneous_marked_at") val erroneousMarkedAt: String? = null,
+    @SerialName("erroneous_marked_by") val erroneousMarkedBy: String? = null,
     @SerialName("preview_url") val previewUrl: String,
     @SerialName("video_url") val videoUrl: String? = null,
 )

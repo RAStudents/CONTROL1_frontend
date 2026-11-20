@@ -1,22 +1,16 @@
 package studio.acmenra.control.feature.events.presentation.platform
 
+import io.ktor.util.toJsArray
 import kotlinx.coroutines.CancellationException
 import org.koin.core.module.Module
 import org.koin.dsl.module
 import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
-import kotlin.io.encoding.Base64
-import kotlin.io.encoding.ExperimentalEncodingApi
 
 @OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
 @JsFun(
-    """(filename, contentType, base64Data) => {
+    """(filename, contentType, int8Array) => {
     try {
-        var byteChars = atob(base64Data);
-        var byteArray = new Uint8Array(byteChars.length);
-        for (var i = 0; i < byteChars.length; i++) {
-            byteArray[i] = byteChars.charCodeAt(i);
-        }
-        var blob = new Blob([byteArray], { type: contentType });
+        var blob = new Blob([int8Array], { type: contentType });
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
         a.href = url;
@@ -35,18 +29,18 @@ import kotlin.io.encoding.ExperimentalEncodingApi
 private external fun triggerBrowserDownload(
     filename: String,
     contentType: String,
-    base64Data: String,
+    int8Array: JsAny,
 ): Boolean
 
+@OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
 class WasmExportFileSaver : ExportFileSaver {
-    @OptIn(ExperimentalEncodingApi::class)
     override suspend fun saveExportFile(download: EventsExportDownload): Boolean =
         try {
-            val base64 = Base64.Default.encode(download.bytes)
+            val jsArray = download.bytes.toJsArray()
             triggerBrowserDownload(
                 filename = download.filename,
                 contentType = download.contentType.ifBlank { "text/csv" },
-                base64Data = base64,
+                int8Array = jsArray,
             )
         } catch (e: CancellationException) {
             throw e

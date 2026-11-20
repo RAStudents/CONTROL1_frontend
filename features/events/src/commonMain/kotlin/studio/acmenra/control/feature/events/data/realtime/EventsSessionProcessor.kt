@@ -13,6 +13,7 @@ import studio.acmenra.control.feature.events.data.datasource.IncomingWsEnvelope
 import studio.acmenra.control.feature.events.data.datasource.IncomingWsFrame
 import studio.acmenra.control.feature.events.data.mapper.EventsDtoMapper
 import studio.acmenra.control.feature.events.data.model.EventsFilterOptionsDto
+import studio.acmenra.control.feature.events.data.model.MAX_SAFE_JS_INTEGER
 import studio.acmenra.control.feature.events.data.model.TenantCommitFrameDto
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
@@ -560,18 +561,29 @@ class EventsSessionProcessor(
             }
 
             // Verify strict sequence continuity: streamCursor + 1, + 2, ...
-            var expectedSeq = bootstrap.streamCursor + 1L
-            var hasGap = false
-            for (commit in deduplicatedCommits) {
-                if (commit.tenantSequence != expectedSeq) {
-                    hasGap = true
-                    break
+            var expectedSeq =
+                if (bootstrap.streamCursor >= MAX_SAFE_JS_INTEGER) {
+                    -1L
+                } else {
+                    bootstrap.streamCursor + 1L
                 }
-                expectedSeq++
+            var hasGap = (expectedSeq == -1L)
+            if (!hasGap) {
+                for (commit in deduplicatedCommits) {
+                    if (commit.tenantSequence != expectedSeq) {
+                        hasGap = true
+                        break
+                    }
+                    if (expectedSeq >= MAX_SAFE_JS_INTEGER) {
+                        hasGap = true
+                        break
+                    }
+                    expectedSeq++
+                }
             }
 
             if (hasGap) {
-                // Gap detected in rebootstrap buffer: retry bootstrap without corrupting displayed feed!
+                // Gap detected in rebootstrap buffer or JS safe int overflow: retry bootstrap without corrupting displayed feed!
                 isRebootstrapping = true
                 bufferReplayId = sequenceProcessor.currentReplayId
                 response.complete(BootstrapApplyResult.RetryRequired)
@@ -606,6 +618,8 @@ class EventsSessionProcessor(
                             event = event,
                             query = query,
                             snapshotItems = candidateSnapshotItems,
+                            isEventCreated = true,
+                            hasMore = bootstrap.page.hasMore,
                         )
                     candidateOverlay = newOverlay
                 }
@@ -618,6 +632,8 @@ class EventsSessionProcessor(
                             event = event,
                             query = query,
                             snapshotItems = candidateSnapshotItems,
+                            isEventCreated = false,
+                            hasMore = bootstrap.page.hasMore,
                         )
                     candidateOverlay = newOverlay
                 }
@@ -635,6 +651,13 @@ class EventsSessionProcessor(
                 commit.filterOptionsUpdated?.let { optionsDto ->
                     optionsToNotify.add(optionsDto)
                 }
+            }
+
+            if (candidateOverlay.requiresRefresh) {
+                isRebootstrapping = true
+                bufferReplayId = sequenceProcessor.currentReplayId
+                response.complete(BootstrapApplyResult.RetryRequired)
+                return
             }
         }
 
@@ -994,11 +1017,21 @@ class EventsSessionProcessor(
     private fun applyCommit(commit: TenantCommitFrameDto) {
         if (!_state.value.access.eventsRead || accessFence.value.denied) return
 
+        if (!commit.validateEnvelope()) {
+            if (!isRebootstrapping) {
+                isRebootstrapping = true
+                bufferReplayId = sequenceProcessor.currentReplayId
+                onTriggerRebootstrap()
+            }
+            return
+        }
+
         // Two-phase atomic commit application:
         // 1. Calculate tentative new overlay and summary
         var tentativeOverlay = currentOverlay
         val createdDto = commit.eventCreated
         val updatedDto = commit.eventUpdated
+        val currentHasMore = (nextCursor != null)
 
         if (createdDto != null) {
             val event = EventsDtoMapper.mapEvent(createdDto)
@@ -1008,6 +1041,8 @@ class EventsSessionProcessor(
                     event = event,
                     query = query,
                     snapshotItems = snapshotItems,
+                    isEventCreated = true,
+                    hasMore = currentHasMore,
                 )
             tentativeOverlay = newOverlay
         }
@@ -1020,8 +1055,19 @@ class EventsSessionProcessor(
                     event = event,
                     query = query,
                     snapshotItems = snapshotItems,
+                    isEventCreated = false,
+                    hasMore = currentHasMore,
                 )
             tentativeOverlay = newOverlay
+        }
+
+        if (tentativeOverlay.requiresRefresh) {
+            if (!isRebootstrapping) {
+                isRebootstrapping = true
+                bufferReplayId = sequenceProcessor.currentReplayId
+                onTriggerRebootstrap()
+            }
+            return
         }
 
         val currentSummary = _state.value.summary
@@ -1033,11 +1079,6 @@ class EventsSessionProcessor(
                 newSummary.summaryAsOfSequence >= currentSummary.summaryAsOfSequence -> newSummary
                 else -> currentSummary
             }
-
-        // Notify filter options updated if present
-        commit.filterOptionsUpdated?.let { optionsDto ->
-            onFilterOptionsUpdated?.invoke(optionsDto)
-        }
 
         // 2. Advance sequence counter with SHA256 caching
         sequenceProcessor.advanceSequence(commit.tenantSequence, commit.payloadSha256)
@@ -1057,6 +1098,11 @@ class EventsSessionProcessor(
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
             )
+        }
+
+        // 4. Side effect strictly AFTER atomic commit and publication
+        commit.filterOptionsUpdated?.let { optionsDto ->
+            onFilterOptionsUpdated?.invoke(optionsDto)
         }
 
         if (currentOverlay.entries.size > 500) {

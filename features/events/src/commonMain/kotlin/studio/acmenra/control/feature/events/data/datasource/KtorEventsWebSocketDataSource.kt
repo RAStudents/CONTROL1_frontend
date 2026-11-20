@@ -112,19 +112,35 @@ interface EventsWebSocketDataSource {
 @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
 internal class HeartbeatTracker(
     val maxMissedAcks: Int = 2,
-    val ackWindowMs: Long = 5_000L,
+    val ackWindow: kotlin.time.Duration = kotlin.time.Duration.parse("5s"),
+    private val timeSource: kotlin.time.TimeSource.WithComparableMarks = kotlin.time.TimeSource.Monotonic,
 ) {
     val missedAcks = kotlin.concurrent.atomics.AtomicInt(0)
     val hasPendingAck = kotlin.concurrent.atomics.AtomicBoolean(false)
-    val pendingAckExpiryMs = kotlin.concurrent.atomics.AtomicLong(0L)
+    val pendingClientConfirmedSeq = kotlin.concurrent.atomics.AtomicLong(-1L)
 
-    fun onHeartbeatSent(nowMs: Long = 0L) {
+    @kotlin.concurrent.Volatile
+    private var pendingAckSentMark: kotlin.time.ComparableTimeMark? = null
+
+    fun onHeartbeatSent(
+        mark: kotlin.time.ComparableTimeMark = timeSource.markNow(),
+        clientConfirmedSeq: Long = -1L,
+    ) {
+        pendingAckSentMark = mark
+        pendingClientConfirmedSeq.store(clientConfirmedSeq)
         hasPendingAck.store(true)
-        pendingAckExpiryMs.store(if (nowMs > 0L) nowMs + ackWindowMs else Long.MAX_VALUE)
+    }
+
+    fun onSendFailed() {
+        hasPendingAck.store(false)
+        pendingAckSentMark = null
+        pendingClientConfirmedSeq.store(-1L)
     }
 
     fun onAckWindowTimeout(): Boolean {
         if (hasPendingAck.compareAndSet(true, false)) {
+            pendingAckSentMark = null
+            pendingClientConfirmedSeq.store(-1L)
             val missed = missedAcks.addAndFetch(1)
             if (missed >= maxMissedAcks) {
                 return false
@@ -136,7 +152,8 @@ internal class HeartbeatTracker(
     fun onAckReceived(
         incomingReplayId: Long,
         activeReplayId: Long,
-        nowMs: Long = 0L,
+        incomingConfirmedSeq: Long? = null,
+        mark: kotlin.time.ComparableTimeMark = timeSource.markNow(),
     ): Boolean {
         if (incomingReplayId != activeReplayId) {
             return false
@@ -144,24 +161,24 @@ internal class HeartbeatTracker(
         if (!hasPendingAck.load()) {
             return false
         }
-        if (nowMs > 0L && pendingAckExpiryMs.load() != Long.MAX_VALUE && nowMs > pendingAckExpiryMs.load()) {
+        val sentMark = pendingAckSentMark
+        if (sentMark != null && (mark - sentMark) > ackWindow) {
+            return false
+        }
+        val expectedSeq = pendingClientConfirmedSeq.load()
+        if (incomingConfirmedSeq != null && expectedSeq >= 0L && incomingConfirmedSeq != expectedSeq) {
             return false
         }
         if (hasPendingAck.compareAndSet(true, false)) {
+            pendingAckSentMark = null
+            pendingClientConfirmedSeq.store(-1L)
             missedAcks.store(0)
             return true
         }
         return false
     }
 
-    fun onTick(): Boolean {
-        hasPendingAck.store(true)
-        if (missedAcks.load() >= maxMissedAcks) {
-            return false
-        }
-        missedAcks.addAndFetch(1)
-        return true
-    }
+    fun onTick(): Boolean = onAckWindowTimeout()
 }
 
 @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
@@ -174,6 +191,7 @@ class KtorEventsWebSocketDataSource(
         val id: Long,
         val job: Job,
         val outgoing: Channel<Frame>,
+        val activeReplayGeneration: kotlin.concurrent.atomics.AtomicLong,
     )
 
     private val rawFramesChannel = Channel<IncomingWsEnvelope>(Channel.BUFFERED)
@@ -233,7 +251,8 @@ class KtorEventsWebSocketDataSource(
                     outChan.close()
                     return@launch
                 }
-                currentSession = ConnectionSession(connectionId, coroutineContext.job, outChan)
+                val activeReplayGen = kotlin.concurrent.atomics.AtomicLong(replayId)
+                currentSession = ConnectionSession(connectionId, coroutineContext.job, outChan, activeReplayGen)
                 drainFramesChannel()
             }
 
@@ -244,6 +263,8 @@ class KtorEventsWebSocketDataSource(
             var localOutgoingJob: Job? = null
             try {
                 realtimeClient.webSocket(urlString = url) {
+                    val activeReplayGen =
+                        currentSession?.activeReplayGeneration ?: kotlin.concurrent.atomics.AtomicLong(replayId)
                     // Send AUTH frame as the very first client message
                     val authFrame =
                         AuthFrameDto(
@@ -261,27 +282,28 @@ class KtorEventsWebSocketDataSource(
                             }
                         }
 
-                    // Start Heartbeat loop: every 25s using connection-local outChan with 5s ACK window
+                    // Start Heartbeat loop: 25s cadence with 5s ACK window
                     val heartbeatTracker = HeartbeatTracker()
                     localHeartbeatJob =
                         launch {
+                            delay(25_000L)
                             while (isActive) {
-                                delay(25_000L)
+                                val sendMark =
+                                    kotlin.time.TimeSource.Monotonic
+                                        .markNow()
                                 val confirmedSeq = getClientConfirmedSeq()
                                 val hbFrame = HeartbeatFrameDto(clientConfirmedSeq = confirmedSeq)
                                 try {
                                     outChan.send(Frame.Text(json.encodeToString(hbFrame)))
                                 } catch (e: CancellationException) {
+                                    heartbeatTracker.onSendFailed()
                                     throw e
                                 } catch (_: Throwable) {
+                                    heartbeatTracker.onSendFailed()
                                     break
                                 }
 
-                                val now =
-                                    kotlin.time.Clock.System
-                                        .now()
-                                        .toEpochMilliseconds()
-                                heartbeatTracker.onHeartbeatSent(now)
+                                heartbeatTracker.onHeartbeatSent(sendMark, confirmedSeq)
 
                                 delay(5_000L)
                                 if (heartbeatTracker.hasPendingAck.load()) {
@@ -293,6 +315,11 @@ class KtorEventsWebSocketDataSource(
                                         close()
                                         break
                                     }
+                                }
+                                val elapsedMs = sendMark.elapsedNow().inWholeMilliseconds
+                                val remainingMs = (25_000L - elapsedMs).coerceAtLeast(0L)
+                                if (remainingMs > 0L) {
+                                    delay(remainingMs)
                                 }
                             }
                         }
@@ -378,11 +405,12 @@ class KtorEventsWebSocketDataSource(
                                             )
                                         }.getOrNull()
                                     if (dto != null) {
-                                        val now =
-                                            kotlin.time.Clock.System
-                                                .now()
-                                                .toEpochMilliseconds()
-                                        heartbeatTracker.onAckReceived(dto.replayId, replayId, now)
+                                        val activeGen = activeReplayGen.load()
+                                        heartbeatTracker.onAckReceived(
+                                            incomingReplayId = dto.replayId,
+                                            activeReplayId = activeGen,
+                                            incomingConfirmedSeq = dto.clientConfirmedSeq,
+                                        )
                                         if (connectionId == activeConnectionId.load()) {
                                             rawFramesChannel.send(
                                                 IncomingWsEnvelope(connectionId, IncomingWsFrame.HeartbeatAck(dto)),
@@ -469,6 +497,7 @@ class KtorEventsWebSocketDataSource(
         val frame = ReplayRequestFrameDto(replayId = replayId, afterSequence = afterSequence)
         val text = json.encodeToString(frame)
         val session = currentSession ?: throw IllegalStateException("WebSocket outgoing channel is not connected")
+        session.activeReplayGeneration.store(replayId)
         session.outgoing.send(Frame.Text(text))
     }
 

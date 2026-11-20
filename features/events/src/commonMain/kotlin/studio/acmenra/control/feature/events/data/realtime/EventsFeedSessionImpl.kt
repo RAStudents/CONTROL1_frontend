@@ -184,6 +184,8 @@ class EventsFeedSessionImpl(
                         processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.DISCONNECTED))
                     } else {
                         if (!canReadEvents()) return@collect
+                        disconnectJob?.join()
+                        if (!canReadEvents() || !online) return@collect
                         if (state.value.rebootstrapState is RebootstrapState.Failed) {
                             triggerRebootstrap()
                         }
@@ -354,7 +356,8 @@ class EventsFeedSessionImpl(
 
         connectJob =
             sessionScope.launch {
-                if (!canReadEvents()) return@launch
+                disconnectJob?.join()
+                if (!canReadEvents() || generation != connectionGeneration) return@launch
 
                 val snapshot = sessionManager.getSnapshot()
                 val token = snapshot?.tokens?.accessToken
@@ -439,6 +442,7 @@ class EventsFeedSessionImpl(
                 val jitter = Random.nextLong(100, 500)
                 delay((baseDelay + jitter).coerceAtMost(30_000L))
 
+                disconnectJob?.join()
                 if (!isActive || !canReadEvents() || !isOnline || generation != connectionGeneration) return@launch
                 val currentSeq = processor.getAsOfSequence()
                 val currentReplayId = processor.currentReplayId

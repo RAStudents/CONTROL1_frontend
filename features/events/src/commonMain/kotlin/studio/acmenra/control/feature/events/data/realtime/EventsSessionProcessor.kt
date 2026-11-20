@@ -264,6 +264,26 @@ class EventsSessionProcessor(
             return
         }
 
+        if (eventsReadDeniedLatch && command !is SessionCommand.AccessUpdated && command !is SessionCommand.Close) {
+            when (command) {
+                is SessionCommand.ConnectionStateChanged -> {
+                    _state.update { it.copy(connectionState = command.state) }
+                }
+                is SessionCommand.InstallBootstrap -> {
+                    command.response.complete(BootstrapApplyResult.Stale)
+                }
+                is SessionCommand.NextReplayGeneration -> {
+                    command.response.completeExceptionally(
+                        IllegalStateException("Read access is denied by latch"),
+                    )
+                }
+                else -> {
+                    // Ignore all other commands that could mutate or republish event data
+                }
+            }
+            return
+        }
+
         when (command) {
             is SessionCommand.InstallBootstrap -> {
                 handleBootstrap(command.bootstrap, command.generation, command.response)
@@ -380,6 +400,7 @@ class EventsSessionProcessor(
                 _state.update { it.copy(asOfSequence = sequenceProcessor.currentSequence) }
             }
             is SessionCommand.ViewportAtTop -> {
+                if (!_state.value.access.eventsRead || eventsReadDeniedLatch) return
                 // User navigated to top: integrate all pending newer events into visible feed
                 currentOverlay = RealtimeOverlayReducer.integratePendingNewer(currentOverlay)
                 val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
@@ -552,6 +573,7 @@ class EventsSessionProcessor(
     }
 
     private fun handleEventMutationApplied(mutatedEvent: Event) {
+        if (!_state.value.access.eventsRead || eventsReadDeniedLatch) return
         val idx = snapshotItems.indexOfFirst { it.id == mutatedEvent.id }
         if (idx != -1) {
             val cur = snapshotItems[idx]
@@ -583,6 +605,7 @@ class EventsSessionProcessor(
     }
 
     private fun handleAcknowledgeSucceeded(ackEvent: Event) {
+        if (!_state.value.access.eventsRead || eventsReadDeniedLatch) return
         val newPending = currentOverlay.pendingAckIds - ackEvent.id
         val idx = snapshotItems.indexOfFirst { it.id == ackEvent.id }
         if (idx != -1) {

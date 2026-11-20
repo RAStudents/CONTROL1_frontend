@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -107,6 +108,12 @@ class KtorEventsWebSocketDataSource(
     private val json: Json = Json { ignoreUnknownKeys = true },
     private val wsEndpointBase: String = "",
 ) : EventsWebSocketDataSource {
+    private data class ConnectionSession(
+        val id: Long,
+        val job: Job,
+        val outgoing: Channel<Frame>,
+    )
+
     private val rawFramesChannel = Channel<IncomingWsEnvelope>(Channel.BUFFERED)
     override val incomingFrames: Flow<IncomingWsEnvelope> =
         rawFramesChannel
@@ -114,10 +121,16 @@ class KtorEventsWebSocketDataSource(
             .filter { env -> env.connectionId == activeConnectionId }
 
     private val connectionMutex = Mutex()
-    private var sessionJob: Job? = null
-    private var outgoingChannel: Channel<Frame>? = null
-    private var lastConfirmedSeq: Long = 0L
+
+    @kotlin.concurrent.Volatile
+    private var currentSession: ConnectionSession? = null
+
+    @kotlin.concurrent.Volatile
+    private var connectionSequence: Long = 0L
+
+    @kotlin.concurrent.Volatile
     private var activeConnectionId: Long = 0L
+    private var lastConfirmedSeq: Long = 0L
 
     internal fun emitRawFrameForTest(
         connectionId: Long,
@@ -143,186 +156,190 @@ class KtorEventsWebSocketDataSource(
         getClientConfirmedSeq: () -> Long,
         onDisconnected: (reason: WsCloseReason, message: String?) -> Unit,
     ): Long {
-        val oldJob = sessionJob
         val outChan = Channel<Frame>(Channel.BUFFERED)
-        outgoingChannel?.close()
-        outgoingChannel = outChan
         lastConfirmedSeq = afterSequence
 
-        val connectionId = ++activeConnectionId
+        val connectionId = ++connectionSequence
+        activeConnectionId = connectionId
 
-        sessionJob =
-            scope.launch {
-                connectionMutex.withLock {
-                    if (oldJob != null && oldJob.isActive) {
-                        oldJob.cancel(CancellationException(WsCloseReason.REPLACED.name))
-                        oldJob.join()
-                    }
-                    if (connectionId != activeConnectionId) {
-                        return@launch
-                    }
-                    drainFramesChannel()
+        scope.launch {
+            connectionMutex.withLock {
+                val oldSession = currentSession
+                if (oldSession != null && oldSession.job.isActive) {
+                    oldSession.job.cancel(CancellationException(WsCloseReason.REPLACED.name))
+                    oldSession.job.join()
+                    oldSession.outgoing.close()
                 }
+                if (connectionId != activeConnectionId) {
+                    outChan.close()
+                    return@launch
+                }
+                currentSession = ConnectionSession(connectionId, coroutineContext.job, outChan)
+                drainFramesChannel()
+            }
 
-                val url = buildWsUrl(companyId)
-                var disconnectReason = WsCloseReason.REMOTE_CLOSE
-                var disconnectMessage: String? = null
-                var localHeartbeatJob: Job? = null
-                var localOutgoingJob: Job? = null
-                try {
-                    realtimeClient.webSocket(urlString = url) {
-                        // Send AUTH frame as the very first client message
-                        val authFrame =
-                            AuthFrameDto(
-                                accessToken = accessToken,
-                                replayId = replayId,
-                                afterSequence = afterSequence,
-                            )
-                        send(Frame.Text(json.encodeToString(authFrame)))
+            val url = buildWsUrl(companyId)
+            var disconnectReason = WsCloseReason.REMOTE_CLOSE
+            var disconnectMessage: String? = null
+            var localHeartbeatJob: Job? = null
+            var localOutgoingJob: Job? = null
+            try {
+                realtimeClient.webSocket(urlString = url) {
+                    // Send AUTH frame as the very first client message
+                    val authFrame =
+                        AuthFrameDto(
+                            accessToken = accessToken,
+                            replayId = replayId,
+                            afterSequence = afterSequence,
+                        )
+                    send(Frame.Text(json.encodeToString(authFrame)))
 
-                        // Start outgoing pump
-                        localOutgoingJob =
-                            launch {
-                                for (frame in outChan) {
-                                    send(frame)
-                                }
+                    // Start outgoing pump
+                    localOutgoingJob =
+                        launch {
+                            for (frame in outChan) {
+                                send(frame)
                             }
+                        }
 
-                        // Start Heartbeat loop: every 25s using connection-local outChan
-                        var missedAcks = 0
-                        localHeartbeatJob =
-                            launch {
-                                while (isActive) {
-                                    delay(25_000L)
-                                    val confirmedSeq = getClientConfirmedSeq()
-                                    lastConfirmedSeq = confirmedSeq
-                                    val hbFrame = HeartbeatFrameDto(clientConfirmedSeq = confirmedSeq)
-                                    try {
-                                        outChan.send(Frame.Text(json.encodeToString(hbFrame)))
-                                        missedAcks++
-                                        if (missedAcks >= 2) {
-                                            disconnectReason = WsCloseReason.HEARTBEAT_TIMEOUT
-                                            disconnectMessage = "Heartbeat timeout (2 missed ACKs)"
-                                            close()
-                                            break
-                                        }
-                                    } catch (e: CancellationException) {
-                                        throw e
-                                    } catch (_: Throwable) {
+                    // Start Heartbeat loop: every 25s using connection-local outChan
+                    var missedAcks = 0
+                    localHeartbeatJob =
+                        launch {
+                            while (isActive) {
+                                delay(25_000L)
+                                val confirmedSeq = getClientConfirmedSeq()
+                                lastConfirmedSeq = confirmedSeq
+                                val hbFrame = HeartbeatFrameDto(clientConfirmedSeq = confirmedSeq)
+                                try {
+                                    outChan.send(Frame.Text(json.encodeToString(hbFrame)))
+                                    missedAcks++
+                                    if (missedAcks >= 2) {
+                                        disconnectReason = WsCloseReason.HEARTBEAT_TIMEOUT
+                                        disconnectMessage = "Heartbeat timeout (2 missed ACKs)"
+                                        close()
                                         break
                                     }
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (_: Throwable) {
+                                    break
                                 }
                             }
+                        }
 
-                        // Receive loop with connectionId fencing
-                        for (frame in incoming) {
+                    // Receive loop with connectionId fencing
+                    for (frame in incoming) {
+                        if (connectionId != activeConnectionId) break
+                        if (frame is Frame.Text) {
+                            val text = frame.readText()
+                            val generic =
+                                runCatching {
+                                    json.decodeFromString<GenericRealtimeFrameDto>(text)
+                                }.getOrNull() ?: continue
+
                             if (connectionId != activeConnectionId) break
-                            if (frame is Frame.Text) {
-                                val text = frame.readText()
-                                val generic =
-                                    runCatching {
-                                        json.decodeFromString<GenericRealtimeFrameDto>(text)
-                                    }.getOrNull() ?: continue
 
-                                if (connectionId != activeConnectionId) break
-
-                                when (generic.type) {
-                                    "SUBSCRIBED" -> {
-                                        val dto = json.decodeFromString<SubscribedFrameDto>(text)
-                                        if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(
-                                                IncomingWsEnvelope(connectionId, IncomingWsFrame.Subscribed(dto)),
-                                            )
-                                        }
+                            when (generic.type) {
+                                "SUBSCRIBED" -> {
+                                    val dto = json.decodeFromString<SubscribedFrameDto>(text)
+                                    if (connectionId == activeConnectionId) {
+                                        rawFramesChannel.send(
+                                            IncomingWsEnvelope(connectionId, IncomingWsFrame.Subscribed(dto)),
+                                        )
                                     }
-                                    "TENANT_COMMIT" -> {
-                                        val dto = json.decodeFromString<TenantCommitFrameDto>(text)
-                                        if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(
-                                                IncomingWsEnvelope(connectionId, IncomingWsFrame.TenantCommit(dto)),
-                                            )
-                                        }
+                                }
+                                "TENANT_COMMIT" -> {
+                                    val dto = json.decodeFromString<TenantCommitFrameDto>(text)
+                                    if (connectionId == activeConnectionId) {
+                                        rawFramesChannel.send(
+                                            IncomingWsEnvelope(connectionId, IncomingWsFrame.TenantCommit(dto)),
+                                        )
                                     }
-                                    "REPLAY_COMPLETED" -> {
-                                        val dto = json.decodeFromString<ReplayCompletedFrameDto>(text)
-                                        if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(
-                                                IncomingWsEnvelope(connectionId, IncomingWsFrame.ReplayCompleted(dto)),
-                                            )
-                                        }
+                                }
+                                "REPLAY_COMPLETED" -> {
+                                    val dto = json.decodeFromString<ReplayCompletedFrameDto>(text)
+                                    if (connectionId == activeConnectionId) {
+                                        rawFramesChannel.send(
+                                            IncomingWsEnvelope(connectionId, IncomingWsFrame.ReplayCompleted(dto)),
+                                        )
                                     }
-                                    "RESYNC_REQUIRED" -> {
-                                        val dto = json.decodeFromString<ResyncRequiredFrameDto>(text)
-                                        if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(
-                                                IncomingWsEnvelope(connectionId, IncomingWsFrame.ResyncRequired(dto)),
-                                            )
-                                        }
+                                }
+                                "RESYNC_REQUIRED" -> {
+                                    val dto = json.decodeFromString<ResyncRequiredFrameDto>(text)
+                                    if (connectionId == activeConnectionId) {
+                                        rawFramesChannel.send(
+                                            IncomingWsEnvelope(connectionId, IncomingWsFrame.ResyncRequired(dto)),
+                                        )
                                     }
-                                    "HEARTBEAT_ACK" -> {
-                                        missedAcks = 0
-                                        val dto = json.decodeFromString<HeartbeatAckFrameDto>(text)
-                                        if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(
-                                                IncomingWsEnvelope(connectionId, IncomingWsFrame.HeartbeatAck(dto)),
-                                            )
-                                        }
+                                }
+                                "HEARTBEAT_ACK" -> {
+                                    missedAcks = 0
+                                    val dto = json.decodeFromString<HeartbeatAckFrameDto>(text)
+                                    if (connectionId == activeConnectionId) {
+                                        rawFramesChannel.send(
+                                            IncomingWsEnvelope(connectionId, IncomingWsFrame.HeartbeatAck(dto)),
+                                        )
                                     }
-                                    "ACCESS_CHECK_UNAVAILABLE" -> {
-                                        val dto = json.decodeFromString<AccessCheckUnavailableFrameDto>(text)
-                                        if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(
-                                                IncomingWsEnvelope(
-                                                    connectionId,
-                                                    IncomingWsFrame.AccessCheckUnavailable(dto),
-                                                ),
-                                            )
-                                        }
+                                }
+                                "ACCESS_CHECK_UNAVAILABLE" -> {
+                                    val dto = json.decodeFromString<AccessCheckUnavailableFrameDto>(text)
+                                    if (connectionId == activeConnectionId) {
+                                        rawFramesChannel.send(
+                                            IncomingWsEnvelope(
+                                                connectionId,
+                                                IncomingWsFrame.AccessCheckUnavailable(dto),
+                                            ),
+                                        )
                                     }
-                                    "AUTH_REQUIRED" -> {
-                                        val dto = json.decodeFromString<AuthRequiredFrameDto>(text)
-                                        if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(
-                                                IncomingWsEnvelope(connectionId, IncomingWsFrame.AuthRequired(dto)),
-                                            )
-                                        }
+                                }
+                                "AUTH_REQUIRED" -> {
+                                    val dto = json.decodeFromString<AuthRequiredFrameDto>(text)
+                                    if (connectionId == activeConnectionId) {
+                                        rawFramesChannel.send(
+                                            IncomingWsEnvelope(connectionId, IncomingWsFrame.AuthRequired(dto)),
+                                        )
                                     }
-                                    "ACCESS_INVALIDATED" -> {
-                                        val dto = json.decodeFromString<AccessInvalidatedFrameDto>(text)
-                                        if (connectionId == activeConnectionId) {
-                                            rawFramesChannel.send(
-                                                IncomingWsEnvelope(
-                                                    connectionId,
-                                                    IncomingWsFrame.AccessInvalidated(dto),
-                                                ),
-                                            )
-                                        }
+                                }
+                                "ACCESS_INVALIDATED" -> {
+                                    val dto = json.decodeFromString<AccessInvalidatedFrameDto>(text)
+                                    if (connectionId == activeConnectionId) {
+                                        rawFramesChannel.send(
+                                            IncomingWsEnvelope(
+                                                connectionId,
+                                                IncomingWsFrame.AccessInvalidated(dto),
+                                            ),
+                                        )
                                     }
                                 }
                             }
                         }
-                        localOutgoingJob.cancel()
-                        localHeartbeatJob.cancel()
                     }
-                } catch (e: CancellationException) {
-                    disconnectReason =
-                        when (e.message) {
-                            WsCloseReason.REPLACED.name -> WsCloseReason.REPLACED
-                            WsCloseReason.SESSION_CLOSED.name -> WsCloseReason.SESSION_CLOSED
-                            else -> WsCloseReason.SESSION_CLOSED
-                        }
-                    disconnectMessage = "Connection cancelled: $disconnectReason"
-                    throw e
-                } catch (e: Throwable) {
-                    disconnectReason = WsCloseReason.NETWORK_ERROR
-                    disconnectMessage = e.message ?: "Socket error"
-                } finally {
-                    localHeartbeatJob?.cancel()
-                    localOutgoingJob?.cancel()
-                    outChan.close()
-                    onDisconnected(disconnectReason, disconnectMessage)
+                    localOutgoingJob.cancel()
+                    localHeartbeatJob.cancel()
                 }
+            } catch (e: CancellationException) {
+                disconnectReason =
+                    when (e.message) {
+                        WsCloseReason.REPLACED.name -> WsCloseReason.REPLACED
+                        WsCloseReason.SESSION_CLOSED.name -> WsCloseReason.SESSION_CLOSED
+                        else -> WsCloseReason.SESSION_CLOSED
+                    }
+                disconnectMessage = "Connection cancelled: $disconnectReason"
+                throw e
+            } catch (e: Throwable) {
+                disconnectReason = WsCloseReason.NETWORK_ERROR
+                disconnectMessage = e.message ?: "Socket error"
+            } finally {
+                localHeartbeatJob?.cancel()
+                localOutgoingJob?.cancel()
+                outChan.close()
+                if (currentSession?.id == connectionId) {
+                    currentSession = null
+                }
+                onDisconnected(disconnectReason, disconnectMessage)
             }
+        }
         return connectionId
     }
 
@@ -332,8 +349,8 @@ class KtorEventsWebSocketDataSource(
     ) {
         val frame = ReplayRequestFrameDto(replayId = replayId, afterSequence = afterSequence)
         val text = json.encodeToString(frame)
-        val channel = outgoingChannel ?: throw IllegalStateException("WebSocket outgoing channel is not connected")
-        channel.send(Frame.Text(text))
+        val session = currentSession ?: throw IllegalStateException("WebSocket outgoing channel is not connected")
+        session.outgoing.send(Frame.Text(text))
     }
 
     override suspend fun sendHeartbeat(clientConfirmedSeq: Long) {
@@ -341,7 +358,7 @@ class KtorEventsWebSocketDataSource(
         val frame = HeartbeatFrameDto(clientConfirmedSeq = clientConfirmedSeq)
         val text = json.encodeToString(frame)
         try {
-            outgoingChannel?.send(Frame.Text(text))
+            currentSession?.outgoing?.send(Frame.Text(text))
         } catch (e: CancellationException) {
             throw e
         } catch (_: Throwable) {
@@ -351,15 +368,17 @@ class KtorEventsWebSocketDataSource(
 
     override suspend fun disconnect() {
         connectionMutex.withLock {
-            val oldJob = sessionJob
-            sessionJob = null
-            activeConnectionId++
-            if (oldJob != null && oldJob.isActive) {
-                oldJob.cancel(CancellationException(WsCloseReason.SESSION_CLOSED.name))
-                oldJob.join()
+            val sessionToDisconnect = currentSession
+            currentSession = null
+            activeConnectionId = ++connectionSequence
+
+            if (sessionToDisconnect != null) {
+                if (sessionToDisconnect.job.isActive) {
+                    sessionToDisconnect.job.cancel(CancellationException(WsCloseReason.SESSION_CLOSED.name))
+                    sessionToDisconnect.job.join()
+                }
+                sessionToDisconnect.outgoing.close()
             }
-            outgoingChannel?.close()
-            outgoingChannel = null
             drainFramesChannel()
         }
     }

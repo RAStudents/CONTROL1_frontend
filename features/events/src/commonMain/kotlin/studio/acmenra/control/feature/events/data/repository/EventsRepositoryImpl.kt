@@ -52,6 +52,18 @@ class EventsRepositoryImpl(
     private val filterOptionsMutex = Mutex()
     private val filterCache = MutableStateFlow<Map<String, CachedFilterOptions>>(emptyMap())
     private val cacheGenerations = MutableStateFlow<Map<String, Long>>(emptyMap())
+    private val filterRequestGenerations = MutableStateFlow<Map<String, Long>>(emptyMap())
+    private val filterLatestAppliedGenerations = MutableStateFlow<Map<String, Long>>(emptyMap())
+
+    private fun nextFilterRequestGeneration(companyId: String): Long {
+        var nextGen = 1L
+        filterRequestGenerations.update { map ->
+            val cur = map[companyId] ?: 0L
+            nextGen = cur + 1L
+            map + (companyId to nextGen)
+        }
+        return nextGen
+    }
 
     private data class CachedFilterOptions(
         val options: EventsFilterOptions,
@@ -59,8 +71,10 @@ class EventsRepositoryImpl(
     )
 
     override fun invalidateFilterCache(companyId: String) {
-        cacheGenerations.update { it + (companyId to (it[companyId] ?: 0L) + 1L) }
+        val nextGen = (cacheGenerations.value[companyId] ?: 0L) + 1L
+        cacheGenerations.update { it + (companyId to nextGen) }
         filterCache.update { it - companyId }
+        filterLatestAppliedGenerations.update { it + (companyId to nextGen) }
     }
 
     override fun openFeedSession(
@@ -103,7 +117,9 @@ class EventsRepositoryImpl(
     }
 
     override suspend fun getFilterOptions(companyId: String): EventsFilterOptions {
-        val startGen = cacheGenerations.value[companyId] ?: 0L
+        val startGen: Long = cacheGenerations.value[companyId] ?: 0L
+        val requestGen: Long = nextFilterRequestGeneration(companyId)
+
         val cached = filterCache.value[companyId]
         val result =
             remoteDataSource.getFilterOptions(
@@ -112,11 +128,15 @@ class EventsRepositoryImpl(
             )
 
         filterOptionsMutex.withLock {
-            val currentGen = cacheGenerations.value[companyId] ?: 0L
+            val currentGen: Long = cacheGenerations.value[companyId] ?: 0L
+            val latestApplied: Long = filterLatestAppliedGenerations.value[companyId] ?: 0L
+            val isCurrentRequest: Boolean = requestGen >= latestApplied && currentGen == startGen
+
             return when (result) {
                 is FilterOptionsFetchResult.Success -> {
                     val mapped = EventsDtoMapper.mapFilterOptions(result.options)
-                    if (currentGen == startGen) {
+                    if (isCurrentRequest) {
+                        filterLatestAppliedGenerations.update { it + (companyId to requestGen) }
                         filterCache.update {
                             it +
                                 (companyId to CachedFilterOptions(options = mapped, etag = result.etag))
@@ -126,15 +146,17 @@ class EventsRepositoryImpl(
                 }
                 FilterOptionsFetchResult.NotModified -> {
                     val currentCached = filterCache.value[companyId]
-                    if (currentGen == startGen && currentCached != null) {
+                    if (isCurrentRequest && currentCached != null) {
                         currentCached.options
                     } else {
                         // Cached body missing or invalidated in-flight, re-fetch without ETag
                         val freshResult = remoteDataSource.getFilterOptions(companyId, ifNoneMatchEtag = null)
                         if (freshResult is FilterOptionsFetchResult.Success) {
                             val mapped = EventsDtoMapper.mapFilterOptions(freshResult.options)
-                            val nowGen = cacheGenerations.value[companyId] ?: 0L
-                            if (nowGen == currentGen) {
+                            val nowGen: Long = cacheGenerations.value[companyId] ?: 0L
+                            val nowLatest: Long = filterLatestAppliedGenerations.value[companyId] ?: 0L
+                            if (requestGen >= nowLatest && nowGen == currentGen) {
+                                filterLatestAppliedGenerations.update { it + (companyId to requestGen) }
                                 filterCache.update {
                                     it +
                                         (companyId to CachedFilterOptions(options = mapped, etag = freshResult.etag))
@@ -190,6 +212,18 @@ class EventsRepositoryImpl(
             )
         } catch (e: EventsApiException.PayloadMismatch) {
             EventsOperationResult.Failure(EventsMutationError.PayloadMismatch)
+        } catch (e: EventsApiException.PermissionDenied) {
+            EventsOperationResult.Failure(EventsMutationError.PermissionDenied)
+        } catch (e: EventsApiException.Generic) {
+            val err =
+                if (e.code == "403" || e.code == "PERMISSION_DENIED") {
+                    EventsMutationError.PermissionDenied
+                } else if (e.retryable) {
+                    EventsMutationError.Network
+                } else {
+                    EventsMutationError.Server(e.message)
+                }
+            EventsOperationResult.Failure(err)
         } catch (e: Throwable) {
             val err =
                 if (e.message?.contains("403") == true || e.message?.contains("PermissionDenied") == true) {
@@ -225,6 +259,18 @@ class EventsRepositoryImpl(
             )
         } catch (e: EventsApiException.PayloadMismatch) {
             EventsOperationResult.Failure(EventsMutationError.PayloadMismatch)
+        } catch (e: EventsApiException.PermissionDenied) {
+            EventsOperationResult.Failure(EventsMutationError.PermissionDenied)
+        } catch (e: EventsApiException.Generic) {
+            val err =
+                if (e.code == "403" || e.code == "PERMISSION_DENIED") {
+                    EventsMutationError.PermissionDenied
+                } else if (e.retryable) {
+                    EventsMutationError.Network
+                } else {
+                    EventsMutationError.Server(e.message)
+                }
+            EventsOperationResult.Failure(err)
         } catch (e: Throwable) {
             val err =
                 if (e.message?.contains("403") == true || e.message?.contains("PermissionDenied") == true) {

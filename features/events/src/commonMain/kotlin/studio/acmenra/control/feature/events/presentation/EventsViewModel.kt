@@ -41,6 +41,7 @@ import studio.acmenra.control.feature.events.domain.model.EventsOperationResult
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
 import studio.acmenra.control.feature.events.domain.model.LocationFilterGroup
 import studio.acmenra.control.feature.events.domain.model.LocationToggleState
+import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 import studio.acmenra.control.feature.events.domain.model.locationToggleState
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.usecase.AcknowledgeEventUseCase
@@ -94,6 +95,9 @@ class EventsViewModel(
                 val shouldClearReview = !accessCapabilities.eventsReview
                 val shouldClearExport = !accessCapabilities.reportsExport
 
+                if (shouldClearFeed) {
+                    filterOptionsJob?.cancel()
+                }
                 if (shouldClearReview) {
                     acknowledgeJobs.values.forEach { it.cancel() }
                     acknowledgeJobs.clear()
@@ -108,17 +112,40 @@ class EventsViewModel(
                 }
 
                 _state.update {
-                    it.copy(
-                        access = accessCapabilities,
-                        visibleEvents = if (shouldClearFeed) emptyList() else it.visibleEvents,
-                        selectedEventId = if (shouldClearFeed) null else it.selectedEventId,
-                        isViewerOpenInCompact = if (shouldClearFeed) false else it.isViewerOpenInCompact,
-                        confirmationTarget = if (shouldClearReview) null else it.confirmationTarget,
-                        isMarkingErroneous = if (shouldClearReview) false else it.isMarkingErroneous,
-                        isExportModeActive = if (shouldClearExport) false else it.isExportModeActive,
-                        exportJobStatus = if (shouldClearExport) null else it.exportJobStatus,
-                        isExportSubmitting = if (shouldClearExport) false else it.isExportSubmitting,
-                    )
+                    if (shouldClearFeed) {
+                        it.copy(
+                            access = accessCapabilities,
+                            visibleEvents = emptyList(),
+                            realtimeOverlay = RealtimeOverlay(),
+                            asOfSequence = 0L,
+                            snapshotTotalCount = null,
+                            hasMore = false,
+                            isLoadingNextPage = false,
+                            paginationError = null,
+                            summary = null,
+                            pendingNewerCount = 0,
+                            pendingHistoryCount = 0,
+                            selectedEventId = null,
+                            isViewerOpenInCompact = false,
+                            filterOptions = null,
+                            isInitialLoading = false,
+                            initialLoadError = null,
+                            confirmationTarget = if (shouldClearReview) null else it.confirmationTarget,
+                            isMarkingErroneous = if (shouldClearReview) false else it.isMarkingErroneous,
+                            isExportModeActive = if (shouldClearExport) false else it.isExportModeActive,
+                            exportJobStatus = if (shouldClearExport) null else it.exportJobStatus,
+                            isExportSubmitting = if (shouldClearExport) false else it.isExportSubmitting,
+                        )
+                    } else {
+                        it.copy(
+                            access = accessCapabilities,
+                            confirmationTarget = if (shouldClearReview) null else it.confirmationTarget,
+                            isMarkingErroneous = if (shouldClearReview) false else it.isMarkingErroneous,
+                            isExportModeActive = if (shouldClearExport) false else it.isExportModeActive,
+                            exportJobStatus = if (shouldClearExport) null else it.exportJobStatus,
+                            isExportSubmitting = if (shouldClearExport) false else it.isExportSubmitting,
+                        )
+                    }
                 }
                 feedSession?.updateAccessCapabilities(accessCapabilities)
             }
@@ -214,21 +241,22 @@ class EventsViewModel(
             viewModelScope.launch {
                 session.state.collect { feedState ->
                     if (currentGen != filterRequestGeneration || sessionCompanyGen != companyGeneration) return@collect
+                    val canRead = feedState.access.eventsRead && _state.value.access.eventsRead
                     _state.update { current ->
                         current.copy(
-                            visibleEvents = feedState.visibleEvents,
-                            realtimeOverlay = feedState.realtimeOverlay,
-                            asOfSequence = feedState.asOfSequence,
-                            snapshotTotalCount = feedState.snapshotTotalCount,
-                            hasMore = feedState.hasMore,
+                            visibleEvents = if (canRead) feedState.visibleEvents else emptyList(),
+                            realtimeOverlay = if (canRead) feedState.realtimeOverlay else RealtimeOverlay(),
+                            asOfSequence = if (canRead) feedState.asOfSequence else 0L,
+                            snapshotTotalCount = if (canRead) feedState.snapshotTotalCount else null,
+                            hasMore = if (canRead) feedState.hasMore else false,
                             isInitialLoading = feedState.isInitialLoading,
                             initialLoadError = feedState.initialLoadError,
-                            isLoadingNextPage = feedState.isLoadingNextPage,
-                            paginationError = feedState.paginationError,
+                            isLoadingNextPage = if (canRead) feedState.isLoadingNextPage else false,
+                            paginationError = if (canRead) feedState.paginationError else null,
                             connectionState = feedState.connectionState,
-                            pendingNewerCount = feedState.pendingNewerCount,
-                            pendingHistoryCount = feedState.pendingHistoryCount,
-                            summary = feedState.summary,
+                            pendingNewerCount = if (canRead) feedState.pendingNewerCount else 0,
+                            pendingHistoryCount = if (canRead) feedState.pendingHistoryCount else 0,
+                            summary = if (canRead) feedState.summary else null,
                             access = feedState.access,
                         )
                     }
@@ -566,10 +594,8 @@ class EventsViewModel(
                         status.status == EventsExportStatusCode.PROCESSING
                     ) {
                         observeExport(status.exportId, requestCompanyId, currentCompanyGen)
-                    } else if (status.status == EventsExportStatusCode.COMPLETED ||
-                        status.status == EventsExportStatusCode.FAILED ||
-                        status.status == EventsExportStatusCode.EXPIRED
-                    ) {
+                    } else {
+                        // Terminal status: COMPLETED, FAILED, EXPIRED, or UNKNOWN
                         activeExportKey = null
                         activeExportRequest = null
                     }
@@ -645,7 +671,8 @@ class EventsViewModel(
                         _state.update { it.copy(exportJobStatus = status) }
                         if (status.status == EventsExportStatusCode.COMPLETED ||
                             status.status == EventsExportStatusCode.FAILED ||
-                            status.status == EventsExportStatusCode.EXPIRED
+                            status.status == EventsExportStatusCode.EXPIRED ||
+                            status.status == EventsExportStatusCode.UNKNOWN
                         ) {
                             activeExportKey = null
                             activeExportRequest = null

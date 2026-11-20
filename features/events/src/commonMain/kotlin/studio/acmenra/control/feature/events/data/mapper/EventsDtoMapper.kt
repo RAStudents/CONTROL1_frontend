@@ -49,9 +49,32 @@ object EventsDtoMapper {
                 else -> EventIconKey.GENERIC_ALERT
             }
 
-        val occurredAt = runCatching { Instant.parse(dto.occurredAt) }.getOrDefault(Instant.fromEpochMilliseconds(0))
-        val receivedAt = runCatching { Instant.parse(dto.receivedAt) }.getOrDefault(occurredAt)
-        val acknowledgedAt = dto.acknowledgedAt?.let { runCatching { Instant.parse(it) }.getOrNull() }
+        val occurredAt =
+            try {
+                Instant.parse(dto.occurredAt)
+            } catch (e: Exception) {
+                throw IllegalArgumentException(
+                    "Invalid occurred_at timestamp '${dto.occurredAt}' for event ${dto.id}",
+                    e,
+                )
+            }
+        val receivedAt =
+            try {
+                Instant.parse(dto.receivedAt)
+            } catch (e: Exception) {
+                throw IllegalArgumentException(
+                    "Invalid received_at timestamp '${dto.receivedAt}' for event ${dto.id}",
+                    e,
+                )
+            }
+        val acknowledgedAt =
+            dto.acknowledgedAt?.let { raw ->
+                try {
+                    Instant.parse(raw)
+                } catch (e: Exception) {
+                    throw IllegalArgumentException("Invalid acknowledged_at timestamp '$raw' for event ${dto.id}", e)
+                }
+            }
 
         return Event(
             id = dto.id,
@@ -163,8 +186,23 @@ object EventsDtoMapper {
                 "EXPIRED" -> EventsExportStatusCode.EXPIRED
                 else -> EventsExportStatusCode.FAILED
             }
-        val createdAt = runCatching { Instant.parse(dto.createdAt) }.getOrDefault(Instant.fromEpochMilliseconds(0))
-        val expiresAt = dto.expiresAt?.let { runCatching { Instant.parse(it) }.getOrNull() }
+        val createdAt =
+            try {
+                Instant.parse(dto.createdAt)
+            } catch (e: Exception) {
+                throw IllegalArgumentException(
+                    "Invalid created_at timestamp '${dto.createdAt}' for export ${dto.exportId}",
+                    e,
+                )
+            }
+        val expiresAt =
+            dto.expiresAt?.let { raw ->
+                try {
+                    Instant.parse(raw)
+                } catch (e: Exception) {
+                    throw IllegalArgumentException("Invalid expires_at timestamp '$raw' for export ${dto.exportId}", e)
+                }
+            }
 
         return EventsExportStatus(
             exportId = dto.exportId,

@@ -137,7 +137,7 @@ data class TenantCommitFrameDto(
     @SerialName("replay_id") val replayId: Long,
     @Serializable(with = SafeJsLongSerializer::class)
     @SerialName("tenant_sequence") val tenantSequence: Long,
-    @SerialName("payload_sha256") val payloadSha256: String? = null,
+    @SerialName("payload_sha256") val payloadSha256: String = "0".repeat(64),
     @SerialName("event_created") val eventCreated: EventDto? = null,
     @SerialName("event_updated") val eventUpdated: EventDto? = null,
     @SerialName("summary_updated") val summaryUpdated: EventsSummaryDto? = null,
@@ -147,7 +147,10 @@ data class TenantCommitFrameDto(
         val hasPayload =
             eventCreated != null || eventUpdated != null || summaryUpdated != null || filterOptionsUpdated != null
         val bothEvents = eventCreated != null && eventUpdated != null
-        return hasPayload && !bothEvents
+        val isShaValid =
+            payloadSha256.length == 64 &&
+                payloadSha256.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+        return hasPayload && !bothEvents && isShaValid
     }
 }
 

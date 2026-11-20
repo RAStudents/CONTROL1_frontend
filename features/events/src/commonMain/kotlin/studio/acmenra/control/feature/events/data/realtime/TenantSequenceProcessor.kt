@@ -35,8 +35,9 @@ class TenantSequenceProcessor(
         sequence: Long,
         hash: String,
     ) {
+        val normalized = hash.lowercase()
         recentHashes.remove(sequence)
-        recentHashes[sequence] = hash
+        recentHashes[sequence] = normalized
         if (recentHashes.size > maxRecentHashes) {
             val iterator = recentHashes.keys.iterator()
             if (iterator.hasNext()) {
@@ -99,11 +100,20 @@ class TenantSequenceProcessor(
 
         return when {
             incomingSequence <= lastProcessedSequence -> {
-                if (payloadSha256 != null && recentHashes.containsKey(incomingSequence)) {
-                    val existingHash = recentHashes[incomingSequence]
-                    if (existingHash != null && existingHash != payloadSha256) {
+                if (payloadSha256 != null) {
+                    val normalizedHash = payloadSha256.lowercase()
+                    if (recentHashes.containsKey(incomingSequence)) {
+                        val existingHash = recentHashes[incomingSequence]
+                        if (existingHash != null && existingHash.lowercase() != normalizedHash) {
+                            return SequenceValidationResult.IntegrityViolation(
+                                "Payload SHA256 mismatch for sequence $incomingSequence: expected $existingHash, got $payloadSha256",
+                            )
+                        }
+                    } else {
+                        // Sequence duplicate is older than the recentHashes retention window (1000 items).
+                        // Fail-safe per contract: trigger rebootstrap instead of blindly accepting unchecked payload
                         return SequenceValidationResult.IntegrityViolation(
-                            "Payload SHA256 mismatch for sequence $incomingSequence: expected $existingHash, got $payloadSha256",
+                            "Duplicate sequence $incomingSequence is evicted from recentHashes cache; rebootstrap required",
                         )
                     }
                 }

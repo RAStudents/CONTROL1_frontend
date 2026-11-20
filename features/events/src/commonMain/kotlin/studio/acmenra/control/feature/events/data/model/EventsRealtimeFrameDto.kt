@@ -149,7 +149,7 @@ data class TenantCommitFrameDto(
         val bothEvents = eventCreated != null && eventUpdated != null
         val isShaValid =
             payloadSha256.length == 64 &&
-                payloadSha256.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+                payloadSha256.all { it in '0'..'9' || it in 'a'..'f' }
         return hasPayload && !bothEvents && isShaValid
     }
 }

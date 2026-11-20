@@ -128,10 +128,10 @@ class EventsSessionProcessor(
     private val query: EventsQuery,
     initialAccess: EventsAccessCapabilities,
     private val scope: CoroutineScope,
-    private val onSendReplayRequest: suspend (replayId: Long, afterSequence: Long) -> Unit,
-    private val onTriggerRebootstrap: suspend () -> Unit,
-    private val onTokenRefreshNeeded: suspend () -> Unit,
-    private val onSessionRevoked: suspend () -> Unit = {},
+    private val onSendReplayRequest: (replayId: Long, afterSequence: Long) -> Unit,
+    private val onTriggerRebootstrap: () -> Unit,
+    private val onTokenRefreshNeeded: () -> Unit,
+    private val onSessionRevoked: () -> Unit = {},
     private val onAccessInvalidated: (reason: String, companyId: String?) -> Unit,
     private val onEventsReadRevoked: () -> Unit = {},
     private val onEventsReadGranted: () -> Unit = {},
@@ -154,6 +154,15 @@ class EventsSessionProcessor(
     private var maxClosedReplayGeneration: Long = 0L
     private var activeConnectionId: Long = 0L
     private var nextCursor: String? = null
+
+    @kotlin.concurrent.Volatile
+    private var eventsReadDeniedLatch: Boolean = !initialAccess.eventsRead
+
+    fun setImmediateEventsReadDenied(denied: Boolean) {
+        eventsReadDeniedLatch = denied
+    }
+
+    fun isImmediateEventsReadDenied(): Boolean = eventsReadDeniedLatch
 
     val currentReplayId: Long get() = sequenceProcessor.currentReplayId
 
@@ -318,6 +327,7 @@ class EventsSessionProcessor(
             is SessionCommand.AccessUpdated -> {
                 val wasRead = _state.value.access.eventsRead
                 val nowRead = command.access.eventsRead
+                eventsReadDeniedLatch = !nowRead
                 if (wasRead && !nowRead) {
                     snapshotItems.clear()
                     currentOverlay = RealtimeOverlay()
@@ -394,7 +404,7 @@ class EventsSessionProcessor(
         generation: Long,
         response: CompletableDeferred<BootstrapApplyResult>,
     ) {
-        if (!_state.value.access.eventsRead) {
+        if (!_state.value.access.eventsRead || eventsReadDeniedLatch) {
             response.complete(BootstrapApplyResult.Stale)
             return
         }
@@ -431,7 +441,7 @@ class EventsSessionProcessor(
             for (item in validCommits) {
                 val existing = deduplicatedCommits.lastOrNull()
                 if (existing != null && existing.tenantSequence == item.commit.tenantSequence) {
-                    if (existing.payloadSha256 == item.commit.payloadSha256) {
+                    if (existing.payloadSha256.lowercase() == item.commit.payloadSha256.lowercase()) {
                         // Verified duplicate frame with identical SHA -> drop
                         continue
                     } else {
@@ -511,7 +521,7 @@ class EventsSessionProcessor(
         page: EventsPage,
         snapshotId: String?,
     ) {
-        if (!_state.value.access.eventsRead) {
+        if (!_state.value.access.eventsRead || eventsReadDeniedLatch) {
             _state.update { it.copy(isLoadingNextPage = false) }
             return
         }
@@ -607,7 +617,7 @@ class EventsSessionProcessor(
     }
 
     private suspend fun handleWsFrame(frame: IncomingWsFrame) {
-        if (isAccessInvalidated || !_state.value.access.eventsRead) return
+        if (isAccessInvalidated || !_state.value.access.eventsRead || eventsReadDeniedLatch) return
 
         when (frame) {
             is IncomingWsFrame.TenantCommit -> {
@@ -745,7 +755,7 @@ class EventsSessionProcessor(
     }
 
     private fun applyCommit(commit: TenantCommitFrameDto) {
-        if (!_state.value.access.eventsRead) return
+        if (!_state.value.access.eventsRead || eventsReadDeniedLatch) return
 
         // Two-phase atomic commit application:
         // 1. Calculate tentative new overlay and summary

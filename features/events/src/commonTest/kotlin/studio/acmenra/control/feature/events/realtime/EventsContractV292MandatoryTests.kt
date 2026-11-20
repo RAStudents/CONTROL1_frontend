@@ -5201,6 +5201,646 @@ class EventsContractV292MandatoryTests {
             }
         }
 
+    // Scenario 60: RetryRequired in handleBootstrap preserves existing snapshot, overlay, sequence, and generation
+    @Test
+    fun testScenario60_RetryRequiredPreservesExistingState() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                // 1. Install initial bootstrap (asOfSequence = 100)
+                val initialEvent = sampleEvent("ev-1")
+                val b1 =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(initialEvent),
+                                nextCursor = "cursor-1",
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                val res1 = processor.installBootstrap(b1, generation = 1L)
+                assertTrue(res1 is BootstrapApplyResult.Applied)
+                assertEquals(1, processor.state.value.visibleEvents.size)
+                assertEquals(
+                    "ev-1",
+                    processor.state.value.visibleEvents
+                        .first()
+                        .id,
+                )
+                assertEquals(100L, processor.getAsOfSequence())
+
+                // 2. Put processor into rebootstrap mode with a buffered commit that has a GAP
+                val b2 =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-2")),
+                                nextCursor = "cursor-2",
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 200L,
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 200L,
+                                todayEventsCount = 2,
+                            ),
+                        streamCursor = 200L,
+                    )
+
+                // Dispatch ResyncRequired to enter rebootstrap mode
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(
+                            1L,
+                            IncomingWsFrame.ResyncRequired(
+                                ResyncRequiredFrameDto(replayId = processor.currentReplayId),
+                            ),
+                        ),
+                    ),
+                )
+                advanceUntilIdle()
+
+                // Buffer a commit with gap: 205 instead of 201
+                val gappedCommit =
+                    sampleCommitDto(
+                        replayId = processor.currentReplayId,
+                        sequence = 205L,
+                        eventId = "ev-gapped",
+                    )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(gappedCommit)),
+                    ),
+                )
+                advanceUntilIdle()
+
+                // 3. Attempt to install b2: must return RetryRequired due to gap!
+                val res2 = processor.installBootstrap(b2, generation = 2L)
+                assertEquals(BootstrapApplyResult.RetryRequired, res2)
+
+                // 4. Verify existing state is 100% PRESERVED
+                assertEquals(1, processor.state.value.visibleEvents.size)
+                assertEquals(
+                    "ev-1",
+                    processor.state.value.visibleEvents
+                        .first()
+                        .id,
+                )
+                assertEquals(100L, processor.getAsOfSequence())
+                assertEquals("cursor-1", processor.getNextCursor())
+
+                processor.close()
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 61: triggerBootstrap in EventsFeedSessionImpl retries on RetryRequired and recovers
+    @Test
+    fun testScenario61_TriggerBootstrapRetriesOnRetryRequiredAndRecovers() =
+        runTest(testDispatcher) {
+            val parentScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var bootstrapCallCount = 0
+                val testWs = TestWebSocketDataSource()
+
+                val session =
+                    EventsFeedSessionImpl(
+                        companyId = "comp-1",
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        remoteDataSource =
+                            object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                                override suspend fun getBootstrap(
+                                    companyId: String,
+                                    query: EventsQuery,
+                                    limit: Int,
+                                ): EventsBootstrapDto {
+                                    bootstrapCallCount++
+                                    val cursor = if (bootstrapCallCount == 1) 100L else 101L
+                                    return sampleBootstrapDto(cursor = cursor)
+                                }
+
+                                override suspend fun getEventsPage(
+                                    companyId: String,
+                                    cursor: String,
+                                    limit: Int,
+                                ) = error("unused")
+
+                                override suspend fun getFilterOptions(
+                                    companyId: String,
+                                    ifNoneMatchEtag: String?,
+                                ) = error("unused")
+
+                                override suspend fun acknowledgeEvent(
+                                    companyId: String,
+                                    eventId: String,
+                                ) = error("unused")
+
+                                override suspend fun markEventErroneous(
+                                    companyId: String,
+                                    eventId: String,
+                                    expectedClassificationVersion: Long,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun createExport(
+                                    companyId: String,
+                                    request: studio.acmenra.control.feature.events.data.model.CreateExportRequestDto,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun getExportStatus(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+
+                                override suspend fun downloadExport(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+                            },
+                        webSocketDataSource = testWs,
+                        sessionManager = SessionManager(TestTokenStorage()),
+                        connectivityProvider =
+                            object : EventsConnectivityProvider {
+                                override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                            },
+                        parentScope = parentScope,
+                    )
+
+                advanceUntilIdle()
+                assertEquals(1, bootstrapCallCount)
+                assertFalse(session.state.value.isInitialLoading)
+                assertEquals(1, testWs.connectCount)
+
+                session.close()
+            } finally {
+                parentScope.cancel()
+            }
+        }
+
+    // Scenario 62: triggerBootstrap terminates with InitialLoadFailed when retries exhausted
+    @Test
+    fun testScenario62_TriggerBootstrapTerminatesOnErrorAfterRetriesExhausted() =
+        runTest(testDispatcher) {
+            val parentScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var bootstrapCallCount = 0
+                val testWs = TestWebSocketDataSource()
+
+                val session =
+                    EventsFeedSessionImpl(
+                        companyId = "comp-1",
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        remoteDataSource =
+                            object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                                override suspend fun getBootstrap(
+                                    companyId: String,
+                                    query: EventsQuery,
+                                    limit: Int,
+                                ): EventsBootstrapDto {
+                                    bootstrapCallCount++
+                                    throw studio.acmenra.control.feature.events.data.datasource.EventsApiException
+                                        .Generic(
+                                            code = "500",
+                                            serverMessage = "Server error",
+                                            retryable = false,
+                                        )
+                                }
+
+                                override suspend fun getEventsPage(
+                                    companyId: String,
+                                    cursor: String,
+                                    limit: Int,
+                                ) = error("unused")
+
+                                override suspend fun getFilterOptions(
+                                    companyId: String,
+                                    ifNoneMatchEtag: String?,
+                                ) = error("unused")
+
+                                override suspend fun acknowledgeEvent(
+                                    companyId: String,
+                                    eventId: String,
+                                ) = error("unused")
+
+                                override suspend fun markEventErroneous(
+                                    companyId: String,
+                                    eventId: String,
+                                    expectedClassificationVersion: Long,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun createExport(
+                                    companyId: String,
+                                    request: studio.acmenra.control.feature.events.data.model.CreateExportRequestDto,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun getExportStatus(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+
+                                override suspend fun downloadExport(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+                            },
+                        webSocketDataSource = testWs,
+                        sessionManager = SessionManager(TestTokenStorage()),
+                        connectivityProvider =
+                            object : EventsConnectivityProvider {
+                                override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                            },
+                        parentScope = parentScope,
+                    )
+
+                advanceUntilIdle()
+                assertFalse(session.state.value.isInitialLoading)
+                assertNotNull(session.state.value.initialLoadError)
+
+                session.close()
+            } finally {
+                parentScope.cancel()
+            }
+        }
+
+    // Scenario 63: Late HTTP ACK response does not overwrite newer classification from WS commit
+    @Test
+    fun testScenario63_LateHttpAckDoesNotOverwriteNewerWsClassification() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true, eventsReview = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                // 1. Install initial event: classificationVersion = 1, acknowledgementVersion = 1, isErroneous = false, status = NEW
+                val initialEvent =
+                    sampleEvent("ev-1").copy(
+                        eventVersion = 1L,
+                        classificationVersion = 1L,
+                        acknowledgementVersion = 1L,
+                        isErroneous = false,
+                        status = EventAcknowledgementStatus.NEW,
+                    )
+                val b1 =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(initialEvent),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(b1, generation = 1L)
+                advanceUntilIdle()
+
+                // 2. A newer WS commit arrives with updated classification: classificationVersion = 2, isErroneous = true
+                val wsUpdatedEventDto =
+                    sampleEventDto("ev-1").copy(
+                        eventVersion = 2L,
+                        classificationVersion = 2L,
+                        acknowledgementVersion = 1L,
+                        isErroneous = true,
+                        status = "NEW",
+                    )
+                val commit =
+                    sampleCommitDto(
+                        replayId = processor.currentReplayId,
+                        sequence = 101L,
+                        eventId = "ev-1",
+                    ).copy(
+                        eventCreated = null,
+                        eventUpdated = wsUpdatedEventDto,
+                    )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(commit))),
+                )
+                advanceUntilIdle()
+
+                // Verify WS commit is reflected
+                val currentEv =
+                    processor.state.value.visibleEvents
+                        .first { it.id == "ev-1" }
+                assertTrue(currentEv.isErroneous)
+                assertEquals(2L, currentEv.classificationVersion)
+                assertEquals(EventAcknowledgementStatus.NEW, currentEv.status)
+
+                // 3. Late HTTP ACK response arrives:
+                // acknowledgementVersion = 2, status = ACKNOWLEDGED, but classificationVersion = 1, isErroneous = false
+                val lateHttpAckEvent =
+                    sampleEvent("ev-1").copy(
+                        eventVersion = 2L,
+                        classificationVersion = 1L,
+                        acknowledgementVersion = 2L,
+                        isErroneous = false,
+                        status = EventAcknowledgementStatus.ACKNOWLEDGED,
+                        acknowledgedAt = Instant.parse("2026-03-01T12:00:00Z"),
+                        acknowledgedBy = "user-1",
+                    )
+                processor.dispatch(SessionCommand.AcknowledgeSucceeded(lateHttpAckEvent))
+                advanceUntilIdle()
+
+                // 4. Verify merged result: status is ACKNOWLEDGED, and isErroneous is STILL TRUE!
+                val mergedEv =
+                    processor.state.value.visibleEvents
+                        .first { it.id == "ev-1" }
+                assertEquals(EventAcknowledgementStatus.ACKNOWLEDGED, mergedEv.status)
+                assertEquals(2L, mergedEv.acknowledgementVersion)
+                assertTrue(mergedEv.isErroneous)
+                assertEquals(2L, mergedEv.classificationVersion)
+
+                processor.close()
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 64: Late HTTP mark erroneous response does not overwrite newer acknowledgement from WS commit
+    @Test
+    fun testScenario64_LateHttpMarkErroneousDoesNotOverwriteNewerWsAcknowledgement() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true, eventsReview = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                // 1. Initial event: classificationVersion = 1, acknowledgementVersion = 1, status = NEW
+                val initialEvent =
+                    sampleEvent("ev-1").copy(
+                        eventVersion = 1L,
+                        classificationVersion = 1L,
+                        acknowledgementVersion = 1L,
+                        isErroneous = false,
+                        status = EventAcknowledgementStatus.NEW,
+                    )
+                val b1 =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(initialEvent),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(b1, generation = 1L)
+                advanceUntilIdle()
+
+                // 2. WS commit arrives with acknowledgement: acknowledgementVersion = 2, status = ACKNOWLEDGED
+                val wsUpdatedEventDto =
+                    sampleEventDto("ev-1").copy(
+                        eventVersion = 2L,
+                        classificationVersion = 1L,
+                        acknowledgementVersion = 2L,
+                        isErroneous = false,
+                        status = "ACKNOWLEDGED",
+                        acknowledgedAt = "2026-03-01T12:00:00Z",
+                        acknowledgedBy = "colleague",
+                    )
+                val commit =
+                    sampleCommitDto(
+                        replayId = processor.currentReplayId,
+                        sequence = 101L,
+                        eventId = "ev-1",
+                    ).copy(
+                        eventCreated = null,
+                        eventUpdated = wsUpdatedEventDto,
+                    )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(commit))),
+                )
+                advanceUntilIdle()
+
+                // 3. Late HTTP mark erroneous response arrives: classificationVersion = 2, isErroneous = true,
+                // but acknowledgementVersion = 1, status = NEW
+                val lateHttpMutatedEvent =
+                    sampleEvent("ev-1").copy(
+                        eventVersion = 2L,
+                        classificationVersion = 2L,
+                        acknowledgementVersion = 1L,
+                        isErroneous = true,
+                        status = EventAcknowledgementStatus.NEW,
+                    )
+                processor.dispatch(SessionCommand.EventMutationApplied(lateHttpMutatedEvent))
+                advanceUntilIdle()
+
+                // 4. Verify merged result: isErroneous is TRUE, status is STILL ACKNOWLEDGED!
+                val mergedEv =
+                    processor.state.value.visibleEvents
+                        .first { it.id == "ev-1" }
+                assertTrue(mergedEv.isErroneous)
+                assertEquals(2L, mergedEv.classificationVersion)
+                assertEquals(EventAcknowledgementStatus.ACKNOWLEDGED, mergedEv.status)
+                assertEquals(2L, mergedEv.acknowledgementVersion)
+
+                processor.close()
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 65: Malformed TENANT_COMMIT does not crash WebSocket connection and triggers rebootstrap
+    @Test
+    fun testScenario65_MalformedTenantCommitDoesNotCrashSocketAndTriggersRebootstrap() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var rebootstrapTriggered = false
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { rebootstrapTriggered = true },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                // Dispatch MalformedCommit
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(
+                            1L,
+                            IncomingWsFrame.MalformedCommit(
+                                replayId = processor.currentReplayId,
+                                error = "Syntax error in frame",
+                            ),
+                        ),
+                    ),
+                )
+                advanceUntilIdle()
+
+                assertTrue(rebootstrapTriggered)
+                processor.close()
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 66: Commit with invalid envelope triggers rebootstrap instead of being silently dropped
+    @Test
+    fun testScenario66_InvalidEnvelopeCommitTriggersRebootstrap() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var rebootstrapTriggered = false
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { rebootstrapTriggered = true },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                // Initial bootstrap
+                val b1 =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-1")),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(b1, generation = 1L)
+                advanceUntilIdle()
+
+                // Commit with both eventCreated and eventUpdated (invalid envelope per specification)
+                val invalidCommit =
+                    sampleCommitDto(
+                        replayId = processor.currentReplayId,
+                        sequence = 101L,
+                        eventId = "ev-1",
+                    ).copy(
+                        eventCreated = sampleEventDto("ev-created"),
+                        eventUpdated = sampleEventDto("ev-updated"),
+                    )
+                assertFalse(invalidCommit.validateEnvelope())
+
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(invalidCommit))),
+                )
+                advanceUntilIdle()
+
+                assertTrue(rebootstrapTriggered)
+                processor.close()
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 67: Heartbeat off-by-one verification: 1 missed ACK does not close, 2 missed close only after 2nd window
+    @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+    @Test
+    fun testScenario67_HeartbeatRequiresFullSecondWindowBeforeTimeout() =
+        runTest(testDispatcher) {
+            val tracker =
+                studio.acmenra.control.feature.events.data.datasource
+                    .HeartbeatTracker(maxMissedAcks = 2)
+
+            // 1. Initial state: missedAcks = 0
+            assertEquals(0, tracker.missedAcks.load())
+
+            // 2. First tick (25s): sends HB #1, missedAcks becomes 1 -> connection stays open!
+            assertTrue(tracker.onTick())
+            assertEquals(1, tracker.missedAcks.load())
+
+            // 3. Second tick (50s): server missed ACK for HB #1; sends HB #2, missedAcks becomes 2 ->
+            // connection STILL stays open to allow full window for HB #2 ACK!
+            assertTrue(tracker.onTick())
+            assertEquals(2, tracker.missedAcks.load())
+
+            // 4. Stale ACK for old replayId (e.g. replayId 0 when active is 1) does NOT reset missedAcks!
+            tracker.onAckReceived(incomingReplayId = 0L, activeReplayId = 1L)
+            assertEquals(2, tracker.missedAcks.load())
+
+            // 5. Third tick (75s): full window elapsed without valid ACK -> onTick() returns false (timeout)!
+            assertFalse(tracker.onTick())
+
+            // 6. Valid ACK for active replayId resets missedAcks to 0
+            tracker.onAckReceived(incomingReplayId = 1L, activeReplayId = 1L)
+            assertEquals(0, tracker.missedAcks.load())
+            assertTrue(tracker.onTick())
+            assertEquals(1, tracker.missedAcks.load())
+        }
+
     private class FakeFeedSession(
         override val companyId: String = "comp-1",
         override val query: EventsQuery = EventsQuery(),

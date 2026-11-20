@@ -222,9 +222,12 @@ class EventsSessionProcessor(
                     if (command is SessionCommand.Close) break
                 }
             } finally {
-                for (remaining in commandChannel) {
+                commandChannel.close()
+                while (true) {
+                    val remaining = commandChannel.tryReceive().getOrNull() ?: break
                     when (remaining) {
-                        is SessionCommand.InstallBootstrap -> remaining.response.complete(BootstrapApplyResult.Stale)
+                        is SessionCommand.InstallBootstrap ->
+                            remaining.response.complete(BootstrapApplyResult.Stale)
                         is SessionCommand.NextReplayGeneration ->
                             remaining.response.completeExceptionally(
                                 kotlinx.coroutines.CancellationException("Processor closed"),
@@ -257,7 +260,15 @@ class EventsSessionProcessor(
 
     suspend fun nextReplayGeneration(): Long {
         val deferred = CompletableDeferred<Long>()
-        commandChannel.send(SessionCommand.NextReplayGeneration(deferred))
+        try {
+            commandChannel.send(SessionCommand.NextReplayGeneration(deferred))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            deferred.cancel(e)
+            throw e
+        } catch (e: Throwable) {
+            deferred.completeExceptionally(e)
+            throw e
+        }
         return deferred.await()
     }
 
@@ -484,20 +495,10 @@ class EventsSessionProcessor(
             response.complete(BootstrapApplyResult.Stale)
             return
         }
-        currentBootstrapGeneration = generation
 
-        snapshotItems.clear()
-        if (_state.value.access.eventsRead) {
-            snapshotItems.addAll(bootstrap.page.items)
-        }
-        currentOverlay = RealtimeOverlay(pendingAckIds = currentOverlay.pendingAckIds)
-        sequenceProcessor.resetSequence(bootstrap.streamCursor)
-        nextCursor = bootstrap.page.nextCursor
-
-        // If we were buffering commits during rebootstrap, apply them now with strict continuity and deduplication
+        // 1. Build and validate buffered commits if rebootstrapping
+        val deduplicatedCommits = mutableListOf<TenantCommitFrameDto>()
         if (isRebootstrapping) {
-            isRebootstrapping = false
-            bufferReplayId = null
             val validCommits =
                 rebootstrapBuffer
                     .filter {
@@ -505,10 +506,6 @@ class EventsSessionProcessor(
                             it.receivedAt.elapsedNow() <= 30.seconds
                     }.sortedBy { it.commit.tenantSequence }
 
-            rebootstrapBuffer.clear()
-
-            // Deduplicate commits by tenantSequence
-            val deduplicatedCommits = mutableListOf<TenantCommitFrameDto>()
             var deduplicationError = false
             for (item in validCommits) {
                 val existing = deduplicatedCommits.lastOrNull()
@@ -526,6 +523,7 @@ class EventsSessionProcessor(
             }
 
             if (deduplicationError) {
+                // DO NOT touch snapshotItems, currentOverlay, nextCursor, sequenceProcessor or currentBootstrapGeneration!
                 isRebootstrapping = true
                 bufferReplayId = sequenceProcessor.currentReplayId
                 response.complete(BootstrapApplyResult.RetryRequired)
@@ -544,28 +542,102 @@ class EventsSessionProcessor(
             }
 
             if (hasGap) {
-                // Gap detected in rebootstrap buffer: retry bootstrap
+                // Gap detected in rebootstrap buffer: retry bootstrap without corrupting displayed feed!
                 isRebootstrapping = true
                 bufferReplayId = sequenceProcessor.currentReplayId
                 response.complete(BootstrapApplyResult.RetryRequired)
                 return
             }
+        }
 
-            for (commit in deduplicatedCommits) {
-                applyCommit(commit)
+        // 2. Prepare candidate state (without mutating processor state yet)
+        val candidateSnapshotItems =
+            if (_state.value.access.eventsRead) {
+                bootstrap.page.items.toMutableList()
+            } else {
+                mutableListOf()
             }
+        var candidateOverlay = RealtimeOverlay(pendingAckIds = currentOverlay.pendingAckIds)
+        val candidateNextCursor = bootstrap.page.nextCursor
+
+        var candidateSummary = _state.value.summary
+        val bootstrapSummary = bootstrap.summary
+        candidateSummary =
+            when {
+                candidateSummary == null -> bootstrapSummary
+                bootstrapSummary.summaryAsOfSequence >= candidateSummary.summaryAsOfSequence -> bootstrapSummary
+                else -> candidateSummary
+            }
+
+        // If rebootstrapping, apply the verified commits to candidate overlay & summary
+        if (isRebootstrapping && deduplicatedCommits.isNotEmpty()) {
+            for (commit in deduplicatedCommits) {
+                val createdDto = commit.eventCreated
+                val updatedDto = commit.eventUpdated
+
+                if (createdDto != null) {
+                    val event = EventsDtoMapper.mapEvent(createdDto)
+                    val (newOverlay, _) =
+                        RealtimeOverlayReducer.applyEventCommit(
+                            currentOverlay = candidateOverlay,
+                            event = event,
+                            query = query,
+                            snapshotItems = candidateSnapshotItems,
+                        )
+                    candidateOverlay = newOverlay
+                }
+
+                if (updatedDto != null) {
+                    val event = EventsDtoMapper.mapEvent(updatedDto)
+                    val (newOverlay, _) =
+                        RealtimeOverlayReducer.applyEventCommit(
+                            currentOverlay = candidateOverlay,
+                            event = event,
+                            query = query,
+                            snapshotItems = candidateSnapshotItems,
+                        )
+                    candidateOverlay = newOverlay
+                }
+
+                val newSummary = commit.summaryUpdated?.let { EventsDtoMapper.mapSummary(it) }
+                if (newSummary != null) {
+                    candidateSummary =
+                        when {
+                            candidateSummary == null -> newSummary
+                            newSummary.summaryAsOfSequence >= candidateSummary.summaryAsOfSequence -> newSummary
+                            else -> candidateSummary
+                        }
+                }
+
+                commit.filterOptionsUpdated?.let { optionsDto ->
+                    onFilterOptionsUpdated?.invoke(optionsDto)
+                }
+            }
+        }
+
+        // 3. Atomically publish verified state
+        currentBootstrapGeneration = generation
+
+        snapshotItems.clear()
+        snapshotItems.addAll(candidateSnapshotItems)
+        currentOverlay = candidateOverlay
+        nextCursor = candidateNextCursor
+
+        sequenceProcessor.resetSequence(bootstrap.streamCursor)
+        if (isRebootstrapping && deduplicatedCommits.isNotEmpty()) {
+            for (commit in deduplicatedCommits) {
+                sequenceProcessor.advanceSequence(commit.tenantSequence, commit.payloadSha256)
+            }
+        }
+
+        if (isRebootstrapping) {
+            isRebootstrapping = false
+            bufferReplayId = null
+            rebootstrapBuffer.removeAll { it.commit.tenantSequence <= sequenceProcessor.currentSequence }
         }
 
         maxClosedReplayGeneration = maxOf(maxClosedReplayGeneration, sequenceProcessor.currentReplayId)
         val newReplayId = sequenceProcessor.nextReplayGeneration()
-
-        val currentSummary = _state.value.summary
-        val nextSummary =
-            when {
-                currentSummary == null -> bootstrap.summary
-                bootstrap.summary.summaryAsOfSequence >= currentSummary.summaryAsOfSequence -> bootstrap.summary
-                else -> currentSummary
-            }
 
         val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
         val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
@@ -580,7 +652,7 @@ class EventsSessionProcessor(
                 hasMore = bootstrap.page.hasMore,
                 isInitialLoading = false,
                 initialLoadError = null,
-                summary = nextSummary,
+                summary = candidateSummary,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
             )
@@ -625,19 +697,31 @@ class EventsSessionProcessor(
 
     private fun handleEventMutationApplied(mutatedEvent: Event) {
         if (!_state.value.access.eventsRead || accessFence.value.denied) return
-        val idx = snapshotItems.indexOfFirst { it.id == mutatedEvent.id }
-        if (idx != -1) {
-            val cur = snapshotItems[idx]
-            if (mutatedEvent.classificationVersion >= cur.classificationVersion) {
-                snapshotItems[idx] = mutatedEvent
-            }
-        }
+        val existingSnapshot = snapshotItems.firstOrNull { it.id == mutatedEvent.id }
         val existingEntry = currentOverlay.entries[mutatedEvent.id]
+        val currentEvent = existingEntry?.event ?: existingSnapshot
+
+        val finalEvent =
+            if (currentEvent != null) {
+                EventMerger.merge(current = currentEvent, incoming = mutatedEvent)
+            } else {
+                mutatedEvent
+            }
+
+        val idx = snapshotItems.indexOfFirst { it.id == finalEvent.id }
+        if (idx != -1) {
+            snapshotItems[idx] = finalEvent
+        }
         val updatedEntries =
-            if (existingEntry != null &&
-                mutatedEvent.classificationVersion >= existingEntry.event.classificationVersion
-            ) {
-                currentOverlay.entries + (mutatedEvent.id to existingEntry.copy(event = mutatedEvent))
+            if (existingEntry != null) {
+                currentOverlay.entries +
+                    (
+                        finalEvent.id to
+                            existingEntry.copy(
+                                event = finalEvent,
+                                eventVersion = finalEvent.eventVersion,
+                            )
+                    )
             } else {
                 currentOverlay.entries
             }
@@ -658,17 +742,32 @@ class EventsSessionProcessor(
     private fun handleAcknowledgeSucceeded(ackEvent: Event) {
         if (!_state.value.access.eventsRead || accessFence.value.denied) return
         val newPending = currentOverlay.pendingAckIds - ackEvent.id
-        val idx = snapshotItems.indexOfFirst { it.id == ackEvent.id }
-        if (idx != -1) {
-            val cur = snapshotItems[idx]
-            if (ackEvent.classificationVersion >= cur.classificationVersion) {
-                snapshotItems[idx] = ackEvent
-            }
-        }
+
+        val existingSnapshot = snapshotItems.firstOrNull { it.id == ackEvent.id }
         val existingEntry = currentOverlay.entries[ackEvent.id]
+        val currentEvent = existingEntry?.event ?: existingSnapshot
+
+        val finalEvent =
+            if (currentEvent != null) {
+                EventMerger.merge(current = currentEvent, incoming = ackEvent)
+            } else {
+                ackEvent
+            }
+
+        val idx = snapshotItems.indexOfFirst { it.id == finalEvent.id }
+        if (idx != -1) {
+            snapshotItems[idx] = finalEvent
+        }
         val updatedEntries =
-            if (existingEntry != null && ackEvent.classificationVersion >= existingEntry.event.classificationVersion) {
-                currentOverlay.entries + (ackEvent.id to existingEntry.copy(event = ackEvent))
+            if (existingEntry != null) {
+                currentOverlay.entries +
+                    (
+                        finalEvent.id to
+                            existingEntry.copy(
+                                event = finalEvent,
+                                eventVersion = finalEvent.eventVersion,
+                            )
+                    )
             } else {
                 currentOverlay.entries
             }
@@ -694,6 +793,15 @@ class EventsSessionProcessor(
         if (isAccessInvalidated || !_state.value.access.eventsRead || accessFence.value.denied) return
 
         when (frame) {
+            is IncomingWsFrame.MalformedCommit -> {
+                if (frame.replayId != null && frame.replayId <= maxClosedReplayGeneration) {
+                    return
+                }
+                isRebootstrapping = true
+                bufferReplayId = sequenceProcessor.currentReplayId
+                rebootstrapBuffer.clear()
+                onTriggerRebootstrap()
+            }
             is IncomingWsFrame.TenantCommit -> {
                 val commit = frame.frame
                 if (commit.replayId <= maxClosedReplayGeneration) {
@@ -701,6 +809,10 @@ class EventsSessionProcessor(
                 }
 
                 if (!commit.validateEnvelope()) {
+                    isRebootstrapping = true
+                    bufferReplayId = sequenceProcessor.currentReplayId
+                    rebootstrapBuffer.clear()
+                    onTriggerRebootstrap()
                     return
                 }
 
@@ -845,7 +957,6 @@ class EventsSessionProcessor(
                     event = event,
                     query = query,
                     snapshotItems = snapshotItems,
-                    isCreated = true,
                 )
             tentativeOverlay = newOverlay
         }
@@ -858,7 +969,6 @@ class EventsSessionProcessor(
                     event = event,
                     query = query,
                     snapshotItems = snapshotItems,
-                    isCreated = false,
                 )
             tentativeOverlay = newOverlay
         }

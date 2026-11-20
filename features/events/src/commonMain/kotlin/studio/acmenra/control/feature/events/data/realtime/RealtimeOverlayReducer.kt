@@ -62,20 +62,28 @@ object RealtimeOverlayReducer {
         event: Event,
         query: EventsQuery,
         snapshotItems: List<Event>,
-        isCreated: Boolean,
     ): Pair<RealtimeOverlay, OverlayMembership> {
         val existingEntry = currentOverlay.entries[event.id]
-        if (existingEntry != null && existingEntry.eventVersion > event.eventVersion) {
-            // Out of order / older version ignored
-            return currentOverlay to existingEntry.membership
-        }
-
         val existingInSnapshot = snapshotItems.firstOrNull { it.id == event.id }
-        if (existingInSnapshot != null && existingInSnapshot.eventVersion > event.eventVersion) {
+        val currentEvent = existingEntry?.event ?: existingInSnapshot
+
+        if (currentEvent != null &&
+            currentEvent.eventVersion > event.eventVersion &&
+            currentEvent.classificationVersion >= event.classificationVersion &&
+            currentEvent.acknowledgementVersion >= event.acknowledgementVersion
+        ) {
+            // Strictly older frame across all versions: ignored
             return currentOverlay to (existingEntry?.membership ?: OverlayMembership.INCLUDED)
         }
 
-        val matches = matchesFilter(event, query.filter)
+        val effectiveEvent =
+            if (currentEvent != null) {
+                EventMerger.merge(current = currentEvent, incoming = event)
+            } else {
+                event
+            }
+
+        val matches = matchesFilter(effectiveEvent, query.filter)
         val membership =
             when {
                 !matches -> OverlayMembership.REMOVED
@@ -86,8 +94,8 @@ object RealtimeOverlayReducer {
                 else -> {
                     val oldestSnapshot = snapshotItems.last()
                     val newestSnapshot = snapshotItems.first()
-                    val cmpNewest = compareEvents(event, newestSnapshot, query.filter.searchId)
-                    val cmpOldest = compareEvents(event, oldestSnapshot, query.filter.searchId)
+                    val cmpNewest = compareEvents(effectiveEvent, newestSnapshot, query.filter.searchId)
+                    val cmpOldest = compareEvents(effectiveEvent, oldestSnapshot, query.filter.searchId)
 
                     when {
                         // Newer than newest visible item -> queue as pending newer
@@ -101,11 +109,11 @@ object RealtimeOverlayReducer {
             }
 
         val newEntries = currentOverlay.entries.toMutableMap()
-        newEntries[event.id] =
+        newEntries[effectiveEvent.id] =
             OverlayEntry(
-                eventId = event.id,
-                event = event,
-                eventVersion = event.eventVersion,
+                eventId = effectiveEvent.id,
+                event = effectiveEvent,
+                eventVersion = effectiveEvent.eventVersion,
                 membership = membership,
             )
 

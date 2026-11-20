@@ -208,60 +208,95 @@ class EventsFeedSessionImpl(
 
         bootstrapJob =
             sessionScope.launch {
-                val generation = nextBootstrapGeneration()
-                try {
-                    if (!canReadEvents()) return@launch
-                    val bootstrapDto = remoteDataSource.getBootstrap(companyId, query, limit = 50)
-                    if (!canReadEvents()) return@launch
-                    val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
-                    consecutiveHttpFailures = 0
-                    val applyResult = processor.installBootstrap(bootstrap, generation)
-                    if (applyResult is BootstrapApplyResult.Applied && canReadEvents()) {
-                        connectWebSocket(afterSequence = processor.getAsOfSequence(), replayId = applyResult.replayId)
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: EventsApiException.SnapshotTooLarge) {
-                    consecutiveHttpFailures++
-                    checkHttpFailuresNotice()
-                    val err =
-                        EventsInitialLoadError.SnapshotTooLarge(
-                            maxItems = e.maxItems,
-                            suggestedFrom =
-                                e.suggestedFrom?.let {
-                                    runCatching {
-                                        kotlin.time.Instant.parse(it)
-                                    }.getOrNull()
-                                },
-                            suggestedTo =
-                                e.suggestedTo?.let {
-                                    runCatching {
-                                        kotlin.time.Instant.parse(it)
-                                    }.getOrNull()
-                                },
-                        )
-                    processor.dispatch(SessionCommand.InitialLoadFailed(err, generation = generation))
-                } catch (e: EventsApiException.FilterInvalid) {
-                    consecutiveHttpFailures++
-                    checkHttpFailuresNotice()
-                    processor.dispatch(
-                        SessionCommand.InitialLoadFailed(
-                            EventsInitialLoadError.InvalidFilter(e.invalidFields),
-                            generation = generation,
-                        ),
-                    )
-                } catch (e: Throwable) {
-                    consecutiveHttpFailures++
-                    checkHttpFailuresNotice()
-                    val err =
-                        if (e.message?.contains("403") == true || e.message?.contains("AccessDenied") == true) {
-                            EventsInitialLoadError.AccessDenied
-                        } else if (e.message?.contains("Network") == true || !isOnline) {
-                            EventsInitialLoadError.Network
-                        } else {
-                            EventsInitialLoadError.Server(e.message)
+                var attempt = 1
+                val maxAttempts = 4
+                while (isActive && attempt <= maxAttempts && canReadEvents()) {
+                    val generation = nextBootstrapGeneration()
+                    try {
+                        if (!canReadEvents()) return@launch
+                        val bootstrapDto = remoteDataSource.getBootstrap(companyId, query, limit = 50)
+                        if (!canReadEvents()) return@launch
+                        val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
+                        consecutiveHttpFailures = 0
+                        val applyResult = processor.installBootstrap(bootstrap, generation)
+                        when (applyResult) {
+                            is BootstrapApplyResult.Applied -> {
+                                if (canReadEvents()) {
+                                    connectWebSocket(
+                                        afterSequence = processor.getAsOfSequence(),
+                                        replayId = applyResult.replayId,
+                                    )
+                                }
+                                return@launch
+                            }
+                            is BootstrapApplyResult.RetryRequired -> {
+                                attempt++
+                                if (attempt > maxAttempts) {
+                                    processor.dispatch(
+                                        SessionCommand.InitialLoadFailed(
+                                            EventsInitialLoadError.Server("Bootstrap retry attempts exhausted"),
+                                            generation = generation,
+                                        ),
+                                    )
+                                    return@launch
+                                }
+                                val backoffMs = (1L shl (attempt - 1)) * 500L + Random.nextLong(50, 200)
+                                delay(backoffMs)
+                            }
+                            is BootstrapApplyResult.Stale -> {
+                                return@launch
+                            }
                         }
-                    processor.dispatch(SessionCommand.InitialLoadFailed(err, generation = generation))
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: EventsApiException.PermissionDenied) {
+                        processor.dispatch(
+                            SessionCommand.InitialLoadFailed(
+                                EventsInitialLoadError.AccessDenied,
+                                generation = generation,
+                            ),
+                        )
+                        handleEventsReadRevoked()
+                        return@launch
+                    } catch (e: EventsApiException.SnapshotTooLarge) {
+                        val err =
+                            EventsInitialLoadError.SnapshotTooLarge(
+                                maxItems = e.maxItems,
+                                suggestedFrom =
+                                    e.suggestedFrom?.let {
+                                        runCatching {
+                                            kotlin.time.Instant.parse(it)
+                                        }.getOrNull()
+                                    },
+                                suggestedTo =
+                                    e.suggestedTo?.let {
+                                        runCatching {
+                                            kotlin.time.Instant.parse(it)
+                                        }.getOrNull()
+                                    },
+                            )
+                        processor.dispatch(SessionCommand.InitialLoadFailed(err, generation = generation))
+                        return@launch
+                    } catch (e: EventsApiException.FilterInvalid) {
+                        processor.dispatch(
+                            SessionCommand.InitialLoadFailed(
+                                EventsInitialLoadError.InvalidFilter(e.invalidFields),
+                                generation = generation,
+                            ),
+                        )
+                        return@launch
+                    } catch (e: Throwable) {
+                        consecutiveHttpFailures++
+                        checkHttpFailuresNotice()
+                        val err =
+                            if (!isOnline) {
+                                EventsInitialLoadError.Network
+                            } else {
+                                EventsInitialLoadError.Server(e.message)
+                            }
+                        processor.dispatch(SessionCommand.InitialLoadFailed(err, generation = generation))
+                        return@launch
+                    }
                 }
             }
     }
@@ -323,6 +358,10 @@ class EventsFeedSessionImpl(
                         }
                     } catch (e: CancellationException) {
                         throw e
+                    } catch (e: EventsApiException.PermissionDenied) {
+                        processor.dispatch(SessionCommand.RebootstrapStateChanged(RebootstrapState.Idle))
+                        handleEventsReadRevoked()
+                        return@launch
                     } catch (e: Throwable) {
                         consecutiveHttpFailures++
                         checkHttpFailuresNotice()
@@ -556,6 +595,10 @@ class EventsFeedSessionImpl(
                 } catch (e: CancellationException) {
                     processor.dispatch(SessionCommand.SetLoadingNextPage(false))
                     throw e
+                } catch (e: EventsApiException.PermissionDenied) {
+                    processor.dispatch(SessionCommand.SetLoadingNextPage(false))
+                    handleEventsReadRevoked()
+                    return@launch
                 } catch (e: EventsApiException.SnapshotExpired) {
                     processor.dispatch(SessionCommand.PaginationFailed(EventsPaginationError.SnapshotExpired))
                     if (canReadEvents()) {

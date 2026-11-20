@@ -463,37 +463,43 @@ class EventsViewModel(
         markErroneousJob?.cancel()
         markErroneousJob =
             viewModelScope.launch {
-                val idempotencyKey =
-                    kotlin.uuid.Uuid
-                        .random()
-                        .toString()
-                val result =
-                    markEventErroneousUseCase(
-                        companyId = requestCompanyId,
-                        eventId = targetEventId,
-                        expectedClassificationVersion = targetVersion,
-                        idempotencyKey = idempotencyKey,
-                    )
+                try {
+                    val idempotencyKey =
+                        kotlin.uuid.Uuid
+                            .random()
+                            .toString()
+                    val result =
+                        markEventErroneousUseCase(
+                            companyId = requestCompanyId,
+                            eventId = targetEventId,
+                            expectedClassificationVersion = targetVersion,
+                            idempotencyKey = idempotencyKey,
+                        )
 
-                if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
-                    return@launch
-                }
-                when (result) {
-                    is EventsOperationResult.Success -> {
-                        requestSession.applyEventMutationResult(result.data)
-                        val activeSession = feedSession
-                        if (activeSession != null && activeSession !== requestSession) {
-                            activeSession.applyEventMutationResult(result.data)
-                        }
-                        _state.update { it.copy(isMarkingErroneous = false) }
+                    if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
+                        return@launch
                     }
-                    is EventsOperationResult.Failure -> {
-                        _state.update {
-                            it.copy(
-                                isMarkingErroneous = false,
-                                mutationErrorNotice = mapMutationErrorToResource(result.error),
-                            )
+                    when (result) {
+                        is EventsOperationResult.Success -> {
+                            requestSession.applyEventMutationResult(result.data)
+                            val activeSession = feedSession
+                            if (activeSession != null && activeSession !== requestSession) {
+                                activeSession.applyEventMutationResult(result.data)
+                            }
                         }
+                        is EventsOperationResult.Failure -> {
+                            _state.update {
+                                it.copy(
+                                    mutationErrorNotice = mapMutationErrorToResource(result.error),
+                                )
+                            }
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } finally {
+                    if (currentCompanyGen == companyGeneration) {
+                        _state.update { it.copy(isMarkingErroneous = false) }
                     }
                 }
             }
@@ -567,9 +573,29 @@ class EventsViewModel(
                         activeExportKey = null
                         activeExportRequest = null
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Throwable) {
-                    activeExportKey = null
-                    activeExportRequest = null
+                    val isDefiniteFailure =
+                        when (e) {
+                            is EventsApiException.PermissionDenied -> true
+                            is EventsApiException.SnapshotTooLarge -> true
+                            is EventsApiException.ExportExpired -> true
+                            is EventsApiException.FilterInvalid -> true
+                            is EventsApiException.Generic -> !e.retryable
+                            else -> {
+                                val msg = e.message ?: ""
+                                msg.contains("400") ||
+                                    msg.contains("401") ||
+                                    msg.contains("403") ||
+                                    msg.contains("404") ||
+                                    msg.contains("409")
+                            }
+                        }
+                    if (isDefiniteFailure) {
+                        activeExportKey = null
+                        activeExportRequest = null
+                    }
                     if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
                         return@launch
                     }
@@ -625,6 +651,8 @@ class EventsViewModel(
                             activeExportRequest = null
                             return@launch
                         }
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: EventsApiException.ExportExpired) {
                         activeExportKey = null
                         activeExportRequest = null
@@ -691,6 +719,8 @@ class EventsViewModel(
                     if (!saved) {
                         _state.update { it.copy(exportError = Res.string.events_export_download_error) }
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Throwable) {
                     if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
                         _state.update { it.copy(exportError = mapExportErrorToResource(e)) }

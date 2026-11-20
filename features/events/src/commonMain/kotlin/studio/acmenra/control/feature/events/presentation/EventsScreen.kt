@@ -171,7 +171,7 @@ fun EventsScreen(
             remember(state.summary?.businessTimezone) {
                 state.summary?.businessTimezone?.let {
                     runCatching { TimeZone.of(it) }.getOrNull()
-                } ?: TimeZone.currentSystemDefault()
+                }
             }
 
         val topBarActions: @Composable RowScope.() -> Unit =

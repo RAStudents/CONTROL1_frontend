@@ -55,7 +55,7 @@ fun EventCard(
     onClick: () -> Unit,
     onAcknowledge: () -> Unit,
     modifier: Modifier = Modifier,
-    timeZone: TimeZone = TimeZone.currentSystemDefault(),
+    timeZone: TimeZone? = null,
 ) {
     val containerColor =
         if (isSelected) {
@@ -134,11 +134,15 @@ fun EventCard(
                     )
 
                     // Time
-                    val local = event.occurredAt.toLocalDateTime(timeZone)
                     val timeStr =
-                        "${local.hour.toString().padStart(2, '0')}:${
-                            local.minute.toString().padStart(2, '0')
-                        }:${local.second.toString().padStart(2, '0')}"
+                        if (timeZone != null) {
+                            val local = event.occurredAt.toLocalDateTime(timeZone)
+                            "${local.hour.toString().padStart(2, '0')}:${
+                                local.minute.toString().padStart(2, '0')
+                            }:${local.second.toString().padStart(2, '0')}"
+                        } else {
+                            "--:--:--"
+                        }
                     Text(
                         text = timeStr,
                         style = MaterialTheme.typography.labelSmall,

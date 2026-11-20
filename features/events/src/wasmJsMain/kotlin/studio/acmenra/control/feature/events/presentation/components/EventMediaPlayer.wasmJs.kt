@@ -1,7 +1,9 @@
 package studio.acmenra.control.feature.events.presentation.components
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.FilledIconButton
@@ -10,12 +12,20 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import io.ktor.client.request.get
+import org.jetbrains.compose.resources.decodeToImageBitmap
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
 import studio.acmenra.control.core.ui.generated.resources.Res
@@ -92,9 +102,26 @@ actual fun EventMediaPlayer(
     onDownloadClick: (() -> Unit)?,
 ) {
     var activeVideoId by remember(videoUrl) { mutableStateOf<String?>(null) }
+    var previewBitmap by remember(previewUrl) { mutableStateOf<ImageBitmap?>(null) }
 
     val isValidHttpsPreview = previewUrl?.startsWith("https://", ignoreCase = true) == true
     val isValidHttpsVideo = videoUrl?.startsWith("https://", ignoreCase = true) == true
+
+    LaunchedEffect(previewUrl, isValidHttpsPreview) {
+        if (isValidHttpsPreview && previewUrl != null) {
+            val client = HttpClient()
+            try {
+                val bytes: ByteArray = client.get(previewUrl).body()
+                previewBitmap = bytes.decodeToImageBitmap()
+            } catch (_: Throwable) {
+                previewBitmap = null
+            } finally {
+                client.close()
+            }
+        } else {
+            previewBitmap = null
+        }
+    }
 
     DisposableEffect(videoUrl) {
         onDispose {
@@ -112,12 +139,24 @@ actual fun EventMediaPlayer(
                 ),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            painter = painterResource(Res.drawable.ic_videocam),
-            contentDescription = stringResource(Res.string.events_media_preview_desc),
-            modifier = Modifier.size(AmberDimens.ListIconCircle),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if (previewBitmap != null) {
+            Image(
+                bitmap = previewBitmap!!,
+                contentDescription = stringResource(Res.string.events_media_preview_desc),
+                contentScale = ContentScale.Crop,
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(AmberCorners.Large)),
+            )
+        } else {
+            Icon(
+                painter = painterResource(Res.drawable.ic_videocam),
+                contentDescription = stringResource(Res.string.events_media_preview_desc),
+                modifier = Modifier.size(AmberDimens.ListIconCircle),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
 
         if (isValidHttpsVideo && !videoUrl.isNullOrBlank()) {
             FilledIconButton(

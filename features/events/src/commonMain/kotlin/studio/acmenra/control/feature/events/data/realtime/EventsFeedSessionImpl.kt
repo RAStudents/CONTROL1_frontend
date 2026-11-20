@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.ui.generated.resources.Res
@@ -68,6 +70,9 @@ class EventsFeedSessionImpl(
 
     private var connectionGeneration: Long = 0L
     private var bootstrapGeneration: Long = 0L
+    private val bootstrapGenMutex = Mutex()
+
+    private suspend fun nextBootstrapGeneration(): Long = bootstrapGenMutex.withLock { ++bootstrapGeneration }
 
     private var lastUsedAccessToken: String? = null
     private var isClosed = false
@@ -95,6 +100,9 @@ class EventsFeedSessionImpl(
             },
             onTokenRefreshNeeded = {
                 handleTokenRefreshNeeded()
+            },
+            onSessionRevoked = {
+                handleSessionRevoked()
             },
             onAccessInvalidated = { reason, targetCompanyId ->
                 handleTerminalAccessInvalidated(reason, targetCompanyId)
@@ -166,17 +174,17 @@ class EventsFeedSessionImpl(
     private fun triggerBootstrap() {
         if (isClosed) return
         bootstrapJob?.cancel()
-        val generation = ++bootstrapGeneration
 
         bootstrapJob =
             sessionScope.launch {
+                val generation = nextBootstrapGeneration()
                 try {
                     val bootstrapDto = remoteDataSource.getBootstrap(companyId, query, limit = 50)
                     val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
                     consecutiveHttpFailures = 0
                     val applyResult = processor.installBootstrap(bootstrap, generation)
                     if (applyResult is BootstrapApplyResult.Applied) {
-                        connectWebSocket(afterSequence = bootstrap.streamCursor, replayId = applyResult.replayId)
+                        connectWebSocket(afterSequence = processor.getAsOfSequence(), replayId = applyResult.replayId)
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -239,10 +247,15 @@ class EventsFeedSessionImpl(
                         val bootstrapDto = remoteDataSource.getBootstrap(companyId, query, limit = 50)
                         val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
                         consecutiveHttpFailures = 0
-                        val applyResult = processor.installBootstrap(bootstrap, ++bootstrapGeneration)
+                        val generation = nextBootstrapGeneration()
+                        val applyResult = processor.installBootstrap(bootstrap, generation)
                         when (applyResult) {
                             is BootstrapApplyResult.Applied -> {
                                 processor.dispatch(SessionCommand.RebootstrapStateChanged(RebootstrapState.Idle))
+                                connectWebSocket(
+                                    afterSequence = processor.getAsOfSequence(),
+                                    replayId = applyResult.replayId,
+                                )
                                 return@launch
                             }
                             is BootstrapApplyResult.RetryRequired -> {
@@ -267,6 +280,7 @@ class EventsFeedSessionImpl(
                                 delay(backoffMs)
                             }
                             is BootstrapApplyResult.Stale -> {
+                                processor.dispatch(SessionCommand.RebootstrapStateChanged(RebootstrapState.Idle))
                                 return@launch
                             }
                         }
@@ -420,10 +434,25 @@ class EventsFeedSessionImpl(
         connectionStateJob?.cancel()
         bootstrapJob?.cancel()
         rebootstrapJob?.cancel()
+        processor.close()
         sessionScope.launch {
             webSocketDataSource.disconnect()
             accessInvalidationListener?.onAccessInvalidated(reason, targetCompanyId ?: companyId)
         }
+    }
+
+    private suspend fun handleSessionRevoked() {
+        isClosed = true
+        connectJob?.cancel()
+        wsFramesJob?.cancel()
+        connectivityJob?.cancel()
+        connectionStateJob?.cancel()
+        bootstrapJob?.cancel()
+        rebootstrapJob?.cancel()
+        processor.close()
+        webSocketDataSource.disconnect()
+        sessionManager.logout()
+        accessInvalidationListener?.onAccessInvalidated("SESSION_REVOKED", null)
     }
 
     override fun loadNextPage() {
@@ -480,23 +509,41 @@ class EventsFeedSessionImpl(
         processor.dispatch(SessionCommand.AcknowledgeSucceeded(event))
     }
 
+    override fun applyEventMutationResult(event: Event) {
+        processor.applyEventMutationResult(event)
+    }
+
     override fun updateAccessCapabilities(access: EventsAccessCapabilities) {
+        val wasRead = state.value.access.eventsRead
         processor.dispatch(SessionCommand.AccessUpdated(access))
+        if (wasRead && !access.eventsRead) {
+            connectJob?.cancel()
+            sessionScope.launch {
+                webSocketDataSource.disconnect()
+            }
+        } else if (!wasRead && access.eventsRead) {
+            triggerBootstrap()
+        }
     }
 
     override fun close() {
         if (isClosed) return
         isClosed = true
-        processor.dispatch(SessionCommand.Close)
+        processor.close()
         connectJob?.cancel()
         wsFramesJob?.cancel()
         connectivityJob?.cancel()
         connectionStateJob?.cancel()
         bootstrapJob?.cancel()
         rebootstrapJob?.cancel()
-        CoroutineScope(Dispatchers.Default + NonCancellable).launch {
-            webSocketDataSource.disconnect()
+        sessionScope.launch {
+            kotlinx.coroutines.withContext(NonCancellable) {
+                try {
+                    webSocketDataSource.disconnect()
+                } finally {
+                    sessionJob.cancel()
+                }
+            }
         }
-        sessionJob.cancel()
     }
 }

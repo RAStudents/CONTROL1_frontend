@@ -62,7 +62,7 @@ fun EventsList(
     onLoadNextPage: () -> Unit,
     onViewportAtTop: () -> Unit,
     modifier: Modifier = Modifier,
-    timeZone: TimeZone = TimeZone.currentSystemDefault(),
+    timeZone: TimeZone? = null,
 ) {
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
@@ -101,7 +101,8 @@ fun EventsList(
     // Group events by business date
     val groupedEvents =
         remember(events, timeZone) {
-            events.groupBy { it.occurredAt.toLocalDateTime(timeZone).date }
+            val tz = timeZone ?: TimeZone.UTC
+            events.groupBy { it.occurredAt.toLocalDateTime(tz).date }
         }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -194,28 +195,36 @@ fun EventsList(
 @Composable
 private fun DateGroupHeader(
     date: LocalDate,
-    timeZone: TimeZone,
+    timeZone: TimeZone?,
     modifier: Modifier = Modifier,
 ) {
-    val today =
-        Clock.System
-            .now()
-            .toLocalDateTime(timeZone)
-            .date
-    val yesterday = LocalDate.fromEpochDays(today.toEpochDays() - 1)
-
     val dateTitle =
-        when (date) {
-            today -> stringResource(Res.string.events_filter_date_today)
-            yesterday -> stringResource(Res.string.events_filter_date_yesterday)
-            else -> {
-                val d = date.day.toString().padStart(2, '0')
-                val m =
-                    date.month.number
-                        .toString()
-                        .padStart(2, '0')
-                "$d.$m.${date.year}"
+        if (timeZone != null) {
+            val today =
+                Clock.System
+                    .now()
+                    .toLocalDateTime(timeZone)
+                    .date
+            val yesterday = LocalDate.fromEpochDays(today.toEpochDays() - 1)
+            when (date) {
+                today -> stringResource(Res.string.events_filter_date_today)
+                yesterday -> stringResource(Res.string.events_filter_date_yesterday)
+                else -> {
+                    val d = date.day.toString().padStart(2, '0')
+                    val m =
+                        date.month.number
+                            .toString()
+                            .padStart(2, '0')
+                    "$d.$m.${date.year}"
+                }
             }
+        } else {
+            val d = date.day.toString().padStart(2, '0')
+            val m =
+                date.month.number
+                    .toString()
+                    .padStart(2, '0')
+            "$d.$m.${date.year}"
         }
 
     Surface(

@@ -54,7 +54,7 @@ fun EventsDatePickerDialog(
     onApply: (DateSelection) -> Unit,
     onReset: () -> Unit,
     modifier: Modifier = Modifier,
-    timeZone: TimeZone = TimeZone.currentSystemDefault(),
+    timeZone: TimeZone? = null,
 ) {
     var selectedPreset by remember { mutableStateOf<DateSelection?>(null) }
     val datePickerState = rememberDatePickerState()
@@ -79,7 +79,7 @@ fun EventsDatePickerDialog(
 
                 Spacer(modifier = Modifier.height(AmberDimens.GapMedium))
 
-                // Quick presets
+                // Quick presets (enabled only when business timezone is loaded)
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(AmberDimens.GapSmall),
                     verticalArrangement = Arrangement.spacedBy(AmberDimens.GapSmall),
@@ -92,6 +92,7 @@ fun EventsDatePickerDialog(
                             val today = currentLocalDate(timeZone)
                             selectedPreset = DateSelection.Single(today)
                         },
+                        enabled = timeZone != null,
                         label = { Text(stringResource(Res.string.events_filter_date_today)) },
                     )
                     FilterChip(
@@ -102,6 +103,7 @@ fun EventsDatePickerDialog(
                             val yesterday = currentLocalDate(timeZone).minusDays(1)
                             selectedPreset = DateSelection.Single(yesterday)
                         },
+                        enabled = timeZone != null,
                         label = { Text(stringResource(Res.string.events_filter_date_yesterday)) },
                     )
                     FilterChip(
@@ -111,6 +113,7 @@ fun EventsDatePickerDialog(
                             val from = today.minusDays(6)
                             selectedPreset = DateSelection.Range(from, today)
                         },
+                        enabled = timeZone != null,
                         label = { Text(stringResource(Res.string.events_filter_date_last_7_days)) },
                     )
                 }
@@ -143,13 +146,14 @@ fun EventsDatePickerDialog(
                         Spacer(modifier = Modifier.width(AmberDimens.GapSmall))
                         TextButton(
                             onClick = {
+                                val tz = timeZone ?: TimeZone.UTC
                                 val result =
                                     selectedPreset ?: datePickerState.selectedDateMillis?.let { millis ->
                                         val localDate =
                                             Instant
                                                 .fromEpochMilliseconds(
                                                     millis,
-                                                ).toLocalDateTime(timeZone)
+                                                ).toLocalDateTime(tz)
                                                 .date
                                         DateSelection.Single(localDate)
                                     } ?: DateSelection.All
@@ -166,21 +170,21 @@ fun EventsDatePickerDialog(
     }
 }
 
-private fun currentLocalDate(timeZone: TimeZone): LocalDate =
+private fun currentLocalDate(timeZone: TimeZone?): LocalDate =
     Clock.System
         .now()
-        .toLocalDateTime(timeZone)
+        .toLocalDateTime(timeZone ?: TimeZone.UTC)
         .date
 
 private fun isToday(
     date: LocalDate,
-    timeZone: TimeZone,
-): Boolean = date == currentLocalDate(timeZone)
+    timeZone: TimeZone?,
+): Boolean = timeZone != null && date == currentLocalDate(timeZone)
 
 private fun isYesterday(
     date: LocalDate,
-    timeZone: TimeZone,
-): Boolean = date == currentLocalDate(timeZone).minusDays(1)
+    timeZone: TimeZone?,
+): Boolean = timeZone != null && date == currentLocalDate(timeZone).minusDays(1)
 
 private fun LocalDate.minusDays(days: Int): LocalDate {
     val epochDays = toEpochDays()

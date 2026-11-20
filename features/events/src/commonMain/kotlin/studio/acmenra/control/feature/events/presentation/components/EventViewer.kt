@@ -73,7 +73,7 @@ fun EventViewer(
     onCloseCompact: (() -> Unit)? = null,
     onOpenVideo: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
-    timeZone: TimeZone = TimeZone.currentSystemDefault(),
+    timeZone: TimeZone? = null,
     confirmationTarget: ErroneousConfirmationTarget? = null,
 ) {
     if (event == null) {
@@ -205,14 +205,18 @@ fun EventViewer(
             }
 
             // Occurred at
-            val localOccurred = event.occurredAt.toLocalDateTime(timeZone)
-            val monthNum = (localOccurred.month.ordinal + 1).toString().padStart(2, '0')
             val occurredStr =
-                "${localOccurred.day.toString().padStart(2, '0')}.$monthNum.${localOccurred.year} ${
-                    localOccurred.hour.toString().padStart(2, '0')
-                }:${localOccurred.minute.toString().padStart(2, '0')}:${
-                    localOccurred.second.toString().padStart(2, '0')
-                }"
+                if (timeZone != null) {
+                    val localOccurred = event.occurredAt.toLocalDateTime(timeZone)
+                    val monthNum = (localOccurred.month.ordinal + 1).toString().padStart(2, '0')
+                    "${localOccurred.day.toString().padStart(2, '0')}.$monthNum.${localOccurred.year} ${
+                        localOccurred.hour.toString().padStart(2, '0')
+                    }:${localOccurred.minute.toString().padStart(2, '0')}:${
+                        localOccurred.second.toString().padStart(2, '0')
+                    }"
+                } else {
+                    "--.--.---- --:--:--"
+                }
             DetailRow(
                 label = stringResource(Res.string.events_viewer_occurred_at),
                 value = occurredStr,

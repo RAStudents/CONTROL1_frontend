@@ -1,6 +1,8 @@
 package studio.acmenra.control.feature.events.data.repository
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import studio.acmenra.control.core.network.auth.AccessInvalidationListener
@@ -48,7 +50,7 @@ class EventsRepositoryImpl(
     )
 
     private val filterOptionsMutex = Mutex()
-    private val filterCache = mutableMapOf<String, CachedFilterOptions>()
+    private val filterCache = MutableStateFlow<Map<String, CachedFilterOptions>>(emptyMap())
 
     private data class CachedFilterOptions(
         val options: EventsFilterOptions,
@@ -56,7 +58,7 @@ class EventsRepositoryImpl(
     )
 
     override fun invalidateFilterCache(companyId: String) {
-        filterCache.remove(companyId)
+        filterCache.update { it - companyId }
     }
 
     override fun openFeedSession(
@@ -100,7 +102,7 @@ class EventsRepositoryImpl(
 
     override suspend fun getFilterOptions(companyId: String): EventsFilterOptions {
         filterOptionsMutex.withLock {
-            val cached = filterCache[companyId]
+            val cached = filterCache.value[companyId]
             val result =
                 remoteDataSource.getFilterOptions(
                     companyId = companyId,
@@ -110,7 +112,7 @@ class EventsRepositoryImpl(
             return when (result) {
                 is FilterOptionsFetchResult.Success -> {
                     val mapped = EventsDtoMapper.mapFilterOptions(result.options)
-                    filterCache[companyId] = CachedFilterOptions(options = mapped, etag = result.etag)
+                    filterCache.update { it + (companyId to CachedFilterOptions(options = mapped, etag = result.etag)) }
                     mapped
                 }
                 FilterOptionsFetchResult.NotModified -> {
@@ -121,7 +123,10 @@ class EventsRepositoryImpl(
                         val freshResult = remoteDataSource.getFilterOptions(companyId, ifNoneMatchEtag = null)
                         if (freshResult is FilterOptionsFetchResult.Success) {
                             val mapped = EventsDtoMapper.mapFilterOptions(freshResult.options)
-                            filterCache[companyId] = CachedFilterOptions(options = mapped, etag = freshResult.etag)
+                            filterCache.update {
+                                it +
+                                    (companyId to CachedFilterOptions(options = mapped, etag = freshResult.etag))
+                            }
                             mapped
                         } else {
                             throw IllegalStateException(

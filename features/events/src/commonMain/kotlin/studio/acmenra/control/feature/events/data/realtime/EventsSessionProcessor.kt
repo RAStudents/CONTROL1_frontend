@@ -88,6 +88,10 @@ sealed interface SessionCommand {
         val event: Event,
     ) : SessionCommand
 
+    data class EventMutationApplied(
+        val event: Event,
+    ) : SessionCommand
+
     data class AccessUpdated(
         val access: EventsAccessCapabilities,
     ) : SessionCommand
@@ -122,6 +126,7 @@ class EventsSessionProcessor(
     private val onSendReplayRequest: suspend (replayId: Long, afterSequence: Long) -> Unit,
     private val onTriggerRebootstrap: suspend () -> Unit,
     private val onTokenRefreshNeeded: suspend () -> Unit,
+    private val onSessionRevoked: suspend () -> Unit = {},
     private val onAccessInvalidated: (reason: String, companyId: String?) -> Unit,
     private val onFilterOptionsUpdated: ((EventsFilterOptionsDto) -> Unit)? = null,
     private val timeSource: TimeSource.Monotonic = TimeSource.Monotonic,
@@ -150,7 +155,15 @@ class EventsSessionProcessor(
                 if (!isActive) break
                 try {
                     processCommand(command)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    if (command is SessionCommand.InstallBootstrap) {
+                        command.response.cancel(e)
+                    }
+                    throw e
                 } catch (e: Throwable) {
+                    if (command is SessionCommand.InstallBootstrap) {
+                        command.response.completeExceptionally(e)
+                    }
                     if (command is SessionCommand.Close) break
                     // Prevent uncaught exceptions from killing the command processing loop
                     isRebootstrapping = true
@@ -164,6 +177,14 @@ class EventsSessionProcessor(
 
     fun dispatch(command: SessionCommand) {
         commandChannel.trySend(command)
+    }
+
+    fun close() {
+        commandChannel.close()
+    }
+
+    fun applyEventMutationResult(event: Event) {
+        dispatch(SessionCommand.EventMutationApplied(event))
     }
 
     fun startReplay(
@@ -184,13 +205,22 @@ class EventsSessionProcessor(
         generation: Long,
     ): BootstrapApplyResult {
         val deferred = CompletableDeferred<BootstrapApplyResult>()
-        dispatch(SessionCommand.InstallBootstrap(bootstrap, generation, deferred))
+        try {
+            commandChannel.send(SessionCommand.InstallBootstrap(bootstrap, generation, deferred))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            return BootstrapApplyResult.Stale
+        }
         return deferred.await()
     }
 
     private suspend fun processCommand(command: SessionCommand) {
         if (isAccessInvalidated && command !is SessionCommand.Close) {
             // Terminal state: ignore all frames and updates
+            if (command is SessionCommand.InstallBootstrap) {
+                command.response.complete(BootstrapApplyResult.Stale)
+            }
             return
         }
 
@@ -239,8 +269,29 @@ class EventsSessionProcessor(
                 _state.update { it.copy(realtimeOverlay = currentOverlay) }
             }
             is SessionCommand.AcknowledgeSucceeded -> handleAcknowledgeSucceeded(command.event)
+            is SessionCommand.EventMutationApplied -> handleEventMutationApplied(command.event)
             is SessionCommand.AccessUpdated -> {
-                _state.update { it.copy(access = command.access) }
+                if (!command.access.eventsRead) {
+                    snapshotItems.clear()
+                    currentOverlay = RealtimeOverlay()
+                    rebootstrapBuffer.clear()
+                    isRebootstrapping = false
+                    bufferReplayId = null
+                    _state.update {
+                        it.copy(
+                            access = command.access,
+                            visibleEvents = emptyList(),
+                            realtimeOverlay = RealtimeOverlay(),
+                            summary = null,
+                            snapshotTotalCount = 0,
+                            hasMore = false,
+                            pendingNewerCount = 0,
+                            pendingHistoryCount = 0,
+                        )
+                    }
+                } else {
+                    _state.update { it.copy(access = command.access) }
+                }
             }
             is SessionCommand.StartReplay -> {
                 sequenceProcessor.startReplay(command.replayId, command.afterSequence)
@@ -290,14 +341,16 @@ class EventsSessionProcessor(
         generation: Long,
         response: CompletableDeferred<BootstrapApplyResult>,
     ) {
-        if (generation < currentBootstrapGeneration) {
+        if (generation <= currentBootstrapGeneration) {
             response.complete(BootstrapApplyResult.Stale)
             return
         }
         currentBootstrapGeneration = generation
 
         snapshotItems.clear()
-        snapshotItems.addAll(bootstrap.page.items)
+        if (_state.value.access.eventsRead) {
+            snapshotItems.addAll(bootstrap.page.items)
+        }
         currentOverlay = RealtimeOverlay(pendingAckIds = currentOverlay.pendingAckIds)
         sequenceProcessor.resetSequence(bootstrap.streamCursor)
         nextCursor = bootstrap.page.nextCursor
@@ -406,6 +459,11 @@ class EventsSessionProcessor(
         page: EventsPage,
         snapshotId: String?,
     ) {
+        if (!_state.value.access.eventsRead) {
+            _state.update { it.copy(isLoadingNextPage = false) }
+            return
+        }
+
         if (snapshotId != null && snapshotId != _state.value.snapshotId) {
             // Discard page from outdated snapshot
             _state.update { it.copy(isLoadingNextPage = false) }
@@ -425,6 +483,37 @@ class EventsSessionProcessor(
                 hasMore = page.hasMore,
                 isLoadingNextPage = false,
                 paginationError = null,
+                pendingNewerCount = newerCount,
+                pendingHistoryCount = historyCount,
+            )
+        }
+    }
+
+    private fun handleEventMutationApplied(mutatedEvent: Event) {
+        val idx = snapshotItems.indexOfFirst { it.id == mutatedEvent.id }
+        if (idx != -1) {
+            val cur = snapshotItems[idx]
+            if (mutatedEvent.classificationVersion >= cur.classificationVersion) {
+                snapshotItems[idx] = mutatedEvent
+            }
+        }
+        val existingEntry = currentOverlay.entries[mutatedEvent.id]
+        val updatedEntries =
+            if (existingEntry != null &&
+                mutatedEvent.classificationVersion >= existingEntry.event.classificationVersion
+            ) {
+                currentOverlay.entries + (mutatedEvent.id to existingEntry.copy(event = mutatedEvent))
+            } else {
+                currentOverlay.entries
+            }
+
+        currentOverlay = currentOverlay.copy(entries = updatedEntries)
+        val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
+        val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
+        _state.update {
+            it.copy(
+                visibleEvents = visible,
+                realtimeOverlay = currentOverlay,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
             )
@@ -466,7 +555,7 @@ class EventsSessionProcessor(
     }
 
     private suspend fun handleWsFrame(frame: IncomingWsFrame) {
-        if (isAccessInvalidated) return
+        if (isAccessInvalidated || !_state.value.access.eventsRead) return
 
         when (frame) {
             is IncomingWsFrame.TenantCommit -> {
@@ -570,10 +659,12 @@ class EventsSessionProcessor(
                 }
             }
             is IncomingWsFrame.AuthRequired -> {
-                if (frame.frame.reason == "TOKEN_EXPIRED") {
-                    onTokenRefreshNeeded()
-                } else {
-                    _state.update { it.copy(connectionState = RealtimeConnectionState.FAILED) }
+                when (frame.frame.reason) {
+                    "TOKEN_EXPIRED" -> onTokenRefreshNeeded()
+                    "SESSION_REVOKED" -> onSessionRevoked()
+                    else -> {
+                        _state.update { it.copy(connectionState = RealtimeConnectionState.FAILED) }
+                    }
                 }
             }
             is IncomingWsFrame.AccessInvalidated -> {
@@ -602,6 +693,8 @@ class EventsSessionProcessor(
     }
 
     private fun applyCommit(commit: TenantCommitFrameDto) {
+        if (!_state.value.access.eventsRead) return
+
         // Two-phase atomic commit application:
         // 1. Calculate tentative new overlay and summary
         var tentativeOverlay = currentOverlay
@@ -634,10 +727,15 @@ class EventsSessionProcessor(
             tentativeOverlay = newOverlay
         }
 
+        val currentSummary = _state.value.summary
+        val newSummary = commit.summaryUpdated?.let { EventsDtoMapper.mapSummary(it) }
         val updatedSummary: EventsSummary? =
-            commit.summaryUpdated?.let {
-                EventsDtoMapper.mapSummary(it)
-            } ?: _state.value.summary
+            when {
+                newSummary == null -> currentSummary
+                currentSummary == null -> newSummary
+                newSummary.summaryAsOfSequence >= currentSummary.summaryAsOfSequence -> newSummary
+                else -> currentSummary
+            }
 
         // Notify filter options updated if present
         commit.filterOptionsUpdated?.let { optionsDto ->

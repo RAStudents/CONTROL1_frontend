@@ -7,7 +7,12 @@ import org.koin.dsl.module
 @JsFun(
     """(url) => {
     try {
-        window.open(url, '_blank', 'noopener,noreferrer');
+        var parsed = new URL(url);
+        if (parsed.protocol === 'https:' && parsed.hostname && parsed.hostname !== 'localhost') {
+            window.open(url, '_blank', 'noopener,noreferrer');
+        } else {
+            console.warn('Rejected non-https or invalid external media URL:', url);
+        }
     } catch (e) {
         console.error('Failed to open url:', e);
     }
@@ -17,7 +22,9 @@ private external fun openInNewTab(url: String)
 
 class WasmExternalMediaOpener : ExternalMediaOpener {
     override fun openMedia(url: String) {
-        openInNewTab(url)
+        if (url.startsWith("https://", ignoreCase = true)) {
+            openInNewTab(url)
+        }
     }
 }
 

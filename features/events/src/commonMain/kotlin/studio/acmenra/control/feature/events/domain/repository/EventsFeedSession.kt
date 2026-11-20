@@ -26,6 +26,8 @@ interface EventsFeedSession {
 
     fun applyAcknowledged(event: Event)
 
+    fun applyEventMutationResult(event: Event)
+
     fun retryRebootstrap()
 
     fun updateAccessCapabilities(access: EventsAccessCapabilities)

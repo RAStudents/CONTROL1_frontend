@@ -72,9 +72,11 @@ class EventsViewModel(
     private var exportObservationJob: Job? = null
     private var exportSubmissionJob: Job? = null
     private var downloadExportJob: Job? = null
-    private var acknowledgeJob: Job? = null
+    private val acknowledgeJobs = mutableMapOf<String, Job>()
     private var markErroneousJob: Job? = null
     private var filterOptionsJob: Job? = null
+    private var activeExportKey: String? = null
+    private var activeExportRequest: EventsExportRequest? = null
     private var companyGeneration: Long = 0L
     private var filterRequestGeneration: Long = 0L
     private var filterOptionsGeneration: Long = 0L
@@ -92,13 +94,16 @@ class EventsViewModel(
                 val shouldClearExport = !accessCapabilities.reportsExport
 
                 if (shouldClearReview) {
-                    acknowledgeJob?.cancel()
+                    acknowledgeJobs.values.forEach { it.cancel() }
+                    acknowledgeJobs.clear()
                     markErroneousJob?.cancel()
                 }
                 if (shouldClearExport) {
                     exportObservationJob?.cancel()
                     exportSubmissionJob?.cancel()
                     downloadExportJob?.cancel()
+                    activeExportKey = null
+                    activeExportRequest = null
                 }
 
                 _state.update {
@@ -128,9 +133,12 @@ class EventsViewModel(
         exportObservationJob?.cancel()
         exportSubmissionJob?.cancel()
         downloadExportJob?.cancel()
-        acknowledgeJob?.cancel()
+        acknowledgeJobs.values.forEach { it.cancel() }
+        acknowledgeJobs.clear()
         markErroneousJob?.cancel()
         filterOptionsJob?.cancel()
+        activeExportKey = null
+        activeExportRequest = null
         feedSession?.close()
         feedSession = null
 
@@ -359,29 +367,38 @@ class EventsViewModel(
 
     fun acknowledgeEvent(event: Event) {
         if (!_state.value.access.canAcknowledge || !event.canAcknowledge(_state.value.access)) return
-        if (_state.value.pendingAckIds.contains(event.id)) return
+        if (_state.value.pendingAckIds.contains(event.id) || acknowledgeJobs[event.id]?.isActive == true) return
         val currentCompanyGen = companyGeneration
         val requestCompanyId = _state.value.companyId
         val requestSession = feedSession ?: return
 
         requestSession.markOptimisticAckPending(event.id)
-        acknowledgeJob?.cancel()
-        acknowledgeJob =
+        val job =
             viewModelScope.launch {
-                val result = acknowledgeEventUseCase(requestCompanyId, event.id)
-                if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
-                    return@launch
-                }
-                when (result) {
-                    is EventsOperationResult.Success -> {
-                        requestSession.applyAcknowledged(result.data)
+                try {
+                    val result = acknowledgeEventUseCase(requestCompanyId, event.id)
+                    if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
+                        return@launch
                     }
-                    is EventsOperationResult.Failure -> {
+                    when (result) {
+                        is EventsOperationResult.Success -> {
+                            requestSession.applyAcknowledged(result.data)
+                        }
+                        is EventsOperationResult.Failure -> {
+                            requestSession.clearOptimisticAckPending(event.id)
+                            _state.update { it.copy(mutationErrorNotice = mapMutationErrorToResource(result.error)) }
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    if (currentCompanyGen == companyGeneration) {
                         requestSession.clearOptimisticAckPending(event.id)
-                        _state.update { it.copy(mutationErrorNotice = mapMutationErrorToResource(result.error)) }
                     }
+                    throw e
+                } finally {
+                    acknowledgeJobs.remove(event.id)
                 }
             }
+        acknowledgeJobs[event.id] = job
     }
 
     fun requestMarkErroneous(event: Event) {
@@ -403,16 +420,9 @@ class EventsViewModel(
         if (event != null) {
             requestMarkErroneous(event)
         } else {
-            if (!_state.value.access.canAcknowledge) return
+            // Do not fabricate expectedClassificationVersion; fail-closed
             _state.update {
-                it.copy(
-                    confirmationTarget =
-                        ErroneousConfirmationTarget(
-                            eventId = eventId,
-                            expectedClassificationVersion = 1L,
-                            eventTypeName = "",
-                        ),
-                )
+                it.copy(mutationErrorNotice = Res.string.events_mutation_conflict)
             }
         }
     }
@@ -426,12 +436,13 @@ class EventsViewModel(
         eventId: String? = null,
         expectedVersion: Long? = null,
     ) {
-        if (!_state.value.access.canAcknowledge) return
+        if (!_state.value.access.canAcknowledge || _state.value.isMarkingErroneous) return
         val target = _state.value.confirmationTarget
         val targetEventId = eventId ?: target?.eventId ?: return
         val targetVersion = expectedVersion ?: target?.expectedClassificationVersion ?: return
         val currentCompanyGen = companyGeneration
         val requestCompanyId = _state.value.companyId
+        val requestSession = feedSession ?: return
 
         _state.update {
             it.copy(
@@ -460,6 +471,7 @@ class EventsViewModel(
                 }
                 when (result) {
                     is EventsOperationResult.Success -> {
+                        requestSession.applyEventMutationResult(result.data)
                         _state.update { it.copy(isMarkingErroneous = false) }
                     }
                     is EventsOperationResult.Failure -> {
@@ -504,9 +516,17 @@ class EventsViewModel(
                 formatPreset = _state.value.exportFormatPreset,
             )
         val idempotencyKey =
-            kotlin.uuid.Uuid
-                .random()
-                .toString()
+            if (activeExportRequest == request && activeExportKey != null) {
+                activeExportKey!!
+            } else {
+                val newKey =
+                    kotlin.uuid.Uuid
+                        .random()
+                        .toString()
+                activeExportKey = newKey
+                activeExportRequest = request
+                newKey
+            }
 
         exportSubmissionJob?.cancel()
         exportSubmissionJob =
@@ -704,7 +724,8 @@ class EventsViewModel(
         exportObservationJob?.cancel()
         exportSubmissionJob?.cancel()
         downloadExportJob?.cancel()
-        acknowledgeJob?.cancel()
+        acknowledgeJobs.values.forEach { it.cancel() }
+        acknowledgeJobs.clear()
         markErroneousJob?.cancel()
         filterOptionsJob?.cancel()
         super.onCleared()

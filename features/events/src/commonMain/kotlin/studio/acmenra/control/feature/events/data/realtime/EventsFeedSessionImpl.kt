@@ -42,6 +42,7 @@ import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
 import studio.acmenra.control.feature.events.domain.repository.RebootstrapState
 import kotlin.random.Random
 
+@OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
 class EventsFeedSessionImpl(
     override val companyId: String,
     override val query: EventsQuery,
@@ -69,7 +70,7 @@ class EventsFeedSessionImpl(
     private var bootstrapJob: Job? = null
     private var rebootstrapJob: Job? = null
 
-    private var connectionGeneration: Long = 0L
+    private val connectionGeneration = kotlin.concurrent.atomics.AtomicLong(0L)
     private var bootstrapGeneration: Long = 0L
     private val bootstrapGenMutex = Mutex()
 
@@ -353,12 +354,12 @@ class EventsFeedSessionImpl(
     ) {
         connectJob?.cancel()
         if (!canReadEvents()) return
-        val generation = ++connectionGeneration
+        val generation = connectionGeneration.addAndFetch(1L)
 
         connectJob =
             sessionScope.launch {
                 disconnectJob?.join()
-                if (!canReadEvents() || generation != connectionGeneration) return@launch
+                if (!canReadEvents() || generation != connectionGeneration.load()) return@launch
 
                 val snapshot = sessionManager.getSnapshot()
                 val token = snapshot?.tokens?.accessToken
@@ -379,12 +380,12 @@ class EventsFeedSessionImpl(
                         scope = sessionScope,
                         getClientConfirmedSeq = { processor.getAsOfSequence() },
                         onDisconnected = { reason, _ ->
-                            if (!isClosed && generation == connectionGeneration && canReadEvents()) {
+                            if (!isClosed && generation == connectionGeneration.load() && canReadEvents()) {
                                 handleDisconnect(reason)
                             }
                         },
                     )
-                if (!canReadEvents() || generation != connectionGeneration) {
+                if (!canReadEvents() || generation != connectionGeneration.load()) {
                     webSocketDataSource.disconnect(connectionId)
                     return@launch
                 }
@@ -431,7 +432,7 @@ class EventsFeedSessionImpl(
         if (!canReadEvents()) return
         if (resetAttempt) reconnectAttempt = 0
         connectJob?.cancel()
-        val generation = connectionGeneration
+        val generation = connectionGeneration.load()
         connectJob =
             sessionScope.launch {
                 if (!canReadEvents() || !isOnline) return@launch
@@ -444,7 +445,13 @@ class EventsFeedSessionImpl(
                 delay((baseDelay + jitter).coerceAtMost(30_000L))
 
                 disconnectJob?.join()
-                if (!isActive || !canReadEvents() || !isOnline || generation != connectionGeneration) return@launch
+                if (!isActive ||
+                    !canReadEvents() ||
+                    !isOnline ||
+                    generation != connectionGeneration.load()
+                ) {
+                    return@launch
+                }
                 val currentSeq = processor.getAsOfSequence()
                 val currentReplayId = processor.currentReplayId
                 connectWebSocket(afterSequence = currentSeq, replayId = currentReplayId)
@@ -454,17 +461,17 @@ class EventsFeedSessionImpl(
     private fun handleTokenRefreshNeeded() {
         if (!canReadEvents()) return
         tokenRefreshJob?.cancel()
-        val generation = connectionGeneration
+        val generation = connectionGeneration.load()
         tokenRefreshJob =
             sessionScope.launch {
                 try {
                     val refreshed = sessionManager.refreshActiveSession(failedAccessToken = lastUsedAccessToken)
-                    if (!canReadEvents() || generation != connectionGeneration) return@launch
+                    if (!canReadEvents() || generation != connectionGeneration.load()) return@launch
                     val newToken = refreshed?.tokens?.accessToken
                     if (!newToken.isNullOrBlank() && newToken != lastUsedAccessToken) {
                         lastUsedAccessToken = newToken
                         val nextReplay = processor.nextReplayGeneration()
-                        if (!canReadEvents() || generation != connectionGeneration) return@launch
+                        if (!canReadEvents() || generation != connectionGeneration.load()) return@launch
                         connectWebSocket(afterSequence = processor.getAsOfSequence(), replayId = nextReplay)
                         return@launch
                     }
@@ -473,7 +480,7 @@ class EventsFeedSessionImpl(
                 } catch (e: Throwable) {
                     // Refresh failure falls through to FAILED
                 }
-                if (canReadEvents() && generation == connectionGeneration) {
+                if (canReadEvents() && generation == connectionGeneration.load()) {
                     processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.FAILED))
                 }
             }
@@ -499,7 +506,7 @@ class EventsFeedSessionImpl(
 
     private fun handleEventsReadRevoked() {
         val gen = ++accessTransitionGeneration
-        connectionGeneration++
+        connectionGeneration.addAndFetch(1L)
         reconnectAttempt = 0
         bootstrapJob?.cancel()
         rebootstrapJob?.cancel()

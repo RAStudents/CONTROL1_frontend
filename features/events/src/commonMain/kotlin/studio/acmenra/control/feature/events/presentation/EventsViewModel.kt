@@ -130,6 +130,7 @@ class EventsViewModel(
                             selectedEventId = null,
                             isViewerOpenInCompact = false,
                             filterOptions = null,
+                            isFilterOptionsLoading = false,
                             isInitialLoading = false,
                             initialLoadError = null,
                             confirmationTarget = if (shouldClearReview) null else it.confirmationTarget,
@@ -199,7 +200,10 @@ class EventsViewModel(
     }
 
     private fun loadFilterOptions(companyId: String) {
-        if (!_state.value.access.eventsRead) return
+        if (!_state.value.access.eventsRead) {
+            _state.update { it.copy(isFilterOptionsLoading = false) }
+            return
+        }
         filterOptionsJob?.cancel()
         val sessionCompanyGen = companyGeneration
         val gen = ++filterOptionsGeneration

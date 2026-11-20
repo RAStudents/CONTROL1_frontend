@@ -50,10 +50,8 @@ class EventsRepositoryImpl(
     )
 
     private val filterOptionsMutex = Mutex()
-    private val filterCache = MutableStateFlow<Map<String, CachedFilterOptions>>(emptyMap())
-    private val cacheGenerations = MutableStateFlow<Map<String, Long>>(emptyMap())
+    private val companyFilterStates = MutableStateFlow<Map<String, CompanyFilterCacheState>>(emptyMap())
     private val filterRequestGenerations = MutableStateFlow<Map<String, Long>>(emptyMap())
-    private val latestAppliedRequestGenerations = MutableStateFlow<Map<String, Long>>(emptyMap())
 
     private fun nextFilterRequestGeneration(companyId: String): Long {
         var nextGen = 1L
@@ -70,10 +68,20 @@ class EventsRepositoryImpl(
         val etag: String?,
     )
 
+    private data class CompanyFilterCacheState(
+        val cacheGeneration: Long = 0L,
+        val latestAppliedRequestGen: Long = 0L,
+        val cached: CachedFilterOptions? = null,
+    )
+
+    internal fun isFilterCacheEmptyForTest(companyId: String): Boolean =
+        companyFilterStates.value[companyId]?.cached == null
+
     override fun invalidateFilterCache(companyId: String) {
-        val nextGen = (cacheGenerations.value[companyId] ?: 0L) + 1L
-        cacheGenerations.update { it + (companyId to nextGen) }
-        filterCache.update { it - companyId }
+        companyFilterStates.update { map ->
+            val cur = map[companyId] ?: CompanyFilterCacheState()
+            map + (companyId to cur.copy(cacheGeneration = cur.cacheGeneration + 1L, cached = null))
+        }
     }
 
     override fun openFeedSession(
@@ -116,10 +124,11 @@ class EventsRepositoryImpl(
     }
 
     override suspend fun getFilterOptions(companyId: String): EventsFilterOptions {
-        val startCacheGen: Long = cacheGenerations.value[companyId] ?: 0L
+        val stateBefore = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
+        val startCacheGen: Long = stateBefore.cacheGeneration
         val requestGen: Long = nextFilterRequestGeneration(companyId)
 
-        val cached = filterCache.value[companyId]
+        val cached = stateBefore.cached
         val result =
             remoteDataSource.getFilterOptions(
                 companyId = companyId,
@@ -127,38 +136,51 @@ class EventsRepositoryImpl(
             )
 
         filterOptionsMutex.withLock {
-            val currentCacheGen: Long = cacheGenerations.value[companyId] ?: 0L
-            val latestAppliedReq: Long = latestAppliedRequestGenerations.value[companyId] ?: 0L
-            val isCurrentRequest: Boolean = requestGen >= latestAppliedReq && currentCacheGen == startCacheGen
-
             return when (result) {
                 is FilterOptionsFetchResult.Success -> {
                     val mapped = EventsDtoMapper.mapFilterOptions(result.options)
-                    if (isCurrentRequest) {
-                        latestAppliedRequestGenerations.update { it + (companyId to requestGen) }
-                        filterCache.update {
-                            it +
-                                (companyId to CachedFilterOptions(options = mapped, etag = result.etag))
+                    companyFilterStates.update { map ->
+                        val current = map[companyId] ?: CompanyFilterCacheState()
+                        if (current.cacheGeneration == startCacheGen && requestGen >= current.latestAppliedRequestGen) {
+                            map + (
+                                companyId to
+                                    current.copy(
+                                        latestAppliedRequestGen = requestGen,
+                                        cached = CachedFilterOptions(options = mapped, etag = result.etag),
+                                    )
+                            )
+                        } else {
+                            map
                         }
                     }
                     mapped
                 }
                 FilterOptionsFetchResult.NotModified -> {
-                    val currentCached = filterCache.value[companyId]
-                    if (isCurrentRequest && currentCached != null) {
-                        currentCached.options
+                    val current = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
+                    if (current.cacheGeneration == startCacheGen &&
+                        current.cached != null &&
+                        requestGen >= current.latestAppliedRequestGen
+                    ) {
+                        current.cached.options
                     } else {
                         // Cached body missing or invalidated in-flight, re-fetch without ETag
                         val freshResult = remoteDataSource.getFilterOptions(companyId, ifNoneMatchEtag = null)
                         if (freshResult is FilterOptionsFetchResult.Success) {
                             val mapped = EventsDtoMapper.mapFilterOptions(freshResult.options)
-                            val nowCacheGen: Long = cacheGenerations.value[companyId] ?: 0L
-                            val nowLatestReq: Long = latestAppliedRequestGenerations.value[companyId] ?: 0L
-                            if (requestGen >= nowLatestReq && nowCacheGen == currentCacheGen) {
-                                latestAppliedRequestGenerations.update { it + (companyId to requestGen) }
-                                filterCache.update {
-                                    it +
-                                        (companyId to CachedFilterOptions(options = mapped, etag = freshResult.etag))
+                            companyFilterStates.update { map ->
+                                val now = map[companyId] ?: CompanyFilterCacheState()
+                                if (now.cacheGeneration == current.cacheGeneration &&
+                                    requestGen >= now.latestAppliedRequestGen
+                                ) {
+                                    map + (
+                                        companyId to
+                                            now.copy(
+                                                latestAppliedRequestGen = requestGen,
+                                                cached = CachedFilterOptions(options = mapped, etag = freshResult.etag),
+                                            )
+                                    )
+                                } else {
+                                    map
                                 }
                             }
                             mapped

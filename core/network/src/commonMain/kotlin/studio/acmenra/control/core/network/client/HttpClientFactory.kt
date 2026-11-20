@@ -27,6 +27,7 @@ import io.ktor.http.Url
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
+import kotlinx.coroutines.Job
 import kotlinx.serialization.json.Json
 import studio.acmenra.control.NetworkConfig
 import studio.acmenra.control.core.network.auth.AccessInvalidationListener
@@ -197,6 +198,10 @@ object HttpClientFactory {
 
                     response.toRefreshedTokens(cur.tokens.refreshToken)
                 }
+            }
+            client.coroutineContext[Job]?.invokeOnCompletion {
+                refreshClient.close()
+                sessionManager.setRefreshDelegate(null)
             }
         }
     }

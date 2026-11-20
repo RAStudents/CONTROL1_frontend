@@ -5021,6 +5021,186 @@ class EventsContractV292MandatoryTests {
             )
         }
 
+    // Scenario 57: isFilterOptionsLoading is reset to false when eventsRead is revoked in-flight
+    @Test
+    fun testScenario57_IsFilterOptionsLoadingResetOnEventsReadRevocation() =
+        runTest(testDispatcher) {
+            val filterDeferred = CompletableDeferred<EventsFilterOptions>()
+            val viewModel =
+                createTestViewModel(
+                    loadEventFilterOptionsUseCase =
+                        object : LoadEventFilterOptionsUseCase {
+                            override suspend fun invoke(companyId: String): EventsFilterOptions = filterDeferred.await()
+                        },
+                )
+
+            // 1. Initialize with eventsRead = true -> filter options start loading
+            viewModel.initialize("comp-1", EventsAccessCapabilities(eventsRead = true))
+            advanceUntilIdle()
+            assertTrue(viewModel.state.value.isFilterOptionsLoading)
+
+            // 2. Revoke eventsRead while loading is still in-flight
+            viewModel.initialize("comp-1", EventsAccessCapabilities(eventsRead = false))
+            advanceUntilIdle()
+
+            // isFilterOptionsLoading MUST be false immediately upon revocation
+            assertFalse(viewModel.state.value.isFilterOptionsLoading)
+            assertNull(viewModel.state.value.filterOptions)
+
+            // Complete filterDeferred later; state must remain not loading and null
+            filterDeferred.complete(EventsFilterOptions(revision = "late-rev"))
+            advanceUntilIdle()
+            assertFalse(viewModel.state.value.isFilterOptionsLoading)
+            assertNull(viewModel.state.value.filterOptions)
+        }
+
+    // Scenario 58: InvalidateFilterCache running during getFilterOptions atomically discards stale cached entry
+    @Test
+    fun testScenario58_InvalidateFilterCacheDuringGetFilterOptionsDiscardsStaleEntry() =
+        runTest(testDispatcher) {
+            val responseDeferred = CompletableDeferred<FilterOptionsFetchResult>()
+            val mockRemote =
+                object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                    override suspend fun getFilterOptions(
+                        companyId: String,
+                        ifNoneMatchEtag: String?,
+                    ): FilterOptionsFetchResult = responseDeferred.await()
+
+                    override suspend fun getBootstrap(
+                        companyId: String,
+                        query: EventsQuery,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun getEventsPage(
+                        companyId: String,
+                        cursor: String,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun acknowledgeEvent(
+                        companyId: String,
+                        eventId: String,
+                    ) = error("unused")
+
+                    override suspend fun markEventErroneous(
+                        companyId: String,
+                        eventId: String,
+                        expectedClassificationVersion: Long,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun createExport(
+                        companyId: String,
+                        request: studio.acmenra.control.feature.events.data.model.CreateExportRequestDto,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun getExportStatus(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+
+                    override suspend fun downloadExport(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+                }
+
+            val repository =
+                EventsRepositoryImpl(
+                    remoteDataSource = mockRemote,
+                    webSocketDataSourceFactory = { TestWebSocketDataSource() },
+                    sessionManager = SessionManager(TestTokenStorage()),
+                    connectivityProvider =
+                        object : EventsConnectivityProvider {
+                            override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                        },
+                )
+
+            // Start in-flight request
+            val fetchDeferred = async { repository.getFilterOptions("comp-1") }
+            advanceUntilIdle()
+
+            // Invalidate cache while request is in-flight
+            repository.invalidateFilterCache("comp-1")
+            advanceUntilIdle()
+
+            // Complete the in-flight network response
+            val dto =
+                EventsFilterOptionsDto(
+                    revision = "stale-rev",
+                    eventTypes = listOf(EventTypeOptionDto("type-1", "Type 1", "cat-1")),
+                )
+            responseDeferred.complete(FilterOptionsFetchResult.Success(dto, etag = "stale-etag"))
+            advanceUntilIdle()
+
+            val result = fetchDeferred.await()
+            assertEquals(1, result.eventTypes.size)
+
+            // Cache MUST be empty for comp-1 because cacheGeneration was incremented during in-flight fetch!
+            assertTrue(repository.isFilterCacheEmptyForTest("comp-1"))
+        }
+
+    // Scenario 59: Concurrent connect calls in Ktor WebSocket DataSource allocate strictly monotonic connection IDs
+    @Test
+    fun testScenario59_ConcurrentConnectAllocatesMonotonicConnectionIds() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val wsDataSource =
+                    KtorEventsWebSocketDataSource(
+                        realtimeClient =
+                            HttpClient(
+                                MockEngine {
+                                    respond("OK")
+                                },
+                            ) {
+                                install(io.ktor.client.plugins.websocket.WebSockets)
+                            },
+                        wsEndpointBase = "ws://localhost:8080",
+                    )
+
+                val id1 =
+                    wsDataSource.connect(
+                        companyId = "comp-1",
+                        accessToken = "tok-1",
+                        replayId = 1L,
+                        afterSequence = 100L,
+                        scope = scope,
+                        getClientConfirmedSeq = { 100L },
+                        onDisconnected = { _, _ -> },
+                    )
+                val id2 =
+                    wsDataSource.connect(
+                        companyId = "comp-1",
+                        accessToken = "tok-2",
+                        replayId = 2L,
+                        afterSequence = 200L,
+                        scope = scope,
+                        getClientConfirmedSeq = { 200L },
+                        onDisconnected = { _, _ -> },
+                    )
+                val id3 =
+                    wsDataSource.connect(
+                        companyId = "comp-1",
+                        accessToken = "tok-3",
+                        replayId = 3L,
+                        afterSequence = 300L,
+                        scope = scope,
+                        getClientConfirmedSeq = { 300L },
+                        onDisconnected = { _, _ -> },
+                    )
+
+                assertEquals(1L, id1)
+                assertEquals(2L, id2)
+                assertEquals(3L, id3)
+                assertEquals(3L, wsDataSource.getActiveConnectionIdForTest())
+            } finally {
+                scope.cancel()
+            }
+        }
+
     private class FakeFeedSession(
         override val companyId: String = "comp-1",
         override val query: EventsQuery = EventsQuery(),

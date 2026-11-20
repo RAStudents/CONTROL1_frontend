@@ -156,11 +156,18 @@ class EventsSessionProcessor(
     private var activeConnectionId: Long = 0L
     private var nextCursor: String? = null
 
-    @kotlin.concurrent.Volatile
-    private var eventsReadDeniedLatch: Boolean = !initialAccess.eventsRead
+    private data class AccessFence(
+        val generation: Long = 0L,
+        val denied: Boolean = false,
+    )
 
-    @kotlin.concurrent.Volatile
-    private var latestImmediateDeniedGeneration: Long = 0L
+    private val accessFence =
+        MutableStateFlow(
+            AccessFence(
+                generation = 0L,
+                denied = !initialAccess.eventsRead,
+            ),
+        )
 
     private var latestProcessedAccessGeneration: Long = 0L
 
@@ -168,13 +175,21 @@ class EventsSessionProcessor(
         denied: Boolean,
         generation: Long = 0L,
     ) {
-        eventsReadDeniedLatch = denied
-        if (denied && generation > latestImmediateDeniedGeneration) {
-            latestImmediateDeniedGeneration = generation
+        accessFence.update { current ->
+            if (denied) {
+                val nextGen = maxOf(current.generation, generation)
+                AccessFence(generation = nextGen, denied = true)
+            } else {
+                if (generation >= current.generation) {
+                    AccessFence(generation = generation, denied = false)
+                } else {
+                    current
+                }
+            }
         }
     }
 
-    fun isImmediateEventsReadDenied(): Boolean = eventsReadDeniedLatch
+    fun isImmediateEventsReadDenied(): Boolean = accessFence.value.denied
 
     val currentReplayId: Long get() = sequenceProcessor.currentReplayId
 
@@ -276,7 +291,7 @@ class EventsSessionProcessor(
             return
         }
 
-        if (eventsReadDeniedLatch && command !is SessionCommand.AccessUpdated && command !is SessionCommand.Close) {
+        if (accessFence.value.denied && command !is SessionCommand.AccessUpdated && command !is SessionCommand.Close) {
             when (command) {
                 is SessionCommand.ConnectionStateChanged -> {
                     _state.update { it.copy(connectionState = command.state) }
@@ -363,15 +378,22 @@ class EventsSessionProcessor(
                 latestProcessedAccessGeneration = command.generation
 
                 val wasRead = _state.value.access.eventsRead
-                val nowRead = command.access.eventsRead
-
-                if (!nowRead) {
-                    eventsReadDeniedLatch = true
-                } else if (latestImmediateDeniedGeneration <= command.generation) {
-                    eventsReadDeniedLatch = false
+                var isFenceDenied = false
+                accessFence.update { current ->
+                    val nextDenied =
+                        if (!command.access.eventsRead) {
+                            true
+                        } else if (current.generation > command.generation && current.denied) {
+                            true
+                        } else {
+                            false
+                        }
+                    val nextGen = maxOf(current.generation, command.generation)
+                    isFenceDenied = nextDenied
+                    AccessFence(generation = nextGen, denied = nextDenied)
                 }
 
-                if (eventsReadDeniedLatch) {
+                if (isFenceDenied) {
                     snapshotItems.clear()
                     currentOverlay = RealtimeOverlay()
                     rebootstrapBuffer.clear()
@@ -397,7 +419,7 @@ class EventsSessionProcessor(
                         onEventsReadRevoked()
                     }
                 } else {
-                    if (!wasRead && nowRead) {
+                    if (!wasRead && command.access.eventsRead) {
                         _state.update { it.copy(access = command.access) }
                         onEventsReadGranted()
                     } else {
@@ -429,7 +451,7 @@ class EventsSessionProcessor(
                 _state.update { it.copy(asOfSequence = sequenceProcessor.currentSequence) }
             }
             is SessionCommand.ViewportAtTop -> {
-                if (!_state.value.access.eventsRead || eventsReadDeniedLatch) return
+                if (!_state.value.access.eventsRead || accessFence.value.denied) return
                 // User navigated to top: integrate all pending newer events into visible feed
                 currentOverlay = RealtimeOverlayReducer.integratePendingNewer(currentOverlay)
                 val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
@@ -454,7 +476,7 @@ class EventsSessionProcessor(
         generation: Long,
         response: CompletableDeferred<BootstrapApplyResult>,
     ) {
-        if (!_state.value.access.eventsRead || eventsReadDeniedLatch) {
+        if (!_state.value.access.eventsRead || accessFence.value.denied) {
             response.complete(BootstrapApplyResult.Stale)
             return
         }
@@ -571,7 +593,7 @@ class EventsSessionProcessor(
         page: EventsPage,
         snapshotId: String?,
     ) {
-        if (!_state.value.access.eventsRead || eventsReadDeniedLatch) {
+        if (!_state.value.access.eventsRead || accessFence.value.denied) {
             _state.update { it.copy(isLoadingNextPage = false) }
             return
         }
@@ -602,7 +624,7 @@ class EventsSessionProcessor(
     }
 
     private fun handleEventMutationApplied(mutatedEvent: Event) {
-        if (!_state.value.access.eventsRead || eventsReadDeniedLatch) return
+        if (!_state.value.access.eventsRead || accessFence.value.denied) return
         val idx = snapshotItems.indexOfFirst { it.id == mutatedEvent.id }
         if (idx != -1) {
             val cur = snapshotItems[idx]
@@ -634,7 +656,7 @@ class EventsSessionProcessor(
     }
 
     private fun handleAcknowledgeSucceeded(ackEvent: Event) {
-        if (!_state.value.access.eventsRead || eventsReadDeniedLatch) return
+        if (!_state.value.access.eventsRead || accessFence.value.denied) return
         val newPending = currentOverlay.pendingAckIds - ackEvent.id
         val idx = snapshotItems.indexOfFirst { it.id == ackEvent.id }
         if (idx != -1) {
@@ -669,7 +691,7 @@ class EventsSessionProcessor(
     }
 
     private suspend fun handleWsFrame(frame: IncomingWsFrame) {
-        if (isAccessInvalidated || !_state.value.access.eventsRead || eventsReadDeniedLatch) return
+        if (isAccessInvalidated || !_state.value.access.eventsRead || accessFence.value.denied) return
 
         when (frame) {
             is IncomingWsFrame.TenantCommit -> {
@@ -807,7 +829,7 @@ class EventsSessionProcessor(
     }
 
     private fun applyCommit(commit: TenantCommitFrameDto) {
-        if (!_state.value.access.eventsRead || eventsReadDeniedLatch) return
+        if (!_state.value.access.eventsRead || accessFence.value.denied) return
 
         // Two-phase atomic commit application:
         // 1. Calculate tentative new overlay and summary

@@ -126,7 +126,6 @@ class KtorEventsWebSocketDataSource(
     @kotlin.concurrent.Volatile
     private var currentSession: ConnectionSession? = null
 
-    private val connectionSequence = kotlin.concurrent.atomics.AtomicLong(0L)
     private val activeConnectionId = kotlin.concurrent.atomics.AtomicLong(0L)
     private var lastConfirmedSeq: Long = 0L
 
@@ -157,8 +156,7 @@ class KtorEventsWebSocketDataSource(
         val outChan = Channel<Frame>(Channel.BUFFERED)
         lastConfirmedSeq = afterSequence
 
-        val connectionId = connectionSequence.addAndFetch(1L)
-        activeConnectionId.store(connectionId)
+        val connectionId = activeConnectionId.addAndFetch(1L)
 
         scope.launch {
             connectionMutex.withLock {
@@ -378,8 +376,7 @@ class KtorEventsWebSocketDataSource(
                 return
             }
             currentSession = null
-            val nextSeq = connectionSequence.addAndFetch(1L)
-            activeConnectionId.store(nextSeq)
+            activeConnectionId.addAndFetch(1L)
 
             if (sessionToDisconnect != null) {
                 if (sessionToDisconnect.job.isActive) {

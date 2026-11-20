@@ -176,9 +176,14 @@ class EventsContractV292MandatoryTests {
 
         override suspend fun sendHeartbeat(clientConfirmedSeq: Long) {}
 
-        override suspend fun disconnect() {
+        var disconnectBlocker: CompletableDeferred<Unit>? = null
+        var lastDisconnectedConnectionId: Long? = null
+
+        override suspend fun disconnect(connectionId: Long?) {
+            disconnectBlocker?.await()
             disconnected = true
             disconnectCount++
+            lastDisconnectedConnectionId = connectionId
         }
     }
 
@@ -4420,18 +4425,14 @@ class EventsContractV292MandatoryTests {
     @Test
     fun testScenario49_ConnectDuringDisconnectDoesNotCloseNewConnection() =
         runTest(testDispatcher) {
-            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            val scopeA = CoroutineScope(SupervisorJob() + testDispatcher)
+            val scopeB = CoroutineScope(SupervisorJob() + testDispatcher)
             try {
-                val disconnectJoined = CompletableDeferred<Unit>()
-                val disconnectBlocker = CompletableDeferred<Unit>()
-
                 val wsDataSource =
                     KtorEventsWebSocketDataSource(
                         realtimeClient =
                             HttpClient(
                                 MockEngine {
-                                    // Suspend until disconnectBlocker allows completing
-                                    disconnectBlocker.await()
                                     respond("OK")
                                 },
                             ) {
@@ -4440,52 +4441,45 @@ class EventsContractV292MandatoryTests {
                         wsEndpointBase = "ws://localhost:8080",
                     )
 
-                // 1. Initial connection
-                var disconnectedReason1: WsCloseReason? = null
-                wsDataSource.connect(
-                    companyId = "comp-1",
-                    accessToken = "tok-1",
-                    replayId = 1L,
-                    afterSequence = 100L,
-                    scope = testScope,
-                    getClientConfirmedSeq = { 100L },
-                    onDisconnected = { reason, _ -> disconnectedReason1 = reason },
-                )
-                testDispatcher.scheduler.runCurrent()
+                var disconnectedReasonA: WsCloseReason? = null
+                var disconnectedReasonB: WsCloseReason? = null
 
-                // 2. Start disconnect in background (it will wait for old job join)
-                val disconnectJob =
-                    testScope.launch {
-                        wsDataSource.disconnect()
-                        disconnectJoined.complete(Unit)
-                    }
-                testDispatcher.scheduler.runCurrent()
-
-                // 3. While disconnect is in-flight, invoke connect() for a newer session
-                var disconnectedReason2: WsCloseReason? = null
-                val newConnId =
+                // 1. Connect A is initiated (older)
+                val idA =
                     wsDataSource.connect(
                         companyId = "comp-1",
-                        accessToken = "tok-2",
-                        replayId = 2L,
-                        afterSequence = 200L,
-                        scope = testScope,
-                        getClientConfirmedSeq = { 200L },
-                        onDisconnected = { reason, _ -> disconnectedReason2 = reason },
+                        accessToken = "tok-A",
+                        replayId = 1L,
+                        afterSequence = 100L,
+                        scope = scopeA,
+                        getClientConfirmedSeq = { 100L },
+                        onDisconnected = { reason, _ -> disconnectedReasonA = reason },
                     )
 
-                // 4. Unblock old connection so disconnect finishes
-                disconnectBlocker.complete(Unit)
-                disconnectJob.join()
-                testDispatcher.scheduler.runCurrent()
+                // 2. Connect B is initiated (newer) before scopeA executes
+                val idB =
+                    wsDataSource.connect(
+                        companyId = "comp-1",
+                        accessToken = "tok-B",
+                        replayId = 2L,
+                        afterSequence = 200L,
+                        scope = scopeB,
+                        getClientConfirmedSeq = { 200L },
+                        onDisconnected = { reason, _ -> disconnectedReasonB = reason },
+                    )
+                assertTrue(idB > idA)
 
-                // Old connection was closed
-                assertEquals(WsCloseReason.SESSION_CLOSED, disconnectedReason1)
-                // New connection was not closed by old disconnect
-                assertNull(disconnectedReason2)
-                assertTrue(newConnId > 0L)
+                // 3. Let Connect B run and establish its session in connectionMutex
+                testDispatcher.scheduler.runCurrent()
+                advanceUntilIdle()
+
+                assertNull(disconnectedReasonB)
+
+                // B's outgoing channel is open and responsive
+                wsDataSource.sendReplayRequest(replayId = 2L, afterSequence = 200L)
             } finally {
-                testScope.cancel()
+                scopeA.cancel()
+                scopeB.cancel()
             }
         }
 
@@ -4561,15 +4555,33 @@ class EventsContractV292MandatoryTests {
                 advanceUntilIdle()
                 assertEquals(1, testWs.connectCount)
 
-                // Network disconnects
+                // 1. Block disconnect
+                val blocker = CompletableDeferred<Unit>()
+                testWs.disconnectBlocker = blocker
+
+                // 2. Revoke EVENTS_READ -> launches disconnectJob which suspends on blocker
+                session.updateAccessCapabilities(EventsAccessCapabilities(eventsRead = false))
+                testDispatcher.scheduler.runCurrent()
+
+                // 3. Restore EVENTS_READ while disconnectJob is in-flight
+                session.updateAccessCapabilities(EventsAccessCapabilities(eventsRead = true))
+
+                // 4. Toggle connectivity online
                 connectivityFlow.value = false
-                advanceUntilIdle()
-
-                // Network comes back online -> reconnectWithBackoff is triggered
+                testDispatcher.scheduler.runCurrent()
                 connectivityFlow.value = true
+                testDispatcher.scheduler.runCurrent()
+
+                // 5. Verify no new connection or bootstrap runs while disconnectJob is in flight!
+                assertEquals(1, testWs.connectCount)
+
+                // 6. Complete disconnectJob
+                blocker.complete(Unit)
                 advanceUntilIdle()
 
-                assertTrue(testWs.connectCount >= 1)
+                // 7. Verify exactly one new connection was established
+                assertEquals(2, testWs.connectCount)
+
                 session.close()
                 advanceUntilIdle()
             } finally {
@@ -4795,9 +4807,9 @@ class EventsContractV292MandatoryTests {
             assertEquals("type-B", cachedResult.eventTypes.first().id)
         }
 
-    // Scenario 53: startExport clears activeExportKey on UNKNOWN status allowing new export requests
+    // Scenario 53: startExport retains activeExportKey on UNKNOWN status preserving idempotency key on retry
     @Test
-    fun testScenario53_StartExportClearsKeyOnUnknownStatus() =
+    fun testScenario53_StartExportRetainsKeyOnUnknownStatus() =
         runTest(testDispatcher) {
             var exportCallCount = 0
             val capturedKeys = mutableListOf<String>()
@@ -4830,15 +4842,183 @@ class EventsContractV292MandatoryTests {
             assertEquals(1, capturedKeys.size)
             val firstKey = capturedKeys[0]
 
-            // Trigger second export with same parameters
+            // Trigger retry export with same parameters
             viewModel.startExport()
             advanceUntilIdle()
             assertEquals(2, exportCallCount)
             assertEquals(2, capturedKeys.size)
             val secondKey = capturedKeys[1]
 
-            // Because UNKNOWN is terminal, activeExportKey was cleared, generating a new distinct key!
-            assertTrue(firstKey != secondKey)
+            // Because UNKNOWN is non-terminal, activeExportKey was retained, preserving idempotency key!
+            assertEquals(firstKey, secondKey)
+        }
+
+    // Scenario 54: Processor immediate deny-latch is not cleared by stale AccessUpdated(true) command
+    @Test
+    fun testScenario54_ProcessorImmediateDenyLatchNotClearedByStaleAccessUpdatedTrue() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                val b1 =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-1")),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                val res = processor.installBootstrap(b1, generation = 1L)
+                assertTrue(res is BootstrapApplyResult.Applied)
+                assertEquals(1, processor.state.value.visibleEvents.size)
+
+                // 1. First revocation: gen = 1
+                processor.setImmediateEventsReadDenied(true, generation = 1L)
+                processor.dispatch(
+                    SessionCommand.AccessUpdated(EventsAccessCapabilities(eventsRead = false), generation = 1L),
+                )
+
+                // 2. Access granted: gen = 2
+                processor.dispatch(
+                    SessionCommand.AccessUpdated(EventsAccessCapabilities(eventsRead = true), generation = 2L),
+                )
+
+                // 3. Incoming commit frame enqueued
+                val commit =
+                    sampleCommitDto(
+                        replayId = processor.currentReplayId,
+                        sequence = 101L,
+                        eventId = "ev-2",
+                    )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(commit))),
+                )
+
+                // 4. Second revocation: gen = 3
+                processor.setImmediateEventsReadDenied(true, generation = 3L)
+                processor.dispatch(
+                    SessionCommand.AccessUpdated(EventsAccessCapabilities(eventsRead = false), generation = 3L),
+                )
+
+                // Process all commands
+                advanceUntilIdle()
+
+                // Verify that even after processing command 2 (AccessUpdated(true, gen=2)),
+                // the deny-latch remained TRUE because gen=3 had already registered immediate deny!
+                assertTrue(processor.isImmediateEventsReadDenied())
+                assertTrue(
+                    processor.state.value.visibleEvents
+                        .isEmpty(),
+                )
+                assertFalse(processor.state.value.access.eventsRead)
+
+                processor.close()
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 55: ViewModel feedCollectJob never restores revoked access permissions from feedState
+    @Test
+    fun testScenario55_ViewModelFeedCollectJobNeverRestoresRevokedAccess() =
+        runTest(testDispatcher) {
+            val fakeFeed = FakeFeedSession(companyId = "comp-1")
+            val viewModel = createTestViewModel(feed = fakeFeed)
+
+            // Initialize ViewModel with eventsRead = false
+            viewModel.initialize(
+                "comp-1",
+                EventsAccessCapabilities(eventsRead = false, eventsReview = false, reportsExport = false),
+            )
+            advanceUntilIdle()
+            assertFalse(viewModel.state.value.access.eventsRead)
+
+            // Fake feed emits state that still has access.eventsRead = true
+            fakeFeed.state.update {
+                it.copy(
+                    access = EventsAccessCapabilities(eventsRead = true, eventsReview = true, reportsExport = true),
+                    connectionState = RealtimeConnectionState.CONNECTED,
+                )
+            }
+            advanceUntilIdle()
+
+            // ViewModel must retain authoritative revoked permissions: eventsRead MUST remain false!
+            assertFalse(viewModel.state.value.access.eventsRead)
+            assertTrue(
+                viewModel.state.value.visibleEvents
+                    .isEmpty(),
+            )
+        }
+
+    // Scenario 56: Filter options reload on access restoration, ignored when eventsRead is denied
+    @Test
+    fun testScenario56_FilterOptionsReloadOnAccessRestoredAndNotLoadedWhenReadDenied() =
+        runTest(testDispatcher) {
+            var loadFilterCalls = 0
+            val viewModel =
+                createTestViewModel(
+                    loadEventFilterOptionsUseCase =
+                        object : LoadEventFilterOptionsUseCase {
+                            override suspend fun invoke(companyId: String): EventsFilterOptions {
+                                loadFilterCalls++
+                                return EventsFilterOptions(revision = "rev-$loadFilterCalls")
+                            }
+                        },
+                )
+
+            // 1. Initial initialize with eventsRead = false -> must NOT call loadFilterOptions
+            viewModel.initialize("comp-1", EventsAccessCapabilities(eventsRead = false))
+            advanceUntilIdle()
+            assertEquals(0, loadFilterCalls)
+            assertNull(viewModel.state.value.filterOptions)
+
+            // 2. Grant eventsRead = true -> MUST call loadFilterOptions
+            viewModel.initialize("comp-1", EventsAccessCapabilities(eventsRead = true))
+            advanceUntilIdle()
+            assertEquals(1, loadFilterCalls)
+            assertNotNull(viewModel.state.value.filterOptions)
+            assertEquals(
+                "rev-1",
+                viewModel.state.value.filterOptions
+                    ?.revision,
+            )
+
+            // 3. Revoke eventsRead = false -> clears filterOptions
+            viewModel.initialize("comp-1", EventsAccessCapabilities(eventsRead = false))
+            advanceUntilIdle()
+            assertNull(viewModel.state.value.filterOptions)
+
+            // 4. Restore eventsRead = true -> reloads filterOptions
+            viewModel.initialize("comp-1", EventsAccessCapabilities(eventsRead = true))
+            advanceUntilIdle()
+            assertEquals(2, loadFilterCalls)
+            assertNotNull(viewModel.state.value.filterOptions)
+            assertEquals(
+                "rev-2",
+                viewModel.state.value.filterOptions
+                    ?.revision,
+            )
         }
 
     private class FakeFeedSession(

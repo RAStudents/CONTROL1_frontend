@@ -512,6 +512,19 @@ class EventsSessionProcessor(
             return
         }
 
+        // Validate summary as-of sequence equality with bootstrap snapshot page and streamCursor
+        if (bootstrap.summary.summaryAsOfSequence != bootstrap.page.asOfSequence ||
+            bootstrap.page.asOfSequence != bootstrap.streamCursor ||
+            !TenantSequenceProcessor.isValidSafeInteger(bootstrap.streamCursor) ||
+            !TenantSequenceProcessor.isValidSafeInteger(bootstrap.page.asOfSequence) ||
+            !TenantSequenceProcessor.isValidSafeInteger(bootstrap.summary.summaryAsOfSequence)
+        ) {
+            isRebootstrapping = true
+            bufferReplayId = sequenceProcessor.currentReplayId
+            response.complete(BootstrapApplyResult.RetryRequired)
+            return
+        }
+
         // 1. Build and validate buffered commits if rebootstrapping
         val deduplicatedCommits = mutableListOf<TenantCommitFrameDto>()
         if (isRebootstrapping) {
@@ -576,14 +589,8 @@ class EventsSessionProcessor(
         var candidateOverlay = RealtimeOverlay(pendingAckIds = currentOverlay.pendingAckIds)
         val candidateNextCursor = bootstrap.page.nextCursor
 
-        var candidateSummary = _state.value.summary
-        val bootstrapSummary = bootstrap.summary
-        candidateSummary =
-            when {
-                candidateSummary == null -> bootstrapSummary
-                bootstrapSummary.summaryAsOfSequence >= candidateSummary.summaryAsOfSequence -> bootstrapSummary
-                else -> candidateSummary
-            }
+        var candidateSummary = bootstrap.summary
+        val optionsToNotify = mutableListOf<EventsFilterOptionsDto>()
 
         // If rebootstrapping, apply the verified commits to candidate overlay & summary
         if (isRebootstrapping && deduplicatedCommits.isNotEmpty()) {
@@ -626,7 +633,7 @@ class EventsSessionProcessor(
                 }
 
                 commit.filterOptionsUpdated?.let { optionsDto ->
-                    onFilterOptionsUpdated?.invoke(optionsDto)
+                    optionsToNotify.add(optionsDto)
                 }
             }
         }
@@ -661,7 +668,7 @@ class EventsSessionProcessor(
             it.copy(
                 visibleEvents = visible,
                 realtimeOverlay = currentOverlay,
-                snapshotId = bootstrap.page.asOfSequence.toString(),
+                snapshotId = bootstrap.page.snapshotId,
                 asOfSequence = sequenceProcessor.currentSequence,
                 replayId = newReplayId,
                 snapshotTotalCount = bootstrap.page.totalCount,
@@ -672,6 +679,11 @@ class EventsSessionProcessor(
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
             )
+        }
+
+        // Only invoke side effects after atomic state commit
+        for (optionsDto in optionsToNotify) {
+            onFilterOptionsUpdated?.invoke(optionsDto)
         }
 
         response.complete(BootstrapApplyResult.Applied(newReplayId))
@@ -689,6 +701,17 @@ class EventsSessionProcessor(
         if (snapshotId != null && snapshotId != _state.value.snapshotId) {
             // Discard page from outdated snapshot
             _state.update { it.copy(isLoadingNextPage = false) }
+            return
+        }
+
+        if (page.hasMore && page.nextCursor == null) {
+            _state.update {
+                it.copy(
+                    isLoadingNextPage = false,
+                    paginationError =
+                        EventsPaginationError.Server("Contract violation: hasMore is true but nextCursor is null"),
+                )
+            }
             return
         }
 
@@ -860,7 +883,18 @@ class EventsSessionProcessor(
                         // Verified duplicate frame -> safely drop
                     }
                     is SequenceValidationResult.GapDetected -> {
-                        onSendReplayRequest(sequenceProcessor.currentReplayId, sequenceProcessor.currentSequence)
+                        maxClosedReplayGeneration = maxOf(maxClosedReplayGeneration, sequenceProcessor.currentReplayId)
+                        val nextReplay =
+                            try {
+                                sequenceProcessor.nextReplayGeneration()
+                            } catch (e: ArithmeticException) {
+                                isRebootstrapping = true
+                                rebootstrapBuffer.clear()
+                                onTriggerRebootstrap()
+                                return
+                            }
+                        _state.update { it.copy(replayId = nextReplay) }
+                        onSendReplayRequest(nextReplay, sequenceProcessor.currentSequence)
                     }
                     is SequenceValidationResult.IntegrityViolation,
                     is SequenceValidationResult.InvalidSequence,
@@ -877,8 +911,9 @@ class EventsSessionProcessor(
                 if (replayId <= maxClosedReplayGeneration || replayId != sequenceProcessor.currentReplayId) {
                     return // Ignore stale ResyncRequired from previous generation
                 }
+                maxClosedReplayGeneration = maxOf(maxClosedReplayGeneration, replayId)
                 isRebootstrapping = true
-                bufferReplayId = sequenceProcessor.currentReplayId
+                bufferReplayId = replayId
                 rebootstrapBuffer.clear()
                 onTriggerRebootstrap()
             }

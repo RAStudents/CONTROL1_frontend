@@ -33,7 +33,7 @@ import studio.acmenra.control.feature.events.domain.model.EventValidityFilter
 import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
 
-private const val MAX_EXPORT_DOWNLOAD_BYTES = 50L * 1024 * 1024
+private const val MAX_EXPORT_DOWNLOAD_BYTES = 100L * 1024 * 1024
 
 private class BoundedByteAccumulator(
     private val maxBytes: Long,

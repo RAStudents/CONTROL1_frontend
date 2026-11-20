@@ -6,6 +6,7 @@ data class EventsPage(
     val hasMore: Boolean,
     val totalCount: Int,
     val asOfSequence: Long,
+    val snapshotId: String = "",
 )
 
 data class EventsBootstrap(

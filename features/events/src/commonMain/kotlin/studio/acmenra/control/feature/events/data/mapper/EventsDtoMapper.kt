@@ -5,7 +5,7 @@ import studio.acmenra.control.feature.events.data.model.CreateExportRequestDto
 import studio.acmenra.control.feature.events.data.model.DevicesStatusSummaryDto
 import studio.acmenra.control.feature.events.data.model.EventDto
 import studio.acmenra.control.feature.events.data.model.EventsBootstrapDto
-import studio.acmenra.control.feature.events.data.model.EventsExportQueryDto
+import studio.acmenra.control.feature.events.data.model.EventsExportFiltersDto
 import studio.acmenra.control.feature.events.data.model.EventsExportStatusDto
 import studio.acmenra.control.feature.events.data.model.EventsFilterOptionsDto
 import studio.acmenra.control.feature.events.data.model.EventsPageDto
@@ -107,6 +107,7 @@ object EventsDtoMapper {
             hasMore = dto.hasMore,
             totalCount = dto.totalCount,
             asOfSequence = dto.asOfSequence,
+            snapshotId = dto.snapshotId ?: "",
         )
 
     fun mapCategoryScore(dto: CategoryScoreDto): CategoryScore {
@@ -143,12 +144,22 @@ object EventsDtoMapper {
             devices = mapDevicesStatus(dto.devices),
         )
 
-    fun mapBootstrap(dto: EventsBootstrapDto): EventsBootstrap =
-        EventsBootstrap(
-            page = mapPage(dto.events),
+    fun mapBootstrap(dto: EventsBootstrapDto): EventsBootstrap {
+        val pagination = dto.events.pagination
+        return EventsBootstrap(
+            page =
+                EventsPage(
+                    items = dto.events.items.map(::mapEvent),
+                    nextCursor = pagination.nextCursor,
+                    hasMore = pagination.hasMore,
+                    totalCount = pagination.totalCount,
+                    asOfSequence = pagination.asOfSequence,
+                    snapshotId = pagination.snapshotId,
+                ),
             summary = mapSummary(dto.summary),
             streamCursor = dto.streamCursor,
         )
+    }
 
     fun mapFilterOptions(dto: EventsFilterOptionsDto): EventsFilterOptions =
         EventsFilterOptions(
@@ -195,6 +206,22 @@ object EventsDtoMapper {
                     e,
                 )
             }
+        val updatedAt =
+            dto.updatedAt?.let { raw ->
+                try {
+                    Instant.parse(raw)
+                } catch (e: Exception) {
+                    throw IllegalArgumentException("Invalid updated_at timestamp '$raw' for export ${dto.exportId}", e)
+                }
+            }
+        val finishedAt =
+            dto.finishedAt?.let { raw ->
+                try {
+                    Instant.parse(raw)
+                } catch (e: Exception) {
+                    throw IllegalArgumentException("Invalid finished_at timestamp '$raw' for export ${dto.exportId}", e)
+                }
+            }
         val expiresAt =
             dto.expiresAt?.let { raw ->
                 try {
@@ -204,15 +231,26 @@ object EventsDtoMapper {
                 }
             }
 
+        val calculatedProgress =
+            dto.progressPercent
+                ?: if (dto.totalRecords != null && dto.totalRecords > 0L && dto.processedRecords != null) {
+                    ((dto.processedRecords.toDouble() / dto.totalRecords.toDouble()) * 100).toInt().coerceIn(0, 100)
+                } else {
+                    0
+                }
+
         return EventsExportStatus(
             exportId = dto.exportId,
             status = status,
-            progressPercent = dto.progressPercent,
+            progressPercent = calculatedProgress,
             processedRecords = dto.processedRecords,
             totalRecords = dto.totalRecords,
             createdAt = createdAt,
+            updatedAt = updatedAt,
+            finishedAt = finishedAt,
             expiresAt = expiresAt,
             failureCode = dto.failureCode,
+            downloadUrl = dto.downloadUrl,
         )
     }
 
@@ -226,8 +264,8 @@ object EventsDtoMapper {
         return CreateExportRequestDto(
             formatPreset = formatPreset,
             includeMediaLinks = request.includeMediaLinks,
-            query =
-                EventsExportQueryDto(
+            filters =
+                EventsExportFiltersDto(
                     searchId =
                         query.filter.searchId
                             ?.trim()
@@ -237,7 +275,6 @@ object EventsDtoMapper {
                     eventTypeIds = query.filter.eventTypeIds.sorted(),
                     deviceIds = query.filter.deviceIds.sorted(),
                     validity = query.filter.validity.name,
-                    sort = query.sort.name,
                 ),
         )
     }

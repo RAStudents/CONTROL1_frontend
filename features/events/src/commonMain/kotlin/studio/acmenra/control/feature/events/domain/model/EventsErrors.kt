@@ -57,3 +57,50 @@ sealed interface EventsOperationResult<out T> {
         val error: EventsMutationError,
     ) : EventsOperationResult<Nothing>
 }
+
+sealed class EventsDomainException(
+    message: String,
+    cause: Throwable? = null,
+) : Exception(message, cause) {
+    class PermissionDenied(
+        val reasonCode: String? = null,
+        message: String = "Permission denied",
+    ) : EventsDomainException(message)
+
+    class SnapshotExpired(
+        message: String = "Snapshot expired",
+    ) : EventsDomainException(message)
+
+    class ExportExpired(
+        message: String = "Export expired",
+    ) : EventsDomainException(message)
+
+    class LimitExceeded(
+        val maxBytes: Long? = null,
+        message: String = "Limit exceeded",
+    ) : EventsDomainException(message)
+
+    class FilterInvalid(
+        val invalidFields: List<String> = emptyList(),
+        message: String = "Filter invalid",
+    ) : EventsDomainException(message)
+
+    class PayloadMismatch(
+        message: String = "Idempotency key payload mismatch",
+    ) : EventsDomainException(message)
+
+    class StateConflict(
+        val latestEvent: Event? = null,
+        message: String = "State conflict",
+    ) : EventsDomainException(message)
+
+    class ExportNotReady(
+        message: String = "Export not ready",
+    ) : EventsDomainException(message)
+
+    class Generic(
+        val code: String,
+        val serverMessage: String?,
+        val retryable: Boolean,
+    ) : EventsDomainException("API error $code: $serverMessage")
+}

@@ -26,12 +26,12 @@ import studio.acmenra.control.core.ui.generated.resources.events_mutation_generi
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_network_error
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_payload_mismatch
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_permission_denied
-import studio.acmenra.control.feature.events.data.datasource.EventsApiException
 import studio.acmenra.control.feature.events.domain.model.DateFilterUtils
 import studio.acmenra.control.feature.events.domain.model.DateSelection
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventValidity
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
+import studio.acmenra.control.feature.events.domain.model.EventsDomainException
 import studio.acmenra.control.feature.events.domain.model.EventsExportFormatPreset
 import studio.acmenra.control.feature.events.domain.model.EventsExportRequest
 import studio.acmenra.control.feature.events.domain.model.EventsExportStatusCode
@@ -260,8 +260,29 @@ class EventsViewModel(
                 session.state.collect { feedState ->
                     if (currentGen != filterRequestGeneration || sessionCompanyGen != companyGeneration) return@collect
                     val canRead = feedState.access.eventsRead && _state.value.access.eventsRead
+                    val tz =
+                        feedState.summary?.businessTimezone?.let {
+                            runCatching { TimeZone.of(it) }.getOrNull()
+                        }
                     _state.update { current ->
+                        val restoredFilter =
+                            if (canRead &&
+                                tz != null &&
+                                current.filter.dateSelection is DateSelection.All &&
+                                (current.filter.dateFrom != null || current.filter.dateTo != null)
+                            ) {
+                                val restored =
+                                    DateFilterUtils.utcBoundsToDateSelection(
+                                        current.filter.dateFrom,
+                                        current.filter.dateTo,
+                                        tz,
+                                    )
+                                current.filter.copy(dateSelection = restored)
+                            } else {
+                                current.filter
+                            }
                         current.copy(
+                            filter = restoredFilter,
                             visibleEvents = if (canRead) feedState.visibleEvents else emptyList(),
                             realtimeOverlay = if (canRead) feedState.realtimeOverlay else RealtimeOverlay(),
                             asOfSequence = if (canRead) feedState.asOfSequence else 0L,
@@ -664,13 +685,12 @@ class EventsViewModel(
                 } catch (e: Throwable) {
                     val isDefiniteFailure =
                         when (e) {
-                            is EventsApiException.PermissionDenied -> true
-                            is EventsApiException.SnapshotTooLarge -> true
-                            is EventsApiException.ExportDownloadTooLarge -> true
-                            is EventsApiException.ExportExpired -> true
-                            is EventsApiException.FilterInvalid -> true
-                            is EventsApiException.PayloadMismatch -> true
-                            is EventsApiException.Generic -> !e.retryable
+                            is EventsDomainException.PermissionDenied -> true
+                            is EventsDomainException.LimitExceeded -> true
+                            is EventsDomainException.ExportExpired -> true
+                            is EventsDomainException.FilterInvalid -> true
+                            is EventsDomainException.PayloadMismatch -> true
+                            is EventsDomainException.Generic -> !e.retryable
                             else -> false
                         }
                     if (isDefiniteFailure) {
@@ -737,7 +757,7 @@ class EventsViewModel(
                         }
                     } catch (e: CancellationException) {
                         throw e
-                    } catch (e: EventsApiException.ExportExpired) {
+                    } catch (e: EventsDomainException.ExportExpired) {
                         activeExportKey = null
                         activeExportRequest = null
                         if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
@@ -749,7 +769,7 @@ class EventsViewModel(
                             }
                         }
                         return@launch
-                    } catch (e: EventsApiException.PermissionDenied) {
+                    } catch (e: EventsDomainException.PermissionDenied) {
                         activeExportKey = null
                         activeExportRequest = null
                         if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
@@ -819,10 +839,9 @@ class EventsViewModel(
 
     private fun mapExportErrorToResource(throwable: Throwable): StringResource =
         when (throwable) {
-            is EventsApiException.PermissionDenied -> Res.string.events_export_error_access_revoked
-            is EventsApiException.SnapshotTooLarge, is EventsApiException.ExportDownloadTooLarge ->
-                Res.string.events_export_error_limit_exceeded
-            is EventsApiException.ExportExpired -> Res.string.events_export_expired_msg
+            is EventsDomainException.PermissionDenied -> Res.string.events_export_error_access_revoked
+            is EventsDomainException.LimitExceeded -> Res.string.events_export_error_limit_exceeded
+            is EventsDomainException.ExportExpired -> Res.string.events_export_expired_msg
             else -> Res.string.events_export_error_generic
         }
 

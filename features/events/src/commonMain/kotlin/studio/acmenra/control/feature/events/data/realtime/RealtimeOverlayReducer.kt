@@ -67,13 +67,44 @@ object RealtimeOverlayReducer {
         val existingInSnapshot = snapshotItems.firstOrNull { it.id == event.id }
         val currentEvent = existingEntry?.event ?: existingInSnapshot
 
-        if (currentEvent != null &&
-            currentEvent.eventVersion > event.eventVersion &&
-            currentEvent.classificationVersion >= event.classificationVersion &&
-            currentEvent.acknowledgementVersion >= event.acknowledgementVersion
+        // Validate versions: >= 1, safe integers, specialized <= event_version
+        if (event.eventVersion < 1L ||
+            !TenantSequenceProcessor.isValidSafeInteger(event.eventVersion) ||
+            event.classificationVersion < 1L ||
+            !TenantSequenceProcessor.isValidSafeInteger(event.classificationVersion) ||
+            event.acknowledgementVersion < 1L ||
+            !TenantSequenceProcessor.isValidSafeInteger(event.acknowledgementVersion) ||
+            event.classificationVersion > event.eventVersion ||
+            event.acknowledgementVersion > event.eventVersion
         ) {
-            // Strictly older frame across all versions: ignored
-            return currentOverlay to (existingEntry?.membership ?: OverlayMembership.INCLUDED)
+            return currentOverlay.copy(requiresRefresh = true) to
+                (existingEntry?.membership ?: OverlayMembership.INCLUDED)
+        }
+
+        if (currentEvent != null) {
+            if (event.eventVersion <= currentEvent.eventVersion) {
+                // Strict event_version gating: older or equal event_version cannot update overlay
+                return currentOverlay to (existingEntry?.membership ?: OverlayMembership.INCLUDED)
+            }
+
+            // Same specialized version MUST mean identical data
+            if (event.classificationVersion == currentEvent.classificationVersion &&
+                event.isErroneous != currentEvent.isErroneous
+            ) {
+                return currentOverlay.copy(requiresRefresh = true) to
+                    (existingEntry?.membership ?: OverlayMembership.INCLUDED)
+            }
+
+            if (event.acknowledgementVersion == currentEvent.acknowledgementVersion &&
+                (
+                    event.status != currentEvent.status ||
+                        event.acknowledgedAt != currentEvent.acknowledgedAt ||
+                        event.acknowledgedBy != currentEvent.acknowledgedBy
+                )
+            ) {
+                return currentOverlay.copy(requiresRefresh = true) to
+                    (existingEntry?.membership ?: OverlayMembership.INCLUDED)
+            }
         }
 
         val effectiveEvent =

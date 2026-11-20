@@ -38,6 +38,23 @@ data class EventsPageDto(
     @SerialName("total_count") val totalCount: Int = 0,
     @Serializable(with = SafeJsLongSerializer::class)
     @SerialName("as_of_sequence") val asOfSequence: Long = 0L,
+    @SerialName("snapshot_id") val snapshotId: String? = null,
+)
+
+@Serializable
+data class EventsPaginationDto(
+    @SerialName("snapshot_id") val snapshotId: String,
+    @Serializable(with = SafeJsLongSerializer::class)
+    @SerialName("as_of_sequence") val asOfSequence: Long,
+    @SerialName("next_cursor") val nextCursor: String? = null,
+    @SerialName("has_more") val hasMore: Boolean = false,
+    @SerialName("total_count") val totalCount: Int = 0,
+)
+
+@Serializable
+data class BootstrapEventsDto(
+    @SerialName("items") val items: List<EventDto> = emptyList(),
+    @SerialName("pagination") val pagination: EventsPaginationDto,
 )
 
 @Serializable
@@ -71,7 +88,7 @@ data class EventsSummaryDto(
 data class EventsBootstrapDto(
     @Serializable(with = SafeJsLongSerializer::class)
     @SerialName("stream_cursor") val streamCursor: Long,
-    @SerialName("events") val events: EventsPageDto,
+    @SerialName("events") val events: BootstrapEventsDto,
     @SerialName("summary") val summary: EventsSummaryDto,
 )
 
@@ -109,33 +126,37 @@ data class MarkErroneousRequestDto(
 )
 
 @Serializable
-data class EventsExportQueryDto(
+data class EventsExportFiltersDto(
     @SerialName("search_id") val searchId: String? = null,
     @SerialName("from") val from: String? = null,
     @SerialName("to") val to: String? = null,
     @SerialName("event_type_ids") val eventTypeIds: List<String> = emptyList(),
     @SerialName("device_ids") val deviceIds: List<String> = emptyList(),
     @SerialName("validity") val validity: String = "ALL",
-    @SerialName("sort") val sort: String = "OCCURRED_AT_DESC",
 )
 
 @Serializable
 data class CreateExportRequestDto(
-    @SerialName("format_preset") val formatPreset: String,
+    @SerialName("filters") val filters: EventsExportFiltersDto,
     @SerialName("include_media_links") val includeMediaLinks: Boolean = false,
-    @SerialName("query") val query: EventsExportQueryDto,
+    @SerialName("format_preset") val formatPreset: String = "EXCEL_SEMICOLON_BOM",
 )
 
 @Serializable
 data class EventsExportStatusDto(
     @SerialName("export_id") val exportId: String,
     @SerialName("status") val status: String,
-    @SerialName("progress_percent") val progressPercent: Int = 0,
-    @SerialName("processed_records") val processedRecords: Int = 0,
-    @SerialName("total_records") val totalRecords: Int = 0,
     @SerialName("created_at") val createdAt: String,
+    @SerialName("updated_at") val updatedAt: String? = null,
+    @SerialName("finished_at") val finishedAt: String? = null,
+    @Serializable(with = SafeJsNullableLongSerializer::class)
+    @SerialName("processed_records") val processedRecords: Long? = null,
+    @Serializable(with = SafeJsNullableLongSerializer::class)
+    @SerialName("total_records") val totalRecords: Long? = null,
+    @SerialName("progress_percent") val progressPercent: Int? = null,
     @SerialName("expires_at") val expiresAt: String? = null,
     @SerialName("failure_code") val failureCode: String? = null,
+    @SerialName("download_url") val downloadUrl: String? = null,
 )
 
 @Serializable

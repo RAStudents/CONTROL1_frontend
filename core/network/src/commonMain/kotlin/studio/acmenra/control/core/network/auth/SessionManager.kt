@@ -33,7 +33,7 @@ class SessionManager(
 
     suspend fun refreshActiveSession(failedAccessToken: String? = null): SessionSnapshot? {
         val delegate = refreshDelegate.load()
-        return delegate?.invoke(failedAccessToken) ?: getSnapshot()
+        return if (delegate == null) getSnapshot() else delegate.invoke(failedAccessToken)
     }
 
     fun currentRevision(): Long = currentRevision

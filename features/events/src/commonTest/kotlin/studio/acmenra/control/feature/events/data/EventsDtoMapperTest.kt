@@ -65,8 +65,8 @@ class EventsDtoMapperTest {
                 exportId = "exp-1",
                 status = "PROCESSING",
                 progressPercent = 45,
-                processedRecords = 450,
-                totalRecords = 1000,
+                processedRecords = 450L,
+                totalRecords = 1000L,
                 createdAt = "2026-03-01T10:00:00Z",
                 expiresAt = null,
                 failureCode = null,
@@ -76,8 +76,8 @@ class EventsDtoMapperTest {
         assertEquals("exp-1", domain.exportId)
         assertEquals(EventsExportStatusCode.PROCESSING, domain.status)
         assertEquals(45, domain.progressPercent)
-        assertEquals(450, domain.processedRecords)
-        assertEquals(1000, domain.totalRecords)
+        assertEquals(450L, domain.processedRecords)
+        assertEquals(1000L, domain.totalRecords)
         assertNull(domain.expiresAt)
         assertNull(domain.failureCode)
     }

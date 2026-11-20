@@ -17,6 +17,7 @@ import studio.acmenra.control.feature.events.data.realtime.EventsFeedSessionImpl
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
 import studio.acmenra.control.feature.events.domain.model.EventsBootstrap
+import studio.acmenra.control.feature.events.domain.model.EventsDomainException
 import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
 import studio.acmenra.control.feature.events.domain.model.EventsExportRequest
 import studio.acmenra.control.feature.events.domain.model.EventsExportStatus
@@ -106,91 +107,92 @@ class EventsRepositoryImpl(
         )
     }
 
+    private inline fun <T> wrapDomainErrors(block: () -> T): T {
+        try {
+            return block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: EventsApiException) {
+            throw when (e) {
+                is EventsApiException.PermissionDenied ->
+                    EventsDomainException.PermissionDenied(e.reasonCode, e.message ?: "Permission denied")
+                is EventsApiException.SnapshotExpired ->
+                    EventsDomainException.SnapshotExpired(e.message ?: "Snapshot expired")
+                is EventsApiException.ExportExpired ->
+                    EventsDomainException.ExportExpired(e.message ?: "Export expired")
+                is EventsApiException.ExportDownloadTooLarge ->
+                    EventsDomainException.LimitExceeded(e.maxBytes, e.message ?: "Export download too large")
+                is EventsApiException.SnapshotTooLarge ->
+                    EventsDomainException.LimitExceeded(message = e.message ?: "Snapshot too large")
+                is EventsApiException.FilterInvalid ->
+                    EventsDomainException.FilterInvalid(e.invalidFields, e.message ?: "Filter invalid")
+                is EventsApiException.PayloadMismatch ->
+                    EventsDomainException.PayloadMismatch(e.message ?: "Payload mismatch")
+                is EventsApiException.StateConflict ->
+                    EventsDomainException.StateConflict(
+                        e.latestEvent?.let(EventsDtoMapper::mapEvent),
+                        e.message ?: "State conflict",
+                    )
+                is EventsApiException.ExportNotReady ->
+                    EventsDomainException.ExportNotReady(e.message ?: "Export not ready")
+                is EventsApiException.Generic ->
+                    EventsDomainException.Generic(e.code, e.serverMessage, e.retryable)
+            }
+        }
+    }
+
     override suspend fun bootstrap(
         companyId: String,
         query: EventsQuery,
         limit: Int,
-    ): EventsBootstrap {
-        val dto = remoteDataSource.getBootstrap(companyId, query, limit)
-        return EventsDtoMapper.mapBootstrap(dto)
-    }
+    ): EventsBootstrap =
+        wrapDomainErrors {
+            val dto = remoteDataSource.getBootstrap(companyId, query, limit)
+            EventsDtoMapper.mapBootstrap(dto)
+        }
 
     override suspend fun getEventsPage(
         companyId: String,
         cursor: String,
         limit: Int,
-    ): EventsPage {
-        val dto = remoteDataSource.getEventsPage(companyId, cursor, limit)
-        return EventsDtoMapper.mapPage(dto)
-    }
+    ): EventsPage =
+        wrapDomainErrors {
+            val dto = remoteDataSource.getEventsPage(companyId, cursor, limit)
+            EventsDtoMapper.mapPage(dto)
+        }
 
-    override suspend fun getFilterOptions(companyId: String): EventsFilterOptions {
-        val (startCacheGen, etag, requestGen) =
-            filterOptionsMutex.withLock {
-                val stateBefore = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
-                Triple(
-                    stateBefore.cacheGeneration,
-                    stateBefore.cached?.etag,
-                    nextFilterRequestGeneration(companyId),
-                )
-            }
-
-        val result =
-            remoteDataSource.getFilterOptions(
-                companyId = companyId,
-                ifNoneMatchEtag = etag,
-            )
-
-        when (result) {
-            is FilterOptionsFetchResult.Success -> {
-                val mapped = EventsDtoMapper.mapFilterOptions(result.options)
+    override suspend fun getFilterOptions(companyId: String): EventsFilterOptions =
+        wrapDomainErrors {
+            val (startCacheGen, etag, requestGen) =
                 filterOptionsMutex.withLock {
-                    companyFilterStates.update { map ->
-                        val current = map[companyId] ?: CompanyFilterCacheState()
-                        if (current.cacheGeneration == startCacheGen && requestGen >= current.latestAppliedRequestGen) {
-                            map + (
-                                companyId to
-                                    current.copy(
-                                        latestAppliedRequestGen = requestGen,
-                                        cached = CachedFilterOptions(options = mapped, etag = result.etag),
-                                    )
-                            )
-                        } else {
-                            map
-                        }
-                    }
-                }
-                return mapped
-            }
-            FilterOptionsFetchResult.NotModified -> {
-                val cached =
-                    filterOptionsMutex.withLock {
-                        val current = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
-                        if (current.cacheGeneration == startCacheGen &&
-                            current.cached != null &&
-                            requestGen >= current.latestAppliedRequestGen
-                        ) {
-                            current.cached.options
-                        } else {
-                            null
-                        }
-                    }
-                if (cached != null) {
-                    return cached
+                    val stateBefore = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
+                    Triple(
+                        stateBefore.cacheGeneration,
+                        stateBefore.cached?.etag,
+                        nextFilterRequestGeneration(companyId),
+                    )
                 }
 
-                val freshResult = remoteDataSource.getFilterOptions(companyId, ifNoneMatchEtag = null)
-                if (freshResult is FilterOptionsFetchResult.Success) {
-                    val mapped = EventsDtoMapper.mapFilterOptions(freshResult.options)
+            val result =
+                remoteDataSource.getFilterOptions(
+                    companyId = companyId,
+                    ifNoneMatchEtag = etag,
+                )
+
+            when (result) {
+                is FilterOptionsFetchResult.Success -> {
+                    val mapped = EventsDtoMapper.mapFilterOptions(result.options)
                     filterOptionsMutex.withLock {
                         companyFilterStates.update { map ->
-                            val now = map[companyId] ?: CompanyFilterCacheState()
-                            if (now.cacheGeneration == startCacheGen && requestGen >= now.latestAppliedRequestGen) {
+                            val current = map[companyId] ?: CompanyFilterCacheState()
+                            if (current.cacheGeneration == startCacheGen &&
+                                requestGen >= current.latestAppliedRequestGen
+                            ) {
                                 map + (
                                     companyId to
-                                        now.copy(
+                                        current.copy(
                                             latestAppliedRequestGen = requestGen,
-                                            cached = CachedFilterOptions(options = mapped, etag = freshResult.etag),
+                                            cached = CachedFilterOptions(options = mapped, etag = result.etag),
                                         )
                                 )
                             } else {
@@ -198,38 +200,81 @@ class EventsRepositoryImpl(
                             }
                         }
                     }
-                    return mapped
-                } else {
-                    throw IllegalStateException(
-                        "Server returned NotModified (304) on unconditional filter options request",
-                    )
+                    mapped
+                }
+                FilterOptionsFetchResult.NotModified -> {
+                    val cached =
+                        filterOptionsMutex.withLock {
+                            val current = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
+                            if (current.cacheGeneration == startCacheGen &&
+                                current.cached != null &&
+                                requestGen >= current.latestAppliedRequestGen
+                            ) {
+                                companyFilterStates.update { map ->
+                                    map + (companyId to current.copy(latestAppliedRequestGen = requestGen))
+                                }
+                                current.cached.options
+                            } else {
+                                null
+                            }
+                        }
+                    if (cached != null) {
+                        return@wrapDomainErrors cached
+                    }
+
+                    val freshResult = remoteDataSource.getFilterOptions(companyId, ifNoneMatchEtag = null)
+                    if (freshResult is FilterOptionsFetchResult.Success) {
+                        val mapped = EventsDtoMapper.mapFilterOptions(freshResult.options)
+                        filterOptionsMutex.withLock {
+                            companyFilterStates.update { map ->
+                                val now = map[companyId] ?: CompanyFilterCacheState()
+                                if (now.cacheGeneration == startCacheGen && requestGen >= now.latestAppliedRequestGen) {
+                                    map + (
+                                        companyId to
+                                            now.copy(
+                                                latestAppliedRequestGen = requestGen,
+                                                cached = CachedFilterOptions(options = mapped, etag = freshResult.etag),
+                                            )
+                                    )
+                                } else {
+                                    map
+                                }
+                            }
+                        }
+                        mapped
+                    } else {
+                        throw IllegalStateException(
+                            "Server returned NotModified (304) on unconditional filter options request",
+                        )
+                    }
                 }
             }
         }
-    }
 
     override suspend fun createExport(
         companyId: String,
         request: EventsExportRequest,
         idempotencyKey: String,
-    ): EventsExportStatus {
-        val dto = EventsDtoMapper.mapExportRequestToDto(request)
-        val statusDto = remoteDataSource.createExport(companyId, dto, idempotencyKey)
-        return EventsDtoMapper.mapExportStatus(statusDto)
-    }
+    ): EventsExportStatus =
+        wrapDomainErrors {
+            val dto = EventsDtoMapper.mapExportRequestToDto(request)
+            val statusDto = remoteDataSource.createExport(companyId, dto, idempotencyKey)
+            EventsDtoMapper.mapExportStatus(statusDto)
+        }
 
     override suspend fun getExportStatus(
         companyId: String,
         exportId: String,
-    ): EventsExportStatus {
-        val statusDto = remoteDataSource.getExportStatus(companyId, exportId)
-        return EventsDtoMapper.mapExportStatus(statusDto)
-    }
+    ): EventsExportStatus =
+        wrapDomainErrors {
+            val statusDto = remoteDataSource.getExportStatus(companyId, exportId)
+            EventsDtoMapper.mapExportStatus(statusDto)
+        }
 
     override suspend fun downloadExport(
         companyId: String,
         exportId: String,
-    ): EventsExportDownload = remoteDataSource.downloadExport(companyId, exportId)
+    ): EventsExportDownload = wrapDomainErrors { remoteDataSource.downloadExport(companyId, exportId) }
 
     override suspend fun acknowledgeEvent(
         companyId: String,

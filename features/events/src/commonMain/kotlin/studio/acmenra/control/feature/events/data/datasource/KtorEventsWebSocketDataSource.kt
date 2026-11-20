@@ -112,24 +112,55 @@ interface EventsWebSocketDataSource {
 @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
 internal class HeartbeatTracker(
     val maxMissedAcks: Int = 2,
+    val ackWindowMs: Long = 5_000L,
 ) {
     val missedAcks = kotlin.concurrent.atomics.AtomicInt(0)
+    val hasPendingAck = kotlin.concurrent.atomics.AtomicBoolean(false)
+    val pendingAckExpiryMs = kotlin.concurrent.atomics.AtomicLong(0L)
 
-    fun onTick(): Boolean {
-        if (missedAcks.load() >= maxMissedAcks) {
-            return false
+    fun onHeartbeatSent(nowMs: Long = 0L) {
+        hasPendingAck.store(true)
+        pendingAckExpiryMs.store(if (nowMs > 0L) nowMs + ackWindowMs else Long.MAX_VALUE)
+    }
+
+    fun onAckWindowTimeout(): Boolean {
+        if (hasPendingAck.compareAndSet(true, false)) {
+            val missed = missedAcks.addAndFetch(1)
+            if (missed >= maxMissedAcks) {
+                return false
+            }
         }
-        missedAcks.addAndFetch(1)
         return true
     }
 
     fun onAckReceived(
         incomingReplayId: Long,
         activeReplayId: Long,
-    ) {
-        if (incomingReplayId == activeReplayId) {
-            missedAcks.store(0)
+        nowMs: Long = 0L,
+    ): Boolean {
+        if (incomingReplayId != activeReplayId) {
+            return false
         }
+        if (!hasPendingAck.load()) {
+            return false
+        }
+        if (nowMs > 0L && pendingAckExpiryMs.load() != Long.MAX_VALUE && nowMs > pendingAckExpiryMs.load()) {
+            return false
+        }
+        if (hasPendingAck.compareAndSet(true, false)) {
+            missedAcks.store(0)
+            return true
+        }
+        return false
+    }
+
+    fun onTick(): Boolean {
+        hasPendingAck.store(true)
+        if (missedAcks.load() >= maxMissedAcks) {
+            return false
+        }
+        missedAcks.addAndFetch(1)
+        return true
     }
 }
 
@@ -230,18 +261,12 @@ class KtorEventsWebSocketDataSource(
                             }
                         }
 
-                    // Start Heartbeat loop: every 25s using connection-local outChan
+                    // Start Heartbeat loop: every 25s using connection-local outChan with 5s ACK window
                     val heartbeatTracker = HeartbeatTracker()
                     localHeartbeatJob =
                         launch {
                             while (isActive) {
                                 delay(25_000L)
-                                if (!heartbeatTracker.onTick()) {
-                                    disconnectReason = WsCloseReason.HEARTBEAT_TIMEOUT
-                                    disconnectMessage = "Heartbeat timeout (2 missed ACKs)"
-                                    close()
-                                    break
-                                }
                                 val confirmedSeq = getClientConfirmedSeq()
                                 val hbFrame = HeartbeatFrameDto(clientConfirmedSeq = confirmedSeq)
                                 try {
@@ -250,6 +275,24 @@ class KtorEventsWebSocketDataSource(
                                     throw e
                                 } catch (_: Throwable) {
                                     break
+                                }
+
+                                val now =
+                                    kotlin.time.Clock.System
+                                        .now()
+                                        .toEpochMilliseconds()
+                                heartbeatTracker.onHeartbeatSent(now)
+
+                                delay(5_000L)
+                                if (heartbeatTracker.hasPendingAck.load()) {
+                                    val ok = heartbeatTracker.onAckWindowTimeout()
+                                    if (!ok) {
+                                        disconnectReason = WsCloseReason.HEARTBEAT_TIMEOUT
+                                        disconnectMessage =
+                                            "Heartbeat timeout (2 consecutive missed ACKs within 5s window)"
+                                        close()
+                                        break
+                                    }
                                 }
                             }
                         }
@@ -335,7 +378,11 @@ class KtorEventsWebSocketDataSource(
                                             )
                                         }.getOrNull()
                                     if (dto != null) {
-                                        heartbeatTracker.onAckReceived(dto.replayId, replayId)
+                                        val now =
+                                            kotlin.time.Clock.System
+                                                .now()
+                                                .toEpochMilliseconds()
+                                        heartbeatTracker.onAckReceived(dto.replayId, replayId, now)
                                         if (connectionId == activeConnectionId.load()) {
                                             rawFramesChannel.send(
                                                 IncomingWsEnvelope(connectionId, IncomingWsFrame.HeartbeatAck(dto)),

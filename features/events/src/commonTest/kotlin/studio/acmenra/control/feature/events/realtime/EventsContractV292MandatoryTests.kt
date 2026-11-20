@@ -32,6 +32,8 @@ import studio.acmenra.control.core.network.auth.SessionSnapshot
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.core.network.auth.TokenStorage
 import studio.acmenra.control.core.network.model.TokenPair
+import studio.acmenra.control.core.ui.generated.resources.Res
+import studio.acmenra.control.core.ui.generated.resources.events_export_error_access_revoked
 import studio.acmenra.control.core.ui.notice.Notice
 import studio.acmenra.control.feature.events.data.datasource.EventsApiException
 import studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource
@@ -45,11 +47,15 @@ import studio.acmenra.control.feature.events.data.datasource.WsCloseReason
 import studio.acmenra.control.feature.events.data.mapper.EventsDtoMapper
 import studio.acmenra.control.feature.events.data.model.AccessInvalidatedFrameDto
 import studio.acmenra.control.feature.events.data.model.AuthRequiredFrameDto
+import studio.acmenra.control.feature.events.data.model.BootstrapEventsDto
+import studio.acmenra.control.feature.events.data.model.CreateExportRequestDto
 import studio.acmenra.control.feature.events.data.model.EventDto
 import studio.acmenra.control.feature.events.data.model.EventTypeOptionDto
 import studio.acmenra.control.feature.events.data.model.EventsBootstrapDto
+import studio.acmenra.control.feature.events.data.model.EventsExportStatusDto
 import studio.acmenra.control.feature.events.data.model.EventsFilterOptionsDto
 import studio.acmenra.control.feature.events.data.model.EventsPageDto
+import studio.acmenra.control.feature.events.data.model.EventsPaginationDto
 import studio.acmenra.control.feature.events.data.model.EventsSummaryDto
 import studio.acmenra.control.feature.events.data.model.ReplayCompletedFrameDto
 import studio.acmenra.control.feature.events.data.model.ResyncRequiredFrameDto
@@ -58,27 +64,35 @@ import studio.acmenra.control.feature.events.data.model.TenantCommitFrameDto
 import studio.acmenra.control.feature.events.data.realtime.BootstrapApplyResult
 import studio.acmenra.control.feature.events.data.realtime.EventsFeedSessionImpl
 import studio.acmenra.control.feature.events.data.realtime.EventsSessionProcessor
+import studio.acmenra.control.feature.events.data.realtime.RealtimeOverlayReducer
 import studio.acmenra.control.feature.events.data.realtime.SequenceValidationResult
 import studio.acmenra.control.feature.events.data.realtime.SessionCommand
 import studio.acmenra.control.feature.events.data.realtime.TenantSequenceProcessor
 import studio.acmenra.control.feature.events.data.repository.EventsRepositoryImpl
+import studio.acmenra.control.feature.events.domain.model.DateSelection
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementStatus
 import studio.acmenra.control.feature.events.domain.model.EventIconKey
 import studio.acmenra.control.feature.events.domain.model.EventTypeOption
+import studio.acmenra.control.feature.events.domain.model.EventValidityFilter
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
 import studio.acmenra.control.feature.events.domain.model.EventsBootstrap
+import studio.acmenra.control.feature.events.domain.model.EventsDomainException
 import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
+import studio.acmenra.control.feature.events.domain.model.EventsExportFormatPreset
 import studio.acmenra.control.feature.events.domain.model.EventsExportRequest
 import studio.acmenra.control.feature.events.domain.model.EventsExportStatus
 import studio.acmenra.control.feature.events.domain.model.EventsExportStatusCode
+import studio.acmenra.control.feature.events.domain.model.EventsFilter
 import studio.acmenra.control.feature.events.domain.model.EventsFilterOptions
 import studio.acmenra.control.feature.events.domain.model.EventsMutationError
 import studio.acmenra.control.feature.events.domain.model.EventsOperationResult
 import studio.acmenra.control.feature.events.domain.model.EventsPage
 import studio.acmenra.control.feature.events.domain.model.EventsPaginationError
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
+import studio.acmenra.control.feature.events.domain.model.EventsQueryRouteCodec
 import studio.acmenra.control.feature.events.domain.model.EventsSummary
+import studio.acmenra.control.feature.events.domain.model.OverlayMembership
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 import studio.acmenra.control.feature.events.domain.repository.EventsConnectivityProvider
@@ -272,16 +286,21 @@ class EventsContractV292MandatoryTests {
     private fun sampleBootstrapDto(
         cursor: Long = 100L,
         eventId: String = "ev-1",
+        snapshotId: String = "snap-$cursor",
     ): EventsBootstrapDto =
         EventsBootstrapDto(
             streamCursor = cursor,
             events =
-                EventsPageDto(
+                BootstrapEventsDto(
                     items = listOf(sampleEventDto(eventId)),
-                    nextCursor = null,
-                    hasMore = false,
-                    totalCount = 1,
-                    asOfSequence = cursor,
+                    pagination =
+                        EventsPaginationDto(
+                            snapshotId = snapshotId,
+                            asOfSequence = cursor,
+                            nextCursor = null,
+                            hasMore = false,
+                            totalCount = 1,
+                        ),
                 ),
             summary =
                 EventsSummaryDto(
@@ -306,18 +325,7 @@ class EventsContractV292MandatoryTests {
                             companyId: String,
                             query: EventsQuery,
                             limit: Int,
-                        ) = studio.acmenra.control.feature.events.data.model.EventsBootstrapDto(
-                            streamCursor = 100L,
-                            events =
-                                studio.acmenra.control.feature.events.data.model
-                                    .EventsPageDto(),
-                            summary =
-                                studio.acmenra.control.feature.events.data.model.EventsSummaryDto(
-                                    businessTimezone = "UTC",
-                                    businessDate = "2026-03-01",
-                                    summaryAsOfSequence = 100L,
-                                ),
-                        )
+                        ) = sampleBootstrapDto(cursor = 100L)
 
                         override suspend fun getEventsPage(
                             companyId: String,
@@ -770,27 +778,28 @@ class EventsContractV292MandatoryTests {
                     ),
                 )
                 advanceUntilIdle()
+                val bufferingReplay = processor.nextReplayGeneration()
 
                 // Buffer commits with duplicate 101
                 val sha101 = "a".repeat(64)
                 val sha102 = "b".repeat(64)
                 val commit101a =
                     TenantCommitFrameDto(
-                        replayId = activeReplay,
+                        replayId = bufferingReplay,
                         tenantSequence = 101L,
                         payloadSha256 = sha101,
                         eventCreated = sampleEventDto("ev-101"),
                     )
                 val commit101b =
                     TenantCommitFrameDto(
-                        replayId = activeReplay,
+                        replayId = bufferingReplay,
                         tenantSequence = 101L,
                         payloadSha256 = sha101,
                         eventCreated = sampleEventDto("ev-101"),
                     )
                 val commit102 =
                     TenantCommitFrameDto(
-                        replayId = activeReplay,
+                        replayId = bufferingReplay,
                         tenantSequence = 102L,
                         payloadSha256 = sha102,
                         eventCreated = sampleEventDto("ev-102"),
@@ -1448,19 +1457,20 @@ class EventsContractV292MandatoryTests {
                     ),
                 )
                 advanceUntilIdle()
+                val newReplay = processor.nextReplayGeneration()
 
                 val shaStale = "a".repeat(64)
                 val shaValid = "b".repeat(64)
                 val staleCommit =
                     TenantCommitFrameDto(
-                        replayId = activeReplayId - 1,
+                        replayId = activeReplayId,
                         tenantSequence = 101L,
                         payloadSha256 = shaStale,
                         eventCreated = sampleEventDto("ev-stale"),
                     )
                 val validCommit =
                     TenantCommitFrameDto(
-                        replayId = activeReplayId,
+                        replayId = newReplay,
                         tenantSequence = 101L,
                         payloadSha256 = shaValid,
                         eventCreated = sampleEventDto("ev-valid"),
@@ -1566,12 +1576,13 @@ class EventsContractV292MandatoryTests {
                     ),
                 )
                 advanceUntilIdle()
+                val newReplay = processor.nextReplayGeneration()
 
                 // Sequence 101 missing! Only 102 arrived (gap)
                 val sha102 = "b".repeat(64)
                 val commit102 =
                     TenantCommitFrameDto(
-                        replayId = activeReplay,
+                        replayId = newReplay,
                         tenantSequence = 102L,
                         payloadSha256 = sha102,
                         eventCreated = sampleEventDto("ev-102"),
@@ -3628,12 +3639,16 @@ class EventsContractV292MandatoryTests {
                                     limit: Int,
                                 ) = sampleBootstrapDto().copy(
                                     events =
-                                        EventsPageDto(
+                                        BootstrapEventsDto(
                                             items = listOf(sampleEventDto("ev-1")),
-                                            nextCursor = "cursor-next",
-                                            hasMore = true,
-                                            totalCount = 10,
-                                            asOfSequence = 100L,
+                                            pagination =
+                                                EventsPaginationDto(
+                                                    snapshotId = "snap-100",
+                                                    asOfSequence = 100L,
+                                                    nextCursor = "cursor-next",
+                                                    hasMore = true,
+                                                    totalCount = 10,
+                                                ),
                                         ),
                                 )
 
@@ -5284,11 +5299,12 @@ class EventsContractV292MandatoryTests {
                     ),
                 )
                 advanceUntilIdle()
+                val bufferingReplay = processor.nextReplayGeneration()
 
                 // Buffer a commit with gap: 205 instead of 201
                 val gappedCommit =
                     sampleCommitDto(
-                        replayId = processor.currentReplayId,
+                        replayId = bufferingReplay,
                         sequence = 205L,
                         eventId = "ev-gapped",
                     )
@@ -6087,7 +6103,7 @@ class EventsContractV292MandatoryTests {
             assertEquals("tA", optionsA.eventTypes[0].id)
         }
 
-    // Scenario 71: KtorEventsRemoteDataSource.downloadExport enforces MAX_EXPORT_DOWNLOAD_BYTES (50MB)
+    // Scenario 71: KtorEventsRemoteDataSource.downloadExport enforces MAX_EXPORT_DOWNLOAD_BYTES (100MB)
     @Test
     fun testScenario71_RemoteDataSourceDownloadExportTooLarge() =
         runTest(testDispatcher) {
@@ -6101,7 +6117,7 @@ class EventsContractV292MandatoryTests {
                         headers =
                             headersOf(
                                 HttpHeaders.ContentType to listOf("text/csv"),
-                                HttpHeaders.ContentLength to listOf((50L * 1024 * 1024 + 1L).toString()),
+                                HttpHeaders.ContentLength to listOf((100L * 1024 * 1024 + 1L).toString()),
                             ),
                     )
                 }
@@ -6115,7 +6131,7 @@ class EventsContractV292MandatoryTests {
                     e
                 }
             assertNotNull(ex)
-            assertEquals(50L * 1024 * 1024, ex.maxBytes)
+            assertEquals(100L * 1024 * 1024, ex.maxBytes)
         }
 
     // Scenario 72: KtorEventsRemoteDataSource path parts encoding prevents path traversal and unescaped characters
@@ -6356,4 +6372,994 @@ class EventsContractV292MandatoryTests {
             exportFileSaver = exportFileSaver,
         )
     }
+
+    // Scenario 75: Bootstrap exact wire JSON nested pagination conforming to II.2
+    @Test
+    fun testScenario75_BootstrapExactWireJsonNestedPagination() {
+        val wireJson =
+            """
+            {
+              "stream_cursor": 184293,
+              "events": {
+                "items": [
+                  {
+                    "id": "019334a0-7c00-7000-8000-000000674291",
+                    "event_version": 1,
+                    "classification_version": 1,
+                    "acknowledgement_version": 1,
+                    "event_type_id": "no_helmet",
+                    "event_type_name": "Нахождение без каски",
+                    "category_code": "safety",
+                    "icon_key": "helmet",
+                    "location_id": "loc_workshop_1",
+                    "location_name": "цех 1",
+                    "device_id": "cam_04",
+                    "device_name": "Камера №4",
+                    "occurred_at": "2026-11-16T14:30:00Z",
+                    "received_at": "2026-11-16T14:30:02Z",
+                    "status": "NEW",
+                    "acknowledged_at": null,
+                    "acknowledged_by": null,
+                    "is_erroneous": false,
+                    "preview_url": "https://cdn.example.com/thumb.jpg",
+                    "video_url": "https://cdn.example.com/video.mp4"
+                  }
+                ],
+                "pagination": {
+                  "snapshot_id": "snap_019334a0_184293",
+                  "as_of_sequence": 184293,
+                  "next_cursor": "eyJmb3JtYXRfdmVyc2lvbiI6MS4uLg",
+                  "has_more": true,
+                  "total_count": 142
+                }
+              },
+              "summary": {
+                "summary_as_of_sequence": 184293,
+                "business_timezone": "Europe/Riga",
+                "business_date": "2026-11-16",
+                "today_events_count": 4,
+                "categories": [
+                  {
+                    "category_id": "safety",
+                    "name": "Безопасность",
+                    "score": 200,
+                    "trend": "IMPROVING"
+                  }
+                ],
+                "devices": {
+                  "total_count": 10,
+                  "online_ok_count": 10,
+                  "unknown_count": 0,
+                  "error_count": 0
+                }
+              }
+            }
+            """.trimIndent()
+
+        val testJson = Json { ignoreUnknownKeys = true }
+        val decoded = testJson.decodeFromString<EventsBootstrapDto>(wireJson)
+        assertEquals(184293L, decoded.streamCursor)
+        assertEquals(1, decoded.events.items.size)
+        assertEquals("019334a0-7c00-7000-8000-000000674291", decoded.events.items[0].id)
+        assertEquals("snap_019334a0_184293", decoded.events.pagination.snapshotId)
+        assertEquals(184293L, decoded.events.pagination.asOfSequence)
+        assertEquals("eyJmb3JtYXRfdmVyc2lvbiI6MS4uLg", decoded.events.pagination.nextCursor)
+        assertTrue(decoded.events.pagination.hasMore)
+        assertEquals(142, decoded.events.pagination.totalCount)
+        assertEquals(184293L, decoded.summary.summaryAsOfSequence)
+
+        val domain = EventsDtoMapper.mapBootstrap(decoded)
+        assertEquals("snap_019334a0_184293", domain.page.snapshotId)
+        assertEquals(184293L, domain.page.asOfSequence)
+        assertEquals(184293L, domain.summary.summaryAsOfSequence)
+        assertEquals(184293L, domain.streamCursor)
+    }
+
+    // Scenario 76: Snapshot fencing: late next-page response from prior snapshot ignored
+    @Test
+    fun testScenario76_SnapshotFencingDifferentOpaqueSnapshotIdSameSequence() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                val b1 =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-snap1")),
+                                nextCursor = "cursor-1",
+                                hasMore = true,
+                                totalCount = 2,
+                                asOfSequence = 100L,
+                                snapshotId = "snap-ACTIVE",
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(b1, generation = 1L)
+                advanceUntilIdle()
+
+                assertEquals("snap-ACTIVE", processor.state.value.snapshotId)
+
+                // Late response from previous snapshot with same asOfSequence but different snapshotId
+                val latePage =
+                    EventsPage(
+                        items = listOf(sampleEvent("ev-LATE")),
+                        nextCursor = null,
+                        hasMore = false,
+                        totalCount = 2,
+                        asOfSequence = 100L,
+                        snapshotId = "snap-OLD",
+                    )
+                processor.dispatch(SessionCommand.NextPageLoaded(latePage, snapshotId = "snap-OLD"))
+                advanceUntilIdle()
+
+                // Late page must be completely ignored
+                assertEquals(1, processor.state.value.visibleEvents.size)
+                assertEquals(
+                    "ev-snap1",
+                    processor.state.value.visibleEvents[0]
+                        .id,
+                )
+
+                // Correct page for current snapshot is accepted
+                val validPage =
+                    EventsPage(
+                        items = listOf(sampleEvent("ev-VALID")),
+                        nextCursor = null,
+                        hasMore = false,
+                        totalCount = 2,
+                        asOfSequence = 100L,
+                        snapshotId = "snap-ACTIVE",
+                    )
+                processor.dispatch(SessionCommand.NextPageLoaded(validPage, snapshotId = "snap-ACTIVE"))
+                advanceUntilIdle()
+
+                assertEquals(2, processor.state.value.visibleEvents.size)
+                assertEquals(
+                    "ev-VALID",
+                    processor.state.value.visibleEvents[1]
+                        .id,
+                )
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 77: Bootstrap summary sequence equality
+    @Test
+    fun testScenario77_BootstrapSummarySequenceEquality() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                // Summary sequence mismatch (summary 101 != page 100)
+                val invalidBootstrap =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-1")),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                                snapshotId = "snap-1",
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 101L,
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                val res = processor.installBootstrap(invalidBootstrap, generation = 1L)
+                assertEquals(BootstrapApplyResult.RetryRequired, res)
+                assertEquals(0, processor.state.value.visibleEvents.size)
+                assertNull(processor.state.value.summary)
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 78: Summary coupling: new bootstrap always uses its own summary, not older higher summary
+    @Test
+    fun testScenario78_SummaryCouplingNewBootstrapNeverKeepsOlderSnapshotSummary() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                val b1 =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-200")),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 200L,
+                                snapshotId = "snap-200",
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 200L,
+                                todayEventsCount = 10,
+                            ),
+                        streamCursor = 200L,
+                    )
+                processor.installBootstrap(b1, generation = 1L)
+                advanceUntilIdle()
+
+                assertEquals(
+                    200L,
+                    processor.state.value.summary
+                        ?.summaryAsOfSequence,
+                )
+
+                // User changes filter -> fresh bootstrap arrives with lower sequence (e.g. historical snapshot)
+                val b2 =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-100")),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                                snapshotId = "snap-100",
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 3,
+                            ),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(b2, generation = 2L)
+                advanceUntilIdle()
+
+                // Must couple with b2 summary (100L), NOT retain 200L!
+                assertEquals(
+                    100L,
+                    processor.state.value.summary
+                        ?.summaryAsOfSequence,
+                )
+                assertEquals(
+                    3,
+                    processor.state.value.summary
+                        ?.todayEventsCount,
+                )
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 79: Export POST body has 'filters' shape and no 'query'
+    @Test
+    fun testScenario79_ExportPostFiltersShapeGoldenTest() {
+        val request =
+            EventsExportRequest(
+                query =
+                    EventsQuery(
+                        filter =
+                            EventsFilter(
+                                searchId = "  test-search  ",
+                                dateFrom = kotlin.time.Instant.parse("2026-11-01T00:00:00Z"),
+                                dateTo = kotlin.time.Instant.parse("2026-11-02T00:00:00Z"),
+                                eventTypeIds = setOf("type-b", "type-a"),
+                                deviceIds = setOf("dev-2", "dev-1"),
+                                validity = EventValidityFilter.VALID,
+                            ),
+                    ),
+                includeMediaLinks = true,
+                formatPreset = EventsExportFormatPreset.STANDARD_COMMA_UTF8,
+            )
+
+        val dto = EventsDtoMapper.mapExportRequestToDto(request)
+        val jsonText = Json.encodeToString(dto)
+
+        assertTrue(jsonText.contains("\"filters\""))
+        assertFalse(jsonText.contains("\"query\""))
+        assertFalse(jsonText.contains("\"sort\""))
+        assertTrue(jsonText.contains("\"format_preset\":\"STANDARD_COMMA_UTF8\""))
+        assertTrue(jsonText.contains("\"search_id\":\"test-search\""))
+        assertTrue(jsonText.contains("\"from\":\"2026-11-01T00:00:00Z\""))
+        assertTrue(jsonText.contains("\"to\":\"2026-11-02T00:00:00Z\""))
+        assertTrue(jsonText.contains("\"validity\":\"VALID\""))
+        assertTrue(jsonText.contains("\"include_media_links\":true"))
+    }
+
+    // Scenario 80: Export status: nullable fields, canonical statuses, and download gating
+    @Test
+    fun testScenario80_ExportStatusNullableFieldsAndCanonicalStatuses() {
+        val queuedJson =
+            """
+            {
+              "export_id": "exp-queued-1",
+              "status": "QUEUED",
+              "created_at": "2026-11-16T14:30:00Z",
+              "updated_at": "2026-11-16T14:30:01Z",
+              "finished_at": null,
+              "processed_records": 0,
+              "total_records": null,
+              "expires_at": null,
+              "failure_code": null,
+              "download_url": null
+            }
+            """.trimIndent()
+
+        val testJson = Json { ignoreUnknownKeys = true }
+        val queuedDto = testJson.decodeFromString<EventsExportStatusDto>(queuedJson)
+        val queuedDomain = EventsDtoMapper.mapExportStatus(queuedDto)
+        assertEquals(EventsExportStatusCode.QUEUED, queuedDomain.status)
+        assertNull(queuedDomain.totalRecords)
+        assertEquals(0L, queuedDomain.processedRecords)
+        assertNull(queuedDomain.finishedAt)
+        assertNull(queuedDomain.downloadUrl)
+        assertFalse(queuedDomain.isDownloadable)
+
+        val completedJson =
+            """
+            {
+              "export_id": "exp-comp-1",
+              "status": "COMPLETED",
+              "created_at": "2026-11-16T14:30:00Z",
+              "updated_at": "2026-11-16T14:31:00Z",
+              "finished_at": "2026-11-16T14:31:00Z",
+              "processed_records": 1000,
+              "total_records": 1000,
+              "expires_at": "2030-01-01T00:00:00Z",
+              "failure_code": null,
+              "download_url": "/api/v1/companies/c1/events/exports/exp-comp-1/download"
+            }
+            """.trimIndent()
+
+        val compDto = testJson.decodeFromString<EventsExportStatusDto>(completedJson)
+        val compDomain = EventsDtoMapper.mapExportStatus(compDto)
+        assertEquals(EventsExportStatusCode.COMPLETED, compDomain.status)
+        assertEquals(1000L, compDomain.totalRecords)
+        assertEquals(100, compDomain.progressPercent)
+        assertTrue(compDomain.isDownloadable)
+    }
+
+    // Scenario 81: Gap scenario 13: 102 before 101 -> increment replay id -> send REPLAY_REQUEST after 100
+    @Test
+    fun testScenario81_GapScenario13ReplayGenerationIncrement() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var requestedReplayId: Long? = null
+                var requestedAfterSeq: Long? = null
+
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { replayId, afterSeq ->
+                            requestedReplayId = replayId
+                            requestedAfterSeq = afterSeq
+                        },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                val b1 =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-100")),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                                snapshotId = "snap-100",
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(b1, generation = 1L)
+                advanceUntilIdle()
+
+                val initialReplayId = processor.currentReplayId
+
+                // Frame 102 arrives before 101 on active replay generation
+                val commit102 =
+                    sampleCommitDto(
+                        replayId = initialReplayId,
+                        sequence = 102L,
+                        eventId = "ev-102",
+                    )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(commit102))),
+                )
+                advanceUntilIdle()
+
+                // Active replayId must be incremented
+                val newReplayId = processor.currentReplayId
+                assertEquals(initialReplayId + 1, newReplayId)
+
+                // REPLAY_REQUEST sent for afterSequence = 100 with newReplayId
+                assertEquals(newReplayId, requestedReplayId)
+                assertEquals(100L, requestedAfterSeq)
+
+                // Sequence not advanced, commit 102 not applied
+                assertEquals(100L, processor.getAsOfSequence())
+
+                // Old-generation frame must be ignored
+                val oldGenCommit =
+                    sampleCommitDto(
+                        replayId = initialReplayId,
+                        sequence = 101L,
+                        eventId = "ev-101",
+                    )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(oldGenCommit))),
+                )
+                advanceUntilIdle()
+
+                assertEquals(100L, processor.getAsOfSequence())
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 82: RESYNC closes current generation immediately; post-RESYNC frames ignored; invalidation handled
+    @Test
+    fun testScenario82_ResyncClosesGenerationPostResyncCommitsIgnored() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var rebootstrapTriggered = false
+                var accessInvalidatedReason: String? = null
+
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { rebootstrapTriggered = true },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { reason, _ -> accessInvalidatedReason = reason },
+                    )
+
+                val b1 =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-1")),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                                snapshotId = "snap-1",
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(b1, generation = 1L)
+                advanceUntilIdle()
+
+                val closedGen = processor.currentReplayId
+
+                // Receive RESYNC_REQUIRED for closedGen
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(
+                            1L,
+                            IncomingWsFrame.ResyncRequired(ResyncRequiredFrameDto(replayId = closedGen)),
+                        ),
+                    ),
+                )
+                advanceUntilIdle()
+                assertTrue(rebootstrapTriggered)
+
+                // Frames arriving on closedGen must be ignored
+                val commit = sampleCommitDto(replayId = closedGen, sequence = 101L, eventId = "ev-stale")
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(commit))),
+                )
+                advanceUntilIdle()
+                assertEquals(100L, processor.getAsOfSequence())
+
+                // ACCESS_INVALIDATED arriving even on closed generation MUST be handled unconditionally
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(
+                            1L,
+                            IncomingWsFrame.AccessInvalidated(
+                                AccessInvalidatedFrameDto(reason = "TENANT_REVOKED", companyId = "c1"),
+                            ),
+                        ),
+                    ),
+                )
+                advanceUntilIdle()
+                assertEquals("TENANT_REVOKED", accessInvalidatedReason)
+                assertEquals(0, processor.state.value.visibleEvents.size)
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 83: Strict event_version gating on realtime commit
+    @Test
+    fun testScenario83_StrictEventVersionGatingOnRealtimeCommit() {
+        val query = EventsQuery()
+        val currentEvent =
+            sampleEvent("ev-1").copy(
+                eventVersion = 2L,
+                classificationVersion = 2L,
+                acknowledgementVersion = 2L,
+            )
+        val initialOverlay =
+            RealtimeOverlay(
+                entries =
+                    mapOf(
+                        "ev-1" to
+                            studio.acmenra.control.feature.events.domain.model.OverlayEntry(
+                                eventId = "ev-1",
+                                event = currentEvent,
+                                eventVersion = 2L,
+                                membership = OverlayMembership.INCLUDED,
+                            ),
+                    ),
+            )
+
+        // 1. Incoming event with older event_version (1 < 2) but higher classification (3 > 2) must be ignored
+        val staleCommit =
+            currentEvent.copy(
+                eventVersion = 1L,
+                classificationVersion = 3L,
+                isErroneous = true,
+            )
+        val (overlay1, _) =
+            RealtimeOverlayReducer.applyEventCommit(
+                currentOverlay = initialOverlay,
+                event = staleCommit,
+                query = query,
+                snapshotItems = listOf(currentEvent),
+            )
+        assertEquals(2L, overlay1.entries["ev-1"]?.eventVersion)
+        assertFalse(overlay1.entries["ev-1"]?.event?.isErroneous ?: true)
+
+        // 2. Incoming event with equal event_version (2 == 2) must be ignored
+        val equalCommit = currentEvent.copy(eventVersion = 2L)
+        val (overlay2, _) =
+            RealtimeOverlayReducer.applyEventCommit(
+                currentOverlay = initialOverlay,
+                event = equalCommit,
+                query = query,
+                snapshotItems = listOf(currentEvent),
+            )
+        assertEquals(2L, overlay2.entries["ev-1"]?.eventVersion)
+
+        // 3. Incoming event with version 0 is rejected as integrity violation
+        val invalidCommit = currentEvent.copy(eventVersion = 0L)
+        val (overlay3, _) =
+            RealtimeOverlayReducer.applyEventCommit(
+                currentOverlay = initialOverlay,
+                event = invalidCommit,
+                query = query,
+                snapshotItems = listOf(currentEvent),
+            )
+        assertTrue(overlay3.requiresRefresh)
+
+        // 4. Newer event_version (3 > 2) is accepted
+        val newerCommit =
+            currentEvent.copy(
+                eventVersion = 3L,
+                classificationVersion = 3L,
+                isErroneous = true,
+            )
+        val (overlay4, _) =
+            RealtimeOverlayReducer.applyEventCommit(
+                currentOverlay = initialOverlay,
+                event = newerCommit,
+                query = query,
+                snapshotItems = listOf(currentEvent),
+            )
+        assertEquals(3L, overlay4.entries["ev-1"]?.eventVersion)
+        assertTrue(overlay4.entries["ev-1"]?.event?.isErroneous ?: false)
+    }
+
+    // Scenario 84: HeartbeatTracker 5-second ACK window
+    @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+    @Test
+    fun testScenario84_HeartbeatAck5SecondWindow() {
+        val tracker =
+            studio.acmenra.control.feature.events.data.datasource.HeartbeatTracker(
+                maxMissedAcks = 2,
+                ackWindowMs = 5_000L,
+            )
+
+        // Send HB at t = 1000
+        tracker.onHeartbeatSent(nowMs = 1000L)
+        assertTrue(tracker.hasPendingAck.load())
+
+        // ACK arrives in window at t = 3000
+        val ackResult = tracker.onAckReceived(incomingReplayId = 1L, activeReplayId = 1L, nowMs = 3000L)
+        assertTrue(ackResult)
+        assertFalse(tracker.hasPendingAck.load())
+        assertEquals(0, tracker.missedAcks.load())
+
+        // Next HB sent at t = 10000
+        tracker.onHeartbeatSent(nowMs = 10000L)
+
+        // Window timeout at t = 15000 (5s elapsed)
+        val canContinue1 = tracker.onAckWindowTimeout()
+        assertTrue(canContinue1)
+        assertEquals(1, tracker.missedAcks.load())
+
+        // Stale ACK arrives late at t = 16000 -> rejected, missedAcks stays 1
+        val lateAckResult = tracker.onAckReceived(incomingReplayId = 1L, activeReplayId = 1L, nowMs = 16000L)
+        assertFalse(lateAckResult)
+        assertEquals(1, tracker.missedAcks.load())
+
+        // Next HB sent at t = 20000
+        tracker.onHeartbeatSent(nowMs = 20000L)
+
+        // Second consecutive window timeout at t = 25000 -> must trigger reconnect!
+        val canContinue2 = tracker.onAckWindowTimeout()
+        assertFalse(canContinue2)
+        assertEquals(2, tracker.missedAcks.load())
+    }
+
+    // Scenario 85: Filter cache race: delayed old 200 cannot overwrite accepted 304
+    @Test
+    fun testScenario85_FilterCacheRaceDelayed200CannotOverwriteAccepted304() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var callCount = 0
+                val reqALatch = CompletableDeferred<Unit>()
+                val reqBFinished = CompletableDeferred<Unit>()
+
+                val mockRemote =
+                    object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
+                        override suspend fun getBootstrap(
+                            companyId: String,
+                            query: EventsQuery,
+                            limit: Int,
+                        ): EventsBootstrapDto = error("unused")
+
+                        override suspend fun getEventsPage(
+                            companyId: String,
+                            cursor: String,
+                            limit: Int,
+                        ): EventsPageDto = error("unused")
+
+                        override suspend fun getFilterOptions(
+                            companyId: String,
+                            ifNoneMatchEtag: String?,
+                        ): studio.acmenra.control.feature.events.data.datasource.FilterOptionsFetchResult {
+                            callCount++
+                            if (callCount == 1) {
+                                // Request A: initial fetch returns 200 with etag "etag-1"
+                                return FilterOptionsFetchResult.Success(
+                                    options =
+                                        EventsFilterOptionsDto(
+                                            revision = "rev-1",
+                                            eventTypes = listOf(EventTypeOptionDto("t1", "Type 1")),
+                                        ),
+                                    etag = "etag-1",
+                                )
+                            } else if (callCount == 2) {
+                                // Request B: delayed old fetch (simulated delayed 200)
+                                reqALatch.await()
+                                return FilterOptionsFetchResult.Success(
+                                    options =
+                                        EventsFilterOptionsDto(
+                                            revision = "rev-OLD",
+                                            eventTypes = listOf(EventTypeOptionDto("tOLD", "Type OLD")),
+                                        ),
+                                    etag = "etag-OLD",
+                                )
+                            } else {
+                                // Request C: returns 304 NotModified
+                                reqBFinished.complete(Unit)
+                                return FilterOptionsFetchResult.NotModified
+                            }
+                        }
+
+                        override suspend fun acknowledgeEvent(
+                            companyId: String,
+                            eventId: String,
+                        ): EventDto = error("unused")
+
+                        override suspend fun markEventErroneous(
+                            companyId: String,
+                            eventId: String,
+                            expectedClassificationVersion: Long,
+                            idempotencyKey: String,
+                        ): EventDto = error("unused")
+
+                        override suspend fun createExport(
+                            companyId: String,
+                            request: CreateExportRequestDto,
+                            idempotencyKey: String,
+                        ): EventsExportStatusDto = error("unused")
+
+                        override suspend fun getExportStatus(
+                            companyId: String,
+                            exportId: String,
+                        ): EventsExportStatusDto = error("unused")
+
+                        override suspend fun downloadExport(
+                            companyId: String,
+                            exportId: String,
+                        ): EventsExportDownload = error("unused")
+                    }
+
+                val repo =
+                    EventsRepositoryImpl(
+                        remoteDataSource = mockRemote,
+                        webSocketDataSourceFactory = { error("unused") },
+                        sessionManager = SessionManager(TestTokenStorage()),
+                        connectivityProvider =
+                            object : EventsConnectivityProvider {
+                                override val isOnline = MutableStateFlow(true)
+                            },
+                    )
+
+                // 1. Initial fetch caches "rev-1" with etag-1
+                val opt1 = repo.getFilterOptions("c1")
+                assertEquals("rev-1", opt1.revision)
+
+                // 2. Start Request A concurrently, but hold it before completing
+                val jobA = async { repo.getFilterOptions("c1") }
+                testScheduler.runCurrent()
+
+                // 3. Request C runs and receives 304 NotModified, confirming the cache and advancing request generation
+                val optC = repo.getFilterOptions("c1")
+                assertEquals("rev-1", optC.revision)
+
+                // 4. Now release Request A (which tries to return "rev-OLD")
+                reqALatch.complete(Unit)
+                val optA = jobA.await()
+
+                // Cache must NOT be overwritten by the delayed Request A!
+                val cachedNow = repo.getFilterOptions("c1")
+                assertEquals("rev-1", cachedNow.revision)
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    // Scenario 86: Bootstrap side effects: filter options notified strictly after atomic state commit
+    @Test
+    fun testScenario86_FilterOptionsSideEffectsExecutedOnlyAfterAtomicCommit() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var notifiedOptions: EventsFilterOptionsDto? = null
+                var feedVisibleSizeOnNotification = -1
+
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                        onFilterOptionsUpdated = { options ->
+                            notifiedOptions = options
+                        },
+                    )
+
+                // Try invalid bootstrap (sequence mismatch) with filter options update: must NOT notify side effect!
+                val invalidBootstrap =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-1")),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                                snapshotId = "snap-1",
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 105L, // Mismatch!
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                val res = processor.installBootstrap(invalidBootstrap, generation = 1L)
+                assertEquals(BootstrapApplyResult.RetryRequired, res)
+                assertNull(notifiedOptions)
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // Scenario 87: SessionManager refresh semantics: delegate returning null returns null
+    @Test
+    fun testScenario87_SessionManagerRefreshNullDelegateReturnsSnapshot() =
+        runTest(testDispatcher) {
+            val storage = TestTokenStorage(TokenPair("acc-old", "ref-old"))
+            val sessionManager = SessionManager(storage)
+
+            // 1. No delegate: returns getSnapshot()
+            val snap1 = sessionManager.refreshActiveSession()
+            assertNotNull(snap1)
+            assertEquals("acc-old", snap1.tokens.accessToken)
+
+            // 2. Delegate registered, returns null (refresh failed) -> must return null, NOT old snapshot!
+            val failingDelegate: suspend (String?) -> studio.acmenra.control.core.network.auth.SessionSnapshot? =
+                { _ -> null }
+            sessionManager.setRefreshDelegate(failingDelegate)
+
+            val snap2 = sessionManager.refreshActiveSession("acc-old")
+            assertNull(snap2)
+
+            // 3. Clear delegate using CAS
+            sessionManager.clearRefreshDelegate(failingDelegate)
+            val snap3 = sessionManager.refreshActiveSession()
+            assertNotNull(snap3)
+        }
+
+    // Scenario 88: Clean Architecture: ViewModel catches Domain Exceptions, not Data layer
+    @Test
+    fun testScenario88_CleanArchitectureViewModelNeverImportsDataExceptions() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val createExportException =
+                    object : CreateEventsExportUseCase {
+                        override suspend fun invoke(
+                            companyId: String,
+                            request: EventsExportRequest,
+                            idempotencyKey: String,
+                        ): EventsExportStatus = throw EventsDomainException.PermissionDenied("ACCESS_REVOKED")
+                    }
+
+                val vm =
+                    createTestViewModel(
+                        createEventsExportUseCase = createExportException,
+                    )
+
+                vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true, reportsExport = true))
+                vm.startExport()
+                testScheduler.runCurrent()
+
+                // Verified that PermissionDenied domain exception maps to access revoked message
+                assertEquals(
+                    Res.string.events_export_error_access_revoked,
+                    vm.state.value.exportError,
+                )
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    // Scenario 89: Date route codec UTC bounds round-trip and timezone reconstruction
+    @Test
+    fun testScenario89_DateRouteCodecUtcLocalRoundTripAndReconstruction() {
+        val from = kotlin.time.Instant.parse("2026-11-16T00:00:00Z")
+        val to = kotlin.time.Instant.parse("2026-11-17T00:00:00Z")
+        val query =
+            EventsQuery(
+                filter =
+                    EventsFilter(
+                        dateFrom = from,
+                        dateTo = to,
+                        validity = EventValidityFilter.VALID,
+                    ),
+            )
+
+        val encoded = EventsQueryRouteCodec.encodeHash("comp-1", query)
+        assertTrue(encoded.contains("from=2026-11-16T00%3A00%3A00Z"))
+        assertTrue(encoded.contains("to=2026-11-17T00%3A00%3A00Z"))
+
+        // Decode without timezone: preserves UTC instants
+        val (decodedComp, decodedQuery) = EventsQueryRouteCodec.decodeHash(encoded)
+        assertEquals("comp-1", decodedComp)
+        assertEquals(from, decodedQuery.filter.dateFrom)
+        assertEquals(to, decodedQuery.filter.dateTo)
+
+        // Reconstruct with timezone
+        val tz = kotlinx.datetime.TimeZone.UTC
+        val (_, decodedWithTz) = EventsQueryRouteCodec.decodeHash(encoded, tz)
+        assertTrue(decodedWithTz.filter.dateSelection is DateSelection.Single)
+        assertEquals(
+            kotlinx.datetime.LocalDate(2026, 11, 16),
+            (decodedWithTz.filter.dateSelection as DateSelection.Single).date,
+        )
+    }
+
+    // Scenario 90: Download export: bounded streaming cap at 100MB
+    @Test
+    fun testScenario90_DownloadExportBoundedMemoryStreamingCap100MB() =
+        runTest(testDispatcher) {
+            val maxBytes = 100L * 1024 * 1024
+
+            val mockEngine =
+                MockEngine { request ->
+                    val cl = request.headers[HttpHeaders.ContentLength]?.toLongOrNull()
+                    respond(
+                        content =
+                            io.ktor.utils.io
+                                .ByteReadChannel(ByteArray(0)),
+                        status = HttpStatusCode.OK,
+                        headers =
+                            headersOf(
+                                HttpHeaders.ContentType to listOf("text/csv"),
+                                HttpHeaders.ContentLength to listOf((maxBytes + 1L).toString()),
+                            ),
+                    )
+                }
+
+            val remote = KtorEventsRemoteDataSource(HttpClient(mockEngine))
+            val ex =
+                try {
+                    remote.downloadExport("c1", "exp-1")
+                    null
+                } catch (
+                    e: studio.acmenra.control.feature.events.data.datasource.EventsApiException.ExportDownloadTooLarge,
+                ) {
+                    e
+                }
+            assertNotNull(ex)
+            assertEquals(maxBytes, ex.maxBytes)
+        }
 }

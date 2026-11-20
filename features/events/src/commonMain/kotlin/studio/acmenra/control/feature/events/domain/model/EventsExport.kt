@@ -26,12 +26,34 @@ data class EventsExportStatus(
     val exportId: String,
     val status: EventsExportStatusCode,
     val progressPercent: Int = 0,
-    val processedRecords: Int = 0,
-    val totalRecords: Int = 0,
+    val processedRecords: Long? = null,
+    val totalRecords: Long? = null,
     val createdAt: Instant,
+    val updatedAt: Instant? = null,
+    val finishedAt: Instant? = null,
     val expiresAt: Instant? = null,
     val failureCode: String? = null,
-)
+    val downloadUrl: String? = null,
+) {
+    val derivedProgressPercent: Int?
+        get() {
+            val total = totalRecords ?: return null
+            val processed = processedRecords ?: return null
+            if (total <= 0L) return null
+            return ((processed.toDouble() / total.toDouble()) * 100).toInt().coerceIn(0, 100)
+        }
+
+    val isDownloadable: Boolean
+        get() =
+            status == EventsExportStatusCode.COMPLETED &&
+                downloadUrl != null &&
+                (
+                    expiresAt == null ||
+                        expiresAt >
+                        kotlin.time.Clock.System
+                            .now()
+                )
+}
 
 data class EventsExportDownload(
     val exportId: String,

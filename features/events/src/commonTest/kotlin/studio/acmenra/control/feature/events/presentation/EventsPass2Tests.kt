@@ -452,6 +452,8 @@ class EventsPass2Tests {
                     exportId = "exp-auto",
                     status = EventsExportStatusCode.COMPLETED,
                     createdAt = Instant.parse("2026-03-01T12:00:00Z"),
+                    expiresAt = Clock.System.now() + 1.hours,
+                    downloadUrl = "https://example.com/exp-auto.csv",
                 )
             val createExport = FakeCreateEventsExportUseCase(statusToReturn = completedStatus)
             val downloadExport = FakeDownloadEventsExportUseCase()
@@ -533,34 +535,55 @@ class EventsPass2Tests {
     @Test
     fun testExport_ManualDownload_BlockedWhenAlreadyDownloading() =
         runTest(testDispatcher) {
+            val completedStatus =
+                EventsExportStatus(
+                    exportId = "exp-manual",
+                    status = EventsExportStatusCode.COMPLETED,
+                    createdAt = Instant.parse("2026-03-01T12:00:00Z"),
+                    expiresAt = Clock.System.now() + 1.hours,
+                    downloadUrl = "https://example.com/exp-manual.csv",
+                )
+            val createExport = FakeCreateEventsExportUseCase(statusToReturn = completedStatus)
             val gate = CompletableDeferred<Unit>()
-            val downloadExport = FakeDownloadEventsExportUseCase().apply { suspendGate = gate }
+            val downloadExport =
+                FakeDownloadEventsExportUseCase().apply {
+                    shouldFail = true
+                }
             val saver = FakeExportFileSaver()
             val vm =
                 createViewModel(
+                    createExport = createExport,
                     downloadExport = downloadExport,
                     exportSaver = saver,
                 )
             vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true, reportsExport = true))
 
-            // Start first download
+            // Start export and let auto-download fail, leaving completedStatus in state
+            vm.startExport()
+            advanceUntilIdle()
+
+            // Now configure gate on downloadExport for manual download
+            downloadExport.shouldFail = false
+            downloadExport.suspendGate = gate
+
+            // Start first manual download
             vm.downloadExport("exp-manual")
             testScheduler.runCurrent()
 
             // Coroutine has started and is suspended inside download use case
             assertTrue(vm.state.value.isExportDownloading)
-            assertEquals(1, downloadExport.callCount)
+            assertEquals(2, downloadExport.callCount)
 
             // Second manual download call while first is in-flight must be rejected
             vm.downloadExport("exp-manual")
             testScheduler.runCurrent()
-            assertEquals(1, downloadExport.callCount)
+            assertEquals(2, downloadExport.callCount)
 
             // Release the gate and let first download complete
             gate.complete(Unit)
             advanceUntilIdle()
 
-            assertEquals(1, downloadExport.callCount)
+            assertEquals(2, downloadExport.callCount)
             assertFalse(vm.state.value.isExportDownloading)
             assertEquals(1, saver.savedDownloads.size)
         }

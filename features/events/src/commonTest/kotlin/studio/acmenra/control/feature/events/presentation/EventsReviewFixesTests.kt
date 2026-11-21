@@ -3,8 +3,11 @@ package studio.acmenra.control.feature.events.presentation
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respondOk
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,6 +21,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.datetime.LocalDate
+import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.TimeZone
 import org.koin.core.context.startKoin
 import org.koin.core.context.stopKoin
@@ -27,19 +31,33 @@ import studio.acmenra.control.core.network.client.ApiConfig
 import studio.acmenra.control.core.ui.notice.Notice
 import studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.EventsWebSocketDataSource
+import studio.acmenra.control.feature.events.data.datasource.IncomingWsEnvelope
+import studio.acmenra.control.feature.events.data.datasource.IncomingWsFrame
 import studio.acmenra.control.feature.events.data.datasource.KtorEventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.KtorEventsWebSocketDataSource
+import studio.acmenra.control.feature.events.data.datasource.MockEventsDataStore
 import studio.acmenra.control.feature.events.data.datasource.MockEventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.MockEventsWebSocketDataSource
+import studio.acmenra.control.feature.events.data.model.CreateExportRequestDto
+import studio.acmenra.control.feature.events.data.model.EventDto
+import studio.acmenra.control.feature.events.data.model.EventsExportFiltersDto
+import studio.acmenra.control.feature.events.data.model.ResyncRequiredFrameDto
+import studio.acmenra.control.feature.events.data.model.TenantCommitFrameDto
+import studio.acmenra.control.feature.events.data.realtime.EventsSessionProcessor
+import studio.acmenra.control.feature.events.data.realtime.SessionCommand
 import studio.acmenra.control.feature.events.di.eventsMockModule
 import studio.acmenra.control.feature.events.di.eventsModule
 import studio.acmenra.control.feature.events.domain.model.DateFilterUtils
 import studio.acmenra.control.feature.events.domain.model.DateSelection
 import studio.acmenra.control.feature.events.domain.model.DeviceFilterOption
 import studio.acmenra.control.feature.events.domain.model.Event
+import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementStatus
 import studio.acmenra.control.feature.events.domain.model.EventIconKey
 import studio.acmenra.control.feature.events.domain.model.EventTypeOption
+import studio.acmenra.control.feature.events.domain.model.EventValidityFilter
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
+import studio.acmenra.control.feature.events.domain.model.EventsBootstrap
+import studio.acmenra.control.feature.events.domain.model.EventsDomainException
 import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
 import studio.acmenra.control.feature.events.domain.model.EventsExportRequest
 import studio.acmenra.control.feature.events.domain.model.EventsExportStatus
@@ -48,9 +66,11 @@ import studio.acmenra.control.feature.events.domain.model.EventsFilter
 import studio.acmenra.control.feature.events.domain.model.EventsFilterOptions
 import studio.acmenra.control.feature.events.domain.model.EventsMutationError
 import studio.acmenra.control.feature.events.domain.model.EventsOperationResult
+import studio.acmenra.control.feature.events.domain.model.EventsPage
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
 import studio.acmenra.control.feature.events.domain.model.EventsSummary
 import studio.acmenra.control.feature.events.domain.model.LocationFilterGroup
+import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
 import studio.acmenra.control.feature.events.domain.usecase.AcknowledgeEventUseCase
@@ -144,7 +164,13 @@ class EventsReviewFixesTests {
         override fun close() {}
     }
 
-    private fun createTestViewModel(feedSession: TestFeedSession = TestFeedSession()): EventsViewModel {
+    private fun createTestViewModel(
+        feedSession: TestFeedSession = TestFeedSession(),
+        createExportUseCase: CreateEventsExportUseCase? = null,
+        observeExportStatusUseCase: ObserveEventsExportStatusUseCase? = null,
+        downloadExportUseCase: DownloadEventsExportUseCase? = null,
+        exportSaver: ExportFileSaver? = null,
+    ): EventsViewModel {
         val observeFeed =
             object : ObserveEventsFeedUseCase {
                 override fun invoke(
@@ -175,7 +201,7 @@ class EventsReviewFixesTests {
                 ): EventsOperationResult<Event> =
                     EventsOperationResult.Failure(EventsMutationError.Server("not implemented"))
             }
-        val createExport =
+        val defaultCreateExport =
             object : CreateEventsExportUseCase {
                 override suspend fun invoke(
                     companyId: String,
@@ -188,7 +214,7 @@ class EventsReviewFixesTests {
                         createdAt = Clock.System.now(),
                     )
             }
-        val observeExportStatus =
+        val defaultObserveExportStatus =
             object : ObserveEventsExportStatusUseCase {
                 override suspend fun invoke(
                     companyId: String,
@@ -200,14 +226,14 @@ class EventsReviewFixesTests {
                         createdAt = Clock.System.now(),
                     )
             }
-        val downloadExport =
+        val defaultDownloadExport =
             object : DownloadEventsExportUseCase {
                 override suspend fun invoke(
                     companyId: String,
                     exportId: String,
                 ): EventsExportDownload = EventsExportDownload("file.csv", 100L, "h-1")
             }
-        val exportSaver =
+        val defaultExportSaver =
             object : ExportFileSaver {
                 override suspend fun saveExportFile(download: EventsExportDownload): Boolean = true
             }
@@ -217,10 +243,10 @@ class EventsReviewFixesTests {
             loadEventFilterOptionsUseCase = loadOptions,
             acknowledgeEventUseCase = ack,
             markEventErroneousUseCase = markErroneous,
-            createEventsExportUseCase = createExport,
-            observeEventsExportStatusUseCase = observeExportStatus,
-            downloadEventsExportUseCase = downloadExport,
-            exportFileSaver = exportSaver,
+            createEventsExportUseCase = createExportUseCase ?: defaultCreateExport,
+            observeEventsExportStatusUseCase = observeExportStatusUseCase ?: defaultObserveExportStatus,
+            downloadEventsExportUseCase = downloadExportUseCase ?: defaultDownloadExport,
+            exportFileSaver = exportSaver ?: defaultExportSaver,
         )
     }
 
@@ -490,6 +516,9 @@ class EventsReviewFixesTests {
             advanceUntilIdle()
             assertNull(vm.state.value.filter.searchId)
             assertFalse(vm.state.value.filter.hasActiveFilters)
+            assertNotNull(observedUrlHash)
+            assertFalse(observedUrlHash!!.contains("searchId=ev_pending"))
+            assertFalse(observedUrlHash!!.contains("ev_pending"))
         }
 
     // --- Requirement 6: Export isDownloadable check ---
@@ -516,4 +545,393 @@ class EventsReviewFixesTests {
         val processing = valid.copy(status = EventsExportStatusCode.PROCESSING)
         assertFalse(processing.isDownloadable(now))
     }
+
+    // --- Requirement 7: Export flushes pending search input (P2) ---
+    @Test
+    fun testExport_SearchDebounceFlushedOnStartExport() =
+        runTest(testDispatcher) {
+            val feedSession = TestFeedSession()
+            var createdRequest: EventsExportRequest? = null
+            val createExportSpy =
+                object : CreateEventsExportUseCase {
+                    override suspend fun invoke(
+                        companyId: String,
+                        request: EventsExportRequest,
+                        idempotencyKey: String,
+                    ): EventsExportStatus {
+                        createdRequest = request
+                        return EventsExportStatus(
+                            exportId = "exp-flushed",
+                            status = EventsExportStatusCode.QUEUED,
+                            createdAt = Clock.System.now(),
+                        )
+                    }
+                }
+            val vm = createTestViewModel(feedSession, createExportUseCase = createExportSpy)
+            vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true, reportsExport = true))
+            advanceUntilIdle()
+
+            // User types search ID and clicks Start Export after only 100ms (< 400ms debounce)
+            vm.onSearchIdChanged("ev_flush_123")
+            advanceTimeBy(100L)
+            vm.startExport()
+            advanceUntilIdle()
+
+            assertNotNull(createdRequest, "Export request must be created")
+            assertEquals("ev_flush_123", createdRequest!!.query.filter.searchId)
+            assertEquals("ev_flush_123", vm.state.value.filter.searchId)
+        }
+
+    // --- Requirement 8: Strict canDownloadExport validation (P2) ---
+    @Test
+    fun testExport_StrictDownloadValidation() =
+        runTest(testDispatcher) {
+            val feedSession = TestFeedSession()
+            var downloadCallCount = 0
+            val downloadSpy =
+                object : DownloadEventsExportUseCase {
+                    override suspend fun invoke(
+                        companyId: String,
+                        exportId: String,
+                    ): EventsExportDownload {
+                        downloadCallCount++
+                        return EventsExportDownload("file.csv", 100L, "h-1")
+                    }
+                }
+            val vm = createTestViewModel(feedSession, downloadExportUseCase = downloadSpy)
+            vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true, reportsExport = true))
+            advanceUntilIdle()
+
+            // 1. Without job status: downloadExport must be rejected
+            vm.downloadExport("arbitrary-id")
+            advanceUntilIdle()
+            assertEquals(0, downloadCallCount)
+
+            // 2. Start an export that completes
+            vm.startExport()
+            advanceUntilIdle()
+
+            // Export in state is "exp-1", attempting to download "other-id" must be rejected
+            vm.downloadExport("other-id")
+            advanceUntilIdle()
+            assertEquals(0, downloadCallCount)
+        }
+
+    // --- Requirement 9: MockDataStore idempotency, isolation, and escaping (P2) ---
+    @Test
+    fun testMockDataStore_IdempotencyAndCompanyIsolationAndCsvEscaping() =
+        runTest {
+            val store = MockEventsDataStore()
+            val request =
+                CreateExportRequestDto(
+                    filters = EventsExportFiltersDto(),
+                    includeMediaLinks = false,
+                    formatPreset = "STANDARD_COMMA_UTF8",
+                )
+
+            // 1. Idempotency: same companyId and idempotencyKey returns exact same exportId
+            val status1 = store.createExport("comp-A", request, "key-123")
+            val status2 = store.createExport("comp-A", request, "key-123")
+            assertEquals(status1.exportId, status2.exportId)
+            assertEquals(status1.createdAt, status2.createdAt)
+
+            // 2. Company isolation: accessing comp-A's export with comp-B fails closed
+            assertFailsWith<EventsDomainException.PermissionDenied> {
+                store.getExportStatus("comp-B", status1.exportId)
+            }
+            assertFailsWith<EventsDomainException.PermissionDenied> {
+                store.downloadExport("comp-B", status1.exportId)
+            }
+        }
+
+    // --- Requirement 10: Date display formatting localization and seconds (P2/P3) ---
+    @Test
+    fun testDateDisplayFormatter_LocalizationAndSeconds() {
+        val tz = TimeZone.of("Europe/Moscow")
+
+        // 1. Localization prefixes
+        val fromInstant = Instant.parse("2026-03-05T00:00:00Z")
+        val formattedEn =
+            EventDateDisplayFormatter.formatFilterDisplayDate(
+                dateFrom = fromInstant,
+                dateTo = null,
+                businessTimeZone = tz,
+                fromPrefix = "from",
+                toPrefix = "to",
+            )
+        assertNotNull(formattedEn)
+        assertTrue(formattedEn.startsWith("from "))
+
+        val formattedRu =
+            EventDateDisplayFormatter.formatFilterDisplayDate(
+                dateFrom = fromInstant,
+                dateTo = null,
+                businessTimeZone = tz,
+                fromPrefix = "от",
+                toPrefix = "до",
+            )
+        assertNotNull(formattedRu)
+        assertTrue(formattedRu.startsWith("от "))
+
+        // 2. Non-zero seconds in formatLocalDateTime
+        val dtWithSec = LocalDateTime(2026, 3, 5, 14, 30, 45)
+        val formattedWithSec = EventDateDisplayFormatter.formatLocalDateTime(dtWithSec)
+        assertEquals("05.03.2026 14:30:45", formattedWithSec)
+
+        val dtWithoutSec = LocalDateTime(2026, 3, 5, 14, 30, 0)
+        val formattedWithoutSec = EventDateDisplayFormatter.formatLocalDateTime(dtWithoutSec)
+        assertEquals("05.03.2026 14:30", formattedWithoutSec)
+    }
+
+    // --- Requirement 3.1: Live update for unknown event triggers authoritative rebootstrap ---
+    @Test
+    fun testRealtime_UnknownUpdatedEvent_TriggersRebootstrap() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var rebootstrapTriggered = false
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { rebootstrapTriggered = true },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                val initialBootstrap =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-1")),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(initialBootstrap, generation = 1L)
+                processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.CONNECTED))
+                advanceUntilIdle()
+
+                val activeReplayId = processor.currentReplayId
+                assertFalse(rebootstrapTriggered)
+
+                // Dispatch an update for an event unknown to snapshot or overlay
+                val commit101 =
+                    TenantCommitFrameDto(
+                        replayId = activeReplayId,
+                        tenantSequence = 101L,
+                        payloadSha256 = "0".repeat(64),
+                        eventUpdated = sampleEventDto("ev-unknown-999"),
+                    )
+
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(
+                            connectionId = 1L,
+                            frame = IncomingWsFrame.TenantCommit(commit101),
+                        ),
+                    ),
+                )
+                advanceUntilIdle()
+
+                assertTrue(rebootstrapTriggered, "Update for unknown event must trigger authoritative rebootstrap")
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    // --- Requirement 3.2: Batch replay sequentially computes net count delta against workingEvents ---
+    @Test
+    fun testRealtime_MultipleUpdatesInSameReplayBatch_SequentialCountDelta() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val query = EventsQuery(filter = EventsFilter(validity = EventValidityFilter.VALID))
+                val processor =
+                    EventsSessionProcessor(
+                        query = query,
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = testScope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                val initialBootstrap =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-1", isErroneous = false)),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(initialBootstrap, generation = 1L)
+                advanceUntilIdle()
+                val activeReplayId = processor.currentReplayId
+                assertEquals(1, processor.state.value.snapshotTotalCount)
+
+                // Enter rebootstrap via RESYNC_REQUIRED so subsequent commits are buffered
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(
+                            connectionId = 1L,
+                            frame =
+                                IncomingWsFrame.ResyncRequired(
+                                    ResyncRequiredFrameDto(replayId = activeReplayId),
+                                ),
+                        ),
+                    ),
+                )
+                advanceUntilIdle()
+
+                val bufferReplayId = processor.nextReplayGeneration()
+
+                // Batch contains sequential updates for the same event:
+                // 1) ev-1: VALID -> ERRONEOUS (delta -1 -> totalCount 0)
+                // 2) ev-1: ERRONEOUS -> VALID (delta +1 -> totalCount 1)
+                // 3) ev-1: VALID -> ERRONEOUS (delta -1 -> totalCount 0)
+                val commit101 =
+                    TenantCommitFrameDto(
+                        replayId = bufferReplayId,
+                        tenantSequence = 101L,
+                        payloadSha256 = "1".repeat(64),
+                        eventUpdated = sampleEventDto("ev-1", isErroneous = true),
+                    )
+                val commit102 =
+                    TenantCommitFrameDto(
+                        replayId = bufferReplayId,
+                        tenantSequence = 102L,
+                        payloadSha256 = "2".repeat(64),
+                        eventUpdated = sampleEventDto("ev-1", isErroneous = false),
+                    )
+                val commit103 =
+                    TenantCommitFrameDto(
+                        replayId = bufferReplayId,
+                        tenantSequence = 103L,
+                        payloadSha256 = "3".repeat(64),
+                        eventUpdated = sampleEventDto("ev-1", isErroneous = true),
+                    )
+
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(connectionId = 1L, frame = IncomingWsFrame.TenantCommit(commit101)),
+                    ),
+                )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(connectionId = 1L, frame = IncomingWsFrame.TenantCommit(commit102)),
+                    ),
+                )
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(connectionId = 1L, frame = IncomingWsFrame.TenantCommit(commit103)),
+                    ),
+                )
+                advanceUntilIdle()
+
+                // Authoritative bootstrap arrives with snapshot cursor = 100L and totalCount = 1
+                val rebootstrapSnapshot =
+                    EventsBootstrap(
+                        page =
+                            EventsPage(
+                                items = listOf(sampleEvent("ev-1", isErroneous = false)),
+                                nextCursor = null,
+                                hasMore = false,
+                                totalCount = 1,
+                                asOfSequence = 100L,
+                            ),
+                        summary =
+                            EventsSummary(
+                                businessTimezone = "UTC",
+                                businessDate = "2026-03-01",
+                                summaryAsOfSequence = 100L,
+                                todayEventsCount = 1,
+                            ),
+                        streamCursor = 100L,
+                    )
+                processor.installBootstrap(rebootstrapSnapshot, generation = 2L)
+                advanceUntilIdle()
+
+                // With sequential evaluation against workingEvents, count is accurately 0 (1 - 1 + 1 - 1)
+                assertEquals(0, processor.state.value.snapshotTotalCount)
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    private fun sampleEvent(
+        id: String,
+        isErroneous: Boolean = false,
+    ): Event =
+        Event(
+            id = id,
+            eventVersion = 1L,
+            classificationVersion = 1L,
+            acknowledgementVersion = 1L,
+            eventTypeId = "type-1",
+            eventTypeName = "Safety Violation",
+            categoryCode = "safety",
+            iconKey = EventIconKey.GENERIC_ALERT,
+            locationId = "loc-1",
+            locationName = "Workshop 1",
+            deviceId = "dev-1",
+            deviceName = "Camera 1",
+            occurredAt = Instant.parse("2026-03-01T10:00:00Z"),
+            receivedAt = Instant.parse("2026-03-01T10:00:01Z"),
+            status = EventAcknowledgementStatus.NEW,
+            acknowledgedAt = null,
+            acknowledgedBy = null,
+            isErroneous = isErroneous,
+            previewUrl = "https://cdn.example.com/preview.jpg",
+            videoUrl = "https://cdn.example.com/video.mp4",
+        )
+
+    private fun sampleEventDto(
+        id: String,
+        isErroneous: Boolean = false,
+    ): EventDto =
+        EventDto(
+            id = id,
+            eventVersion = 1L,
+            classificationVersion = 1L,
+            acknowledgementVersion = 1L,
+            eventTypeId = "type-1",
+            eventTypeName = "Safety Violation",
+            categoryCode = "safety",
+            iconKey = "generic_alert",
+            locationId = "loc-1",
+            locationName = "Workshop 1",
+            deviceId = "dev-1",
+            deviceName = "Camera 1",
+            occurredAt = "2026-03-01T10:00:00Z",
+            receivedAt = "2026-03-01T10:00:01Z",
+            status = "NEW",
+            isErroneous = isErroneous,
+            previewUrl = "https://cdn.example.com/preview.jpg",
+            videoUrl = "https://cdn.example.com/video.mp4",
+        )
 }

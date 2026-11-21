@@ -47,6 +47,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Clock
+import kotlin.time.Duration.Companion.hours
 import kotlin.time.Instant
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -193,6 +195,8 @@ class EventsViewModelTest {
                         exportId = exportId,
                         status = EventsExportStatusCode.COMPLETED,
                         createdAt = Instant.parse("2026-03-01T12:00:00Z"),
+                        expiresAt = Clock.System.now() + 1.hours,
+                        downloadUrl = "https://example.com/dl.csv",
                     )
             }
         val downloadExport =

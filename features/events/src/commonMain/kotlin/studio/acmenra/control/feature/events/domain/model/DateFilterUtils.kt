@@ -1,11 +1,9 @@
 package studio.acmenra.control.feature.events.domain.model
 
 import kotlinx.datetime.DateTimeUnit
-import kotlinx.datetime.LocalDate
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.atStartOfDayIn
 import kotlinx.datetime.minus
-import kotlinx.datetime.number
 import kotlinx.datetime.offsetIn
 import kotlinx.datetime.plus
 import kotlinx.datetime.toLocalDateTime
@@ -131,68 +129,5 @@ object DateFilterUtils {
         val businessOffsetSeconds = at.offsetIn(businessTimeZone).totalSeconds
         val moscowOffsetSeconds = at.offsetIn(moscowTimeZone).totalSeconds
         return MskOffset(businessOffsetSeconds - moscowOffsetSeconds)
-    }
-
-    fun formatMskOffset(
-        at: Instant,
-        businessTimeZone: TimeZone,
-        mskPrefix: String = "MSK",
-    ): String {
-        val offset = mskOffsetAt(at, businessTimeZone)
-        val diffSeconds = offset.totalSecondsFromMoscow
-        if (diffSeconds == 0) return mskPrefix
-        val sign = if (diffSeconds > 0) "+" else "-"
-        val absSec = kotlin.math.abs(diffSeconds)
-        val hours = absSec / 3600
-        val minutes = (absSec % 3600) / 60
-        val seconds = absSec % 60
-        return when {
-            seconds > 0 ->
-                "$mskPrefix$sign$hours:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}"
-            minutes > 0 -> "$mskPrefix$sign$hours:${minutes.toString().padStart(2, '0')}"
-            else -> "$mskPrefix$sign$hours"
-        }
-    }
-
-    fun formatLocalDate(date: LocalDate): String {
-        val d = date.day.toString().padStart(2, '0')
-        val m =
-            date.month.number
-                .toString()
-                .padStart(2, '0')
-        return "$d.$m.${date.year}"
-    }
-
-    fun formatFilterDisplayDate(
-        dateFrom: Instant?,
-        dateTo: Instant?,
-        businessTimeZone: TimeZone?,
-    ): String? {
-        if (businessTimeZone == null || (dateFrom == null && dateTo == null)) return null
-        if (dateFrom != null && dateTo != null) {
-            val startDate = dateFrom.toLocalDateTime(businessTimeZone).date
-            val endExclusiveDate = dateTo.toLocalDateTime(businessTimeZone).date
-            val isFromMidnight = dateFrom == startDate.atStartOfDayIn(businessTimeZone)
-            val isToMidnight = dateTo == endExclusiveDate.atStartOfDayIn(businessTimeZone)
-            if (isFromMidnight && isToMidnight && endExclusiveDate > startDate) {
-                val endInclusiveDate = endExclusiveDate.minus(1, DateTimeUnit.DAY)
-                return if (startDate == endInclusiveDate) {
-                    formatLocalDate(startDate)
-                } else {
-                    "${formatLocalDate(startDate)} – ${formatLocalDate(endInclusiveDate)}"
-                }
-            }
-            return "${formatLocalDate(startDate)} – ${formatLocalDate(endExclusiveDate)}"
-        } else if (dateFrom != null) {
-            val startDate = dateFrom.toLocalDateTime(businessTimeZone).date
-            return "от ${formatLocalDate(startDate)}"
-        } else if (dateTo != null) {
-            val endExclusiveDate = dateTo.toLocalDateTime(businessTimeZone).date
-            val isToMidnight = dateTo == endExclusiveDate.atStartOfDayIn(businessTimeZone)
-            val endDisplayDate =
-                if (isToMidnight) endExclusiveDate.minus(1, DateTimeUnit.DAY) else endExclusiveDate
-            return "до ${formatLocalDate(endDisplayDate)}"
-        }
-        return null
     }
 }

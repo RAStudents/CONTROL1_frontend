@@ -219,10 +219,8 @@ fun EventsScreen(
     val businessTimeZone =
         remember(state.summary?.businessTimezone) {
             state.summary?.businessTimezone?.let {
-                studio.acmenra.control.feature.events.domain.model.DateFilterUtils
-                    .resolveBusinessTimeZone(it)
-            } ?: studio.acmenra.control.feature.events.domain.model.DateFilterUtils
-                .resolveBusinessTimeZone("Europe/Moscow") ?: kotlinx.datetime.TimeZone.UTC
+                DateFilterUtils.resolveBusinessTimeZone(it)
+            }
         }
 
     val topBarActions: @Composable RowScope.() -> Unit =
@@ -362,9 +360,10 @@ fun EventsScreen(
 
         // Date Picker Dialog
         if (state.isDatePickerOpen) {
-            val initialDateSelection: DateSelection =
+            val hasDateFilter = state.filter.dateFrom != null || state.filter.dateTo != null
+            val parsedSelection: DateSelection? =
                 remember(state.filter.dateFrom, state.filter.dateTo, businessTimeZone) {
-                    if (businessTimeZone != null && (state.filter.dateFrom != null || state.filter.dateTo != null)) {
+                    if (businessTimeZone != null && hasDateFilter) {
                         try {
                             DateFilterUtils.utcBoundsToDateSelection(
                                 dateFrom = state.filter.dateFrom,
@@ -372,18 +371,22 @@ fun EventsScreen(
                                 businessTimeZone = businessTimeZone,
                             )
                         } catch (_: Exception) {
-                            DateSelection.All
+                            null
                         }
-                    } else {
+                    } else if (!hasDateFilter) {
                         DateSelection.All
+                    } else {
+                        null
                     }
                 }
+            val isCustomInterval = hasDateFilter && parsedSelection == null
             EventsDatePickerDialog(
-                initialSelection = initialDateSelection,
+                initialSelection = parsedSelection ?: DateSelection.All,
+                isCustomInterval = isCustomInterval,
                 timeZone = businessTimeZone,
                 onDismissRequest = onCloseDatePicker,
                 onApply = onDateSelectionChanged,
-                onReset = { onDateSelectionChanged(DateSelection.All) },
+                onReset = onResetDate ?: { onDateSelectionChanged(DateSelection.All) },
             )
         }
     }
@@ -436,6 +439,7 @@ private fun WideEventsLayout(
                 onResetDate = onResetDate,
                 onEventTypesApplied = onEventTypesApplied,
                 onDevicesApplied = onDevicesApplied,
+                onResetFilters = onResetFilters,
                 businessTimeZone = businessTimeZone,
                 isFilterOptionsLoading = state.isFilterOptionsLoading,
                 isCompact = false,
@@ -559,6 +563,7 @@ private fun MediumEventsLayout(
             onResetDate = onResetDate,
             onEventTypesApplied = onEventTypesApplied,
             onDevicesApplied = onDevicesApplied,
+            onResetFilters = onResetFilters,
             businessTimeZone = businessTimeZone,
             isFilterOptionsLoading = state.isFilterOptionsLoading,
             isCompact = false,
@@ -720,6 +725,7 @@ private fun CompactEventsLayout(
                     onResetDate = onResetDate,
                     onEventTypesApplied = onEventTypesApplied,
                     onDevicesApplied = onDevicesApplied,
+                    onResetFilters = onResetFilters,
                     businessTimeZone = businessTimeZone,
                     isFilterOptionsLoading = state.isFilterOptionsLoading,
                     isCompact = true,

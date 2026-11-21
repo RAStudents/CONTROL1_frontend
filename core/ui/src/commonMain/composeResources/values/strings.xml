@@ -173,6 +173,8 @@
     <string name="events_export_error_access_revoked">Export access was revoked</string>
     <string name="events_export_downloading">Downloading export file...</string>
     <string name="events_export_download_success">Export saved successfully</string>
+    <string name="events_export_download_initiated">Export download initiated</string>
+    <string name="events_date_custom_interval">Custom interval</string>
     <string name="events_export_download_error">Failed to download export file</string>
 
     <!-- Error States -->

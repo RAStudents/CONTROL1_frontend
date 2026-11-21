@@ -173,7 +173,7 @@ object AmberDimens {
     val ListItemHeight = 72.dp
     val ListIconCircle = 40.dp
     val ListIcon = 24.dp
-    val TextFieldHeight = 64.dp
+    val TextFieldHeight = 56.dp
     val EventsFilterFieldHeight = 64.dp
     val ButtonHeight = 56.dp
     val TopBarHeight = 64.dp

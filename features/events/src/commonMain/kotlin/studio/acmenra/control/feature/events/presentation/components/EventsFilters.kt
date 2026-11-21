@@ -11,24 +11,23 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TriStateCheckbox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
 import org.jetbrains.compose.resources.stringResource
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.events_date_apply
+import studio.acmenra.control.core.ui.generated.resources.events_date_custom_interval
 import studio.acmenra.control.core.ui.generated.resources.events_filter_clear_search_tooltip
 import studio.acmenra.control.core.ui.generated.resources.events_filter_date_all
 import studio.acmenra.control.core.ui.generated.resources.events_filter_date_label
@@ -40,14 +39,15 @@ import studio.acmenra.control.core.ui.generated.resources.events_filter_reset_to
 import studio.acmenra.control.core.ui.generated.resources.events_filter_search_placeholder
 import studio.acmenra.control.core.ui.generated.resources.events_filter_types_all
 import studio.acmenra.control.core.ui.generated.resources.events_filter_types_label
+import studio.acmenra.control.core.ui.generated.resources.events_filters_reset
 import studio.acmenra.control.core.ui.generated.resources.events_search_id_label
 import studio.acmenra.control.core.ui.generated.resources.events_search_id_placeholder
 import studio.acmenra.control.core.ui.theme.AmberDimens
-import studio.acmenra.control.feature.events.domain.model.DateFilterUtils
 import studio.acmenra.control.feature.events.domain.model.DeviceFilterOption
 import studio.acmenra.control.feature.events.domain.model.EventsFilter
 import studio.acmenra.control.feature.events.domain.model.EventsFilterOptions
 import studio.acmenra.control.feature.events.domain.model.LocationFilterGroup
+import studio.acmenra.control.feature.events.presentation.util.EventDateDisplayFormatter
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -61,20 +61,21 @@ fun EventsFilters(
     onEventTypesApplied: (Set<String>) -> Unit,
     onDevicesApplied: (Set<String>) -> Unit,
     modifier: Modifier = Modifier,
+    onResetFilters: (() -> Unit)? = null,
     businessTimeZone: TimeZone? = null,
     isFilterOptionsLoading: Boolean = false,
     isCompact: Boolean = false,
 ) {
     var searchIdInput by remember(filter.searchId) { mutableStateOf(filter.searchId ?: "") }
-    val coroutineScope = rememberCoroutineScope()
-    var searchDebounceJob by remember { mutableStateOf<Job?>(null) }
 
+    val customIntervalLabel = stringResource(Res.string.events_date_custom_interval)
     val formattedDate =
-        remember(filter.dateFrom, filter.dateTo, businessTimeZone) {
-            DateFilterUtils.formatFilterDisplayDate(
+        remember(filter.dateFrom, filter.dateTo, businessTimeZone, customIntervalLabel) {
+            EventDateDisplayFormatter.formatFilterDisplayDate(
                 dateFrom = filter.dateFrom,
                 dateTo = filter.dateTo,
                 businessTimeZone = businessTimeZone,
+                customIntervalPrefix = customIntervalLabel,
             )
         }
 
@@ -127,19 +128,12 @@ fun EventsFilters(
             clearTooltip = stringResource(Res.string.events_filter_clear_search_tooltip),
             onValueChange = { newText ->
                 searchIdInput = newText
-                searchDebounceJob?.cancel()
-                searchDebounceJob =
-                    coroutineScope.launch {
-                        delay(400L)
-                        onSearchIdChanged(newText.trim())
-                    }
+                onSearchIdChanged(newText)
             },
             onCommit = { committedText ->
-                searchDebounceJob?.cancel()
                 onSearchIdCommitted(committedText.trim())
             },
             onClear = {
-                searchDebounceJob?.cancel()
                 searchIdInput = ""
                 onSearchIdCommitted("")
             },
@@ -360,6 +354,14 @@ fun EventsFilters(
             }
             typesCombobox(Modifier.fillMaxWidth())
             locationsCombobox(Modifier.fillMaxWidth())
+            if (onResetFilters != null && filter.hasActiveFilters) {
+                TextButton(
+                    onClick = onResetFilters,
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    Text(stringResource(Res.string.events_filters_reset))
+                }
+            }
         }
     } else {
         // Wide and Medium: 2 rows of 2 columns
@@ -380,6 +382,16 @@ fun EventsFilters(
             ) {
                 dateField(Modifier.weight(1f))
                 locationsCombobox(Modifier.weight(1f))
+            }
+            if (onResetFilters != null && filter.hasActiveFilters) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(onClick = onResetFilters) {
+                        Text(stringResource(Res.string.events_filters_reset))
+                    }
+                }
             }
         }
     }

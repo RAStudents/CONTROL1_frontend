@@ -173,6 +173,8 @@
     <string name="events_export_error_access_revoked">Доступ к операции экспорта был отозван</string>
     <string name="events_export_downloading">Скачивание файла экспорта...</string>
     <string name="events_export_download_success">Файл экспорта успешно сохранён</string>
+    <string name="events_export_download_initiated">Загрузка файла инициирована</string>
+    <string name="events_date_custom_interval">Точный интервал</string>
     <string name="events_export_download_error">Не удалось скачать файл экспорта</string>
 
     <!-- Error States -->

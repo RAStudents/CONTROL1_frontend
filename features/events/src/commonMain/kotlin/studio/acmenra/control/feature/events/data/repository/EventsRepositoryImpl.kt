@@ -163,100 +163,118 @@ class EventsRepositoryImpl(
 
     override suspend fun getFilterOptions(companyId: String): EventsFilterOptions =
         wrapDomainErrors {
-            val (startCacheGen, etag, requestGen) =
-                filterOptionsMutex.withLock {
-                    val stateBefore = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
-                    Triple(
-                        stateBefore.cacheGeneration,
-                        stateBefore.cached?.etag,
-                        nextFilterRequestGeneration(companyId),
-                    )
-                }
-
-            val result =
-                remoteDataSource.getFilterOptions(
-                    companyId = companyId,
-                    ifNoneMatchEtag = etag,
-                )
-
-            when (result) {
-                is FilterOptionsFetchResult.Success -> {
-                    val mapped = EventsDtoMapper.mapFilterOptions(result.options)
-                    val acceptedOrCurrent =
-                        filterOptionsMutex.withLock {
-                            val current = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
-                            if (current.cacheGeneration == startCacheGen &&
-                                requestGen >= current.latestAppliedRequestGen
-                            ) {
-                                companyFilterStates.update { map ->
-                                    map + (
-                                        companyId to
-                                            current.copy(
-                                                latestAppliedRequestGen = requestGen,
-                                                cached = CachedFilterOptions(options = mapped, etag = result.etag),
-                                            )
-                                    )
-                                }
-                                mapped
-                            } else {
-                                current.cached?.options ?: mapped
-                            }
-                        }
-                    acceptedOrCurrent
-                }
-                FilterOptionsFetchResult.NotModified -> {
-                    val cached =
-                        filterOptionsMutex.withLock {
-                            val current = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
-                            if (current.cacheGeneration == startCacheGen &&
-                                current.cached != null &&
-                                requestGen >= current.latestAppliedRequestGen
-                            ) {
-                                companyFilterStates.update { map ->
-                                    map + (companyId to current.copy(latestAppliedRequestGen = requestGen))
-                                }
-                                current.cached.options
-                            } else {
-                                null
-                            }
-                        }
-                    if (cached != null) {
-                        return@wrapDomainErrors cached
+            var attempt = 0
+            while (attempt < 3) {
+                attempt++
+                val (startCacheGen, etag, requestGen) =
+                    filterOptionsMutex.withLock {
+                        val stateBefore = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
+                        Triple(
+                            stateBefore.cacheGeneration,
+                            stateBefore.cached?.etag,
+                            nextFilterRequestGeneration(companyId),
+                        )
                     }
 
-                    val freshResult = remoteDataSource.getFilterOptions(companyId, ifNoneMatchEtag = null)
-                    if (freshResult is FilterOptionsFetchResult.Success) {
-                        val mapped = EventsDtoMapper.mapFilterOptions(freshResult.options)
+                val result =
+                    remoteDataSource.getFilterOptions(
+                        companyId = companyId,
+                        ifNoneMatchEtag = etag,
+                    )
+
+                when (result) {
+                    is FilterOptionsFetchResult.Success -> {
+                        val mapped = EventsDtoMapper.mapFilterOptions(result.options)
                         val acceptedOrCurrent =
                             filterOptionsMutex.withLock {
-                                val now = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
-                                if (now.cacheGeneration == startCacheGen && requestGen >= now.latestAppliedRequestGen) {
+                                val current = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
+                                if (current.cacheGeneration == startCacheGen &&
+                                    requestGen >= current.latestAppliedRequestGen
+                                ) {
                                     companyFilterStates.update { map ->
                                         map + (
                                             companyId to
-                                                now.copy(
+                                                current.copy(
                                                     latestAppliedRequestGen = requestGen,
-                                                    cached =
-                                                        CachedFilterOptions(
-                                                            options = mapped,
-                                                            etag = freshResult.etag,
-                                                        ),
+                                                    cached = CachedFilterOptions(options = mapped, etag = result.etag),
                                                 )
                                         )
                                     }
                                     mapped
                                 } else {
-                                    now.cached?.options ?: mapped
+                                    current.cached?.options
                                 }
                             }
-                        acceptedOrCurrent
-                    } else {
-                        throw IllegalStateException(
-                            "Server returned NotModified (304) on unconditional filter options request",
-                        )
+                        if (acceptedOrCurrent != null) {
+                            return@wrapDomainErrors acceptedOrCurrent
+                        }
+                        // Cache invalidated and empty: retry fetch for the new generation
+                        continue
+                    }
+                    FilterOptionsFetchResult.NotModified -> {
+                        val cached =
+                            filterOptionsMutex.withLock {
+                                val current = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
+                                if (current.cacheGeneration == startCacheGen &&
+                                    current.cached != null &&
+                                    requestGen >= current.latestAppliedRequestGen
+                                ) {
+                                    companyFilterStates.update { map ->
+                                        map + (companyId to current.copy(latestAppliedRequestGen = requestGen))
+                                    }
+                                    current.cached.options
+                                } else {
+                                    current.cached?.options
+                                }
+                            }
+                        if (cached != null) {
+                            return@wrapDomainErrors cached
+                        }
+
+                        val freshResult = remoteDataSource.getFilterOptions(companyId, ifNoneMatchEtag = null)
+                        if (freshResult is FilterOptionsFetchResult.Success) {
+                            val mapped = EventsDtoMapper.mapFilterOptions(freshResult.options)
+                            val acceptedOrCurrent =
+                                filterOptionsMutex.withLock {
+                                    val now = companyFilterStates.value[companyId] ?: CompanyFilterCacheState()
+                                    if (now.cacheGeneration == startCacheGen &&
+                                        requestGen >= now.latestAppliedRequestGen
+                                    ) {
+                                        companyFilterStates.update { map ->
+                                            map + (
+                                                companyId to
+                                                    now.copy(
+                                                        latestAppliedRequestGen = requestGen,
+                                                        cached =
+                                                            CachedFilterOptions(
+                                                                options = mapped,
+                                                                etag = freshResult.etag,
+                                                            ),
+                                                    )
+                                            )
+                                        }
+                                        mapped
+                                    } else {
+                                        now.cached?.options
+                                    }
+                                }
+                            if (acceptedOrCurrent != null) {
+                                return@wrapDomainErrors acceptedOrCurrent
+                            }
+                            continue
+                        } else {
+                            throw IllegalStateException(
+                                "Server returned NotModified (304) on unconditional filter options request",
+                            )
+                        }
                     }
                 }
             }
+            throw EventsDomainException.Generic(
+                code = "FILTER_CACHE_INVALIDATED",
+                serverMessage = "Filter options cache invalidated during fetch; retries exhausted",
+                retryable = true,
+            )
         }
 
     override suspend fun createExport(

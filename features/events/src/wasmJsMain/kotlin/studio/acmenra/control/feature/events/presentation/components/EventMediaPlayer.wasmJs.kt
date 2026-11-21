@@ -10,6 +10,7 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -89,7 +90,7 @@ private external fun removeVideo(elementId: String)
 
 @OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
 @JsFun(
-    """(imgId, previewUrl, x, y, width, height) => {
+    """(imgId, previewUrl) => {
     var img = document.getElementById(imgId);
     if (!img) {
         img = document.createElement('img');
@@ -99,19 +100,41 @@ private external fun removeVideo(elementId: String)
         img.style.pointerEvents = 'none';
         img.style.objectFit = 'cover';
         img.style.borderRadius = '16px';
-        img.style.zIndex = '500';
+        img.style.zIndex = '50';
         document.body.appendChild(img);
     }
-    img.src = previewUrl;
-    img.style.left = x + 'px';
-    img.style.top = y + 'px';
-    img.style.width = width + 'px';
-    img.style.height = height + 'px';
+    if (img.getAttribute('data-src') !== previewUrl) {
+        img.setAttribute('data-src', previewUrl);
+        img.src = previewUrl;
+    }
 }""",
 )
-private external fun updatePreviewImg(
+private external fun ensurePreviewImg(
     imgId: String,
     previewUrl: String,
+)
+
+@OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
+@JsFun(
+    """(imgId, x, y, width, height) => {
+    var img = document.getElementById(imgId);
+    if (img) {
+        var winW = window.innerWidth || (document.documentElement ? document.documentElement.clientWidth : 0) || 0;
+        var winH = window.innerHeight || (document.documentElement ? document.documentElement.clientHeight : 0) || 0;
+        if (x + width <= 0 || y + height <= 0 || x >= winW || y >= winH || width <= 0 || height <= 0) {
+            img.style.display = 'none';
+        } else {
+            img.style.display = 'block';
+            img.style.left = x + 'px';
+            img.style.top = y + 'px';
+            img.style.width = width + 'px';
+            img.style.height = height + 'px';
+        }
+    }
+}""",
+)
+private external fun updatePreviewGeometry(
+    imgId: String,
     x: Double,
     y: Double,
     width: Double,
@@ -129,6 +152,10 @@ private external fun updatePreviewImg(
 )
 private external fun removePreviewImg(imgId: String)
 
+@OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+private val previewElementCounter = kotlin.concurrent.atomics.AtomicLong(1L)
+
+@OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
 @Composable
 actual fun EventMediaPlayer(
     videoUrl: String?,
@@ -137,12 +164,18 @@ actual fun EventMediaPlayer(
     onDownloadClick: (() -> Unit)?,
 ) {
     var activeVideoId by remember(videoUrl) { mutableStateOf<String?>(null) }
-    val previewElementId = remember(previewUrl) { "control-preview-" + (1..1000000).random() }
+    val previewElementId = remember(previewUrl) { "control-preview-" + previewElementCounter.addAndFetch(1L) }
 
     val isValidHttpsPreview = previewUrl?.startsWith("https://", ignoreCase = true) == true
     val isValidHttpsVideo = videoUrl?.startsWith("https://", ignoreCase = true) == true
 
-    DisposableEffect(previewUrl, isValidHttpsPreview) {
+    LaunchedEffect(previewElementId, previewUrl, isValidHttpsPreview) {
+        if (isValidHttpsPreview && previewUrl != null) {
+            ensurePreviewImg(previewElementId, previewUrl)
+        }
+    }
+
+    DisposableEffect(previewElementId) {
         onDispose {
             removePreviewImg(previewElementId)
         }
@@ -165,9 +198,8 @@ actual fun EventMediaPlayer(
                     if (isValidHttpsPreview && previewUrl != null) {
                         val pos = coordinates.positionInWindow()
                         val size = coordinates.size
-                        updatePreviewImg(
+                        updatePreviewGeometry(
                             imgId = previewElementId,
-                            previewUrl = previewUrl,
                             x = pos.x.toDouble(),
                             y = pos.y.toDouble(),
                             width = size.width.toDouble(),

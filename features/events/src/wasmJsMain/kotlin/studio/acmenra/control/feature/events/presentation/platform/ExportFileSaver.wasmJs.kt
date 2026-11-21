@@ -6,23 +6,41 @@ import org.koin.core.module.Module
 import org.koin.dsl.module
 import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
 
+/**
+ * WasmJS implementation of [ExportFileSaver].
+ *
+ * Memory model and lifecycle:
+ * - The payload is downloaded into memory as a [ByteArray], strictly capped by `MAX_EXPORT_DOWNLOAD_BYTES` (100 MiB).
+ * - Direct transformation to [io.ktor.util.toJsArray] produces a JS `Int8Array` without intermediate Base64 encoding.
+ * - In the browser JavaScript heap, a `Blob` wraps the `Int8Array`.
+ * - Peak transient allocation is approximately 2-3x payload size (Kotlin ByteArray + JS TypedArray + Blob)
+ *   reaching ~200-300 MiB for a maximum 100 MiB export.
+ * - The DOM anchor element is immediately removed after click, and `URL.revokeObjectURL` is scheduled to reclaim memory.
+ */
 @OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
 @JsFun(
     """(filename, contentType, int8Array) => {
+    var url = null;
+    var a = null;
     try {
         var blob = new Blob([int8Array], { type: contentType });
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement('a');
+        url = URL.createObjectURL(blob);
+        a = document.createElement('a');
         a.href = url;
         a.download = filename;
         document.body.appendChild(a);
         a.click();
-        document.body.removeChild(a);
-        setTimeout(function() { URL.revokeObjectURL(url); }, 5000);
         return true;
     } catch (e) {
         console.error('Failed to trigger download:', e);
         return false;
+    } finally {
+        if (a && a.parentNode) {
+            a.parentNode.removeChild(a);
+        }
+        if (url) {
+            setTimeout(function() { URL.revokeObjectURL(url); }, 2000);
+        }
     }
 }""",
 )

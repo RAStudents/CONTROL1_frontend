@@ -36,6 +36,11 @@ sealed interface BootstrapApplyResult {
         val replayId: Long,
     ) : BootstrapApplyResult
 
+    data class RequiresFreshAuth(
+        val initialReplayId: Long = 1L,
+        val afterSequence: Long = 0L,
+    ) : BootstrapApplyResult
+
     data object RetryRequired : BootstrapApplyResult
 
     data object Stale : BootstrapApplyResult
@@ -68,6 +73,13 @@ sealed interface SessionCommand {
 
     data class WsConnectionActivated(
         val connectionId: Long,
+    ) : SessionCommand
+
+    data class FreshAuthGenerationStarted(
+        val authGenerationId: Long,
+        val connectionId: Long,
+        val initialReplayId: Long = 1L,
+        val afterSequence: Long,
     ) : SessionCommand
 
     data class WsFrameReceived(
@@ -109,7 +121,7 @@ sealed interface SessionCommand {
     ) : SessionCommand
 
     data class NextReplayGeneration(
-        val response: CompletableDeferred<Long>,
+        val response: CompletableDeferred<ReplayGenerationResult>,
     ) : SessionCommand
 
     data class ResetSequence(
@@ -162,6 +174,7 @@ class EventsSessionProcessor(
     private var bufferReplayId: Long? = null
     private val rebootstrapBuffer = mutableListOf<BufferedCommit>()
     private var maxClosedReplayGeneration: Long = 0L
+    private var activeAuthGenerationId: Long = 1L
     private var activeConnectionId: Long = 0L
     private var nextCursor: String? = null
 
@@ -272,8 +285,8 @@ class EventsSessionProcessor(
         dispatch(SessionCommand.StartReplay(replayId, afterSequence))
     }
 
-    suspend fun nextReplayGeneration(): Long {
-        val deferred = CompletableDeferred<Long>()
+    suspend fun requestNextReplayGeneration(): ReplayGenerationResult {
+        val deferred = CompletableDeferred<ReplayGenerationResult>()
         try {
             commandChannel.send(SessionCommand.NextReplayGeneration(deferred))
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -285,6 +298,13 @@ class EventsSessionProcessor(
         }
         return deferred.await()
     }
+
+    suspend fun nextReplayGeneration(): Long =
+        when (val res = requestNextReplayGeneration()) {
+            is ReplayGenerationResult.Next -> res.replayId
+            is ReplayGenerationResult.RequiresFreshAuth ->
+                throw IllegalStateException("Replay generation overflow past MAX_SAFE_JS_INTEGER: fresh AUTH required")
+        }
 
     suspend fun installBootstrap(
         bootstrap: EventsBootstrap,
@@ -368,13 +388,30 @@ class EventsSessionProcessor(
                     activeConnectionId = command.connectionId
                 }
             }
+            is SessionCommand.FreshAuthGenerationStarted -> {
+                if (command.authGenerationId >= activeAuthGenerationId) {
+                    activeAuthGenerationId = command.authGenerationId
+                    activeConnectionId = command.connectionId
+                    maxClosedReplayGeneration = command.initialReplayId - 1L
+                    sequenceProcessor.resetSequence(command.afterSequence, command.initialReplayId)
+                    isRebootstrapping = false
+                    bufferReplayId = null
+                    rebootstrapBuffer.clear()
+                    _state.update {
+                        it.copy(
+                            replayId = command.initialReplayId,
+                            asOfSequence = command.afterSequence,
+                            connectionState = RealtimeConnectionState.CONNECTING,
+                        )
+                    }
+                }
+            }
             is SessionCommand.WsFrameReceived -> {
                 val (connId, frame) = command.envelope
-                if (connId < activeConnectionId) {
-                    return
-                }
-                if (connId > activeConnectionId) {
+                if (activeConnectionId == 0L) {
                     activeConnectionId = connId
+                } else if (connId != activeConnectionId) {
+                    return
                 }
                 handleWsFrame(frame)
             }
@@ -474,7 +511,7 @@ class EventsSessionProcessor(
                             rebootstrapBuffer.clear()
                         }
                         _state.update { it.copy(replayId = res.replayId) }
-                        command.response.complete(res.replayId)
+                        command.response.complete(res)
                     }
                     is ReplayGenerationResult.RequiresFreshAuth -> {
                         maxClosedReplayGeneration = MAX_SAFE_JS_INTEGER
@@ -485,7 +522,7 @@ class EventsSessionProcessor(
                         }
                         _state.update { it.copy(replayId = res.initialReplayId) }
                         onFreshAuthNeeded?.invoke(sequenceProcessor.currentSequence, res.initialReplayId)
-                        command.response.complete(res.initialReplayId)
+                        command.response.complete(res)
                     }
                 }
             }
@@ -701,14 +738,14 @@ class EventsSessionProcessor(
         }
 
         maxClosedReplayGeneration = maxOf(maxClosedReplayGeneration, sequenceProcessor.currentReplayId)
+        val genResult = sequenceProcessor.tryNextReplayGeneration()
         val newReplayId =
-            when (val res = sequenceProcessor.tryNextReplayGeneration()) {
-                is ReplayGenerationResult.Next -> res.replayId
+            when (genResult) {
+                is ReplayGenerationResult.Next -> genResult.replayId
                 is ReplayGenerationResult.RequiresFreshAuth -> {
                     maxClosedReplayGeneration = MAX_SAFE_JS_INTEGER
-                    sequenceProcessor.resetSequence(bootstrap.streamCursor, res.initialReplayId)
-                    onFreshAuthNeeded?.invoke(bootstrap.streamCursor, res.initialReplayId)
-                    res.initialReplayId
+                    sequenceProcessor.resetSequence(bootstrap.streamCursor, genResult.initialReplayId)
+                    genResult.initialReplayId
                 }
             }
 
@@ -736,7 +773,19 @@ class EventsSessionProcessor(
             onFilterOptionsUpdated?.invoke(optionsDto)
         }
 
-        response.complete(BootstrapApplyResult.Applied(newReplayId))
+        when (genResult) {
+            is ReplayGenerationResult.Next -> {
+                response.complete(BootstrapApplyResult.Applied(genResult.replayId))
+            }
+            is ReplayGenerationResult.RequiresFreshAuth -> {
+                response.complete(
+                    BootstrapApplyResult.RequiresFreshAuth(
+                        initialReplayId = genResult.initialReplayId,
+                        afterSequence = bootstrap.streamCursor,
+                    ),
+                )
+            }
+        }
     }
 
     private fun handleNextPage(

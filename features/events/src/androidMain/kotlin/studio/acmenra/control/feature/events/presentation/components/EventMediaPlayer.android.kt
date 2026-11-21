@@ -96,13 +96,24 @@ actual fun EventMediaPlayer(
             var exoPlayerRef by remember(videoUrl) { mutableStateOf<ExoPlayer?>(null) }
             AndroidView(
                 factory = { context ->
+                    val httpDataSourceFactory =
+                        androidx.media3.datasource.DefaultHttpDataSource
+                            .Factory()
+                    val mediaSourceFactory =
+                        androidx.media3.exoplayer.source
+                            .DefaultMediaSourceFactory(context)
+                            .setDataSourceFactory(httpDataSourceFactory)
                     val exoPlayer =
-                        ExoPlayer.Builder(context).build().apply {
-                            setMediaItem(MediaItem.fromUri(Uri.parse(videoUrl)))
-                            repeatMode = ExoPlayer.REPEAT_MODE_ALL
-                            prepare()
-                            playWhenReady = true
-                        }
+                        ExoPlayer
+                            .Builder(context)
+                            .setMediaSourceFactory(mediaSourceFactory)
+                            .build()
+                            .apply {
+                                setMediaItem(MediaItem.fromUri(Uri.parse(videoUrl)))
+                                repeatMode = ExoPlayer.REPEAT_MODE_ALL
+                                prepare()
+                                playWhenReady = true
+                            }
                     exoPlayerRef = exoPlayer
                     PlayerView(context).apply {
                         player = exoPlayer
@@ -113,6 +124,7 @@ actual fun EventMediaPlayer(
             )
             DisposableEffect(videoUrl) {
                 onDispose {
+                    exoPlayerRef?.stop()
                     exoPlayerRef?.release()
                     exoPlayerRef = null
                     isPlaying = false

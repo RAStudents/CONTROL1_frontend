@@ -202,6 +202,7 @@ class KtorEventsWebSocketDataSource(
 
         data class Heartbeat(
             override val frame: Frame,
+            val clientConfirmedSeq: Long,
             val sentDeferred: CompletableDeferred<kotlin.time.ComparableTimeMark>,
         ) : OutgoingMessage
     }
@@ -293,22 +294,36 @@ class KtorEventsWebSocketDataSource(
                         )
                     send(Frame.Text(json.encodeToString(authFrame)))
 
+                    val heartbeatTracker = HeartbeatTracker()
+
                     // Start outgoing pump
                     localOutgoingJob =
                         launch {
                             for (msg in outChan) {
-                                send(msg.frame)
-                                if (msg is OutgoingMessage.Heartbeat) {
-                                    msg.sentDeferred.complete(
-                                        kotlin.time.TimeSource.Monotonic
-                                            .markNow(),
-                                    )
+                                try {
+                                    send(msg.frame)
+                                    if (msg is OutgoingMessage.Heartbeat) {
+                                        val sendMark =
+                                            kotlin.time.TimeSource.Monotonic
+                                                .markNow()
+                                        // Synchronously register pending ACK before resuming heartbeat coroutine
+                                        heartbeatTracker.onHeartbeatSent(
+                                            mark = sendMark,
+                                            clientConfirmedSeq = msg.clientConfirmedSeq,
+                                        )
+                                        msg.sentDeferred.complete(sendMark)
+                                    }
+                                } catch (e: Throwable) {
+                                    if (msg is OutgoingMessage.Heartbeat) {
+                                        heartbeatTracker.onSendFailed()
+                                        msg.sentDeferred.completeExceptionally(e)
+                                    }
+                                    throw e
                                 }
                             }
                         }
 
                     // Start Heartbeat loop: 25s cadence with 5s ACK window
-                    val heartbeatTracker = HeartbeatTracker()
                     localHeartbeatJob =
                         launch {
                             delay(25_000L)
@@ -320,6 +335,7 @@ class KtorEventsWebSocketDataSource(
                                     outChan.send(
                                         OutgoingMessage.Heartbeat(
                                             frame = Frame.Text(json.encodeToString(hbFrame)),
+                                            clientConfirmedSeq = confirmedSeq,
                                             sentDeferred = sentDeferred,
                                         ),
                                     )
@@ -341,8 +357,6 @@ class KtorEventsWebSocketDataSource(
                                         heartbeatTracker.onSendFailed()
                                         break
                                     }
-
-                                heartbeatTracker.onHeartbeatSent(sendMark, confirmedSeq)
 
                                 delay(5_000L)
                                 if (heartbeatTracker.hasPendingAck.load()) {

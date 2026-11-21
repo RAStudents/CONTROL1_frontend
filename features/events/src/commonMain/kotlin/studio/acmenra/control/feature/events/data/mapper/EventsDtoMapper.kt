@@ -10,6 +10,7 @@ import studio.acmenra.control.feature.events.data.model.EventsExportStatusDto
 import studio.acmenra.control.feature.events.data.model.EventsFilterOptionsDto
 import studio.acmenra.control.feature.events.data.model.EventsPageDto
 import studio.acmenra.control.feature.events.data.model.EventsSummaryDto
+import studio.acmenra.control.feature.events.data.model.MAX_SAFE_JS_INTEGER
 import studio.acmenra.control.feature.events.domain.model.CategoryScore
 import studio.acmenra.control.feature.events.domain.model.DeviceFilterOption
 import studio.acmenra.control.feature.events.domain.model.DevicesStatusSummary
@@ -31,6 +32,28 @@ import kotlin.time.Instant
 
 object EventsDtoMapper {
     fun mapEvent(dto: EventDto): Event {
+        if (dto.eventVersion !in 1L..MAX_SAFE_JS_INTEGER) {
+            throw IllegalArgumentException(
+                "Invalid event_version ${dto.eventVersion} for event ${dto.id}: must be in 1..$MAX_SAFE_JS_INTEGER",
+            )
+        }
+        if (dto.classificationVersion !in 1L..MAX_SAFE_JS_INTEGER) {
+            throw IllegalArgumentException(
+                "Invalid classification_version ${dto.classificationVersion} for event ${dto.id}: must be in 1..$MAX_SAFE_JS_INTEGER",
+            )
+        }
+        if (dto.acknowledgementVersion !in 1L..MAX_SAFE_JS_INTEGER) {
+            throw IllegalArgumentException(
+                "Invalid acknowledgement_version ${dto.acknowledgementVersion} for event ${dto.id}: must be in 1..$MAX_SAFE_JS_INTEGER",
+            )
+        }
+        if (dto.classificationVersion > dto.eventVersion || dto.acknowledgementVersion > dto.eventVersion) {
+            throw IllegalArgumentException(
+                "Specialized version exceeds event_version for event ${dto.id}: " +
+                    "ev=${dto.eventVersion}, cl=${dto.classificationVersion}, ack=${dto.acknowledgementVersion}",
+            )
+        }
+
         val status =
             when (dto.status.uppercase()) {
                 "NEW" -> EventAcknowledgementStatus.NEW

@@ -84,6 +84,40 @@ class EventsViewModel(
     private var filterRequestGeneration: Long = 0L
     private var filterOptionsGeneration: Long = 0L
 
+    var onQueryHashChanged: ((String?) -> Unit)? = null
+    private var activeQueryHash: String? = null
+
+    private fun syncFilterToUrl(filter: EventsFilter) {
+        val companyId = _state.value.companyId
+        if (companyId.isBlank()) return
+        val encoded = EventsQueryRouteCodec.encodeHash(companyId, EventsQuery(filter = filter))
+        if (encoded != activeQueryHash) {
+            activeQueryHash = encoded
+            onQueryHashChanged?.invoke(encoded)
+        }
+    }
+
+    private fun applyIncomingQueryHash(
+        companyId: String,
+        queryHash: String?,
+    ) {
+        val decodedFilter =
+            if (!queryHash.isNullOrBlank()) {
+                val (decodedCompanyId, decodedQuery) = EventsQueryRouteCodec.decodeHash(queryHash)
+                if (!decodedCompanyId.isNullOrBlank() && decodedCompanyId != companyId) {
+                    EventsFilter()
+                } else {
+                    decodedQuery.filter
+                }
+            } else {
+                EventsFilter()
+            }
+        if (decodedFilter != _state.value.filter) {
+            _state.update { it.copy(filter = decodedFilter) }
+            restartFeedSession()
+        }
+    }
+
     fun initialize(
         companyId: String,
         accessCapabilities: EventsAccessCapabilities,
@@ -91,6 +125,10 @@ class EventsViewModel(
     ) {
         val currentCompany = _state.value.companyId
         if (currentCompany == companyId && feedSession != null) {
+            if (queryHash != activeQueryHash) {
+                activeQueryHash = queryHash
+                applyIncomingQueryHash(companyId, queryHash)
+            }
             if (_state.value.access != accessCapabilities) {
                 val wasRead = _state.value.access.eventsRead
                 // Fail-closed updates when capabilities change
@@ -184,10 +222,15 @@ class EventsViewModel(
         feedSession?.close()
         feedSession = null
 
+        activeQueryHash = queryHash
         val decodedFilter =
             if (!queryHash.isNullOrBlank()) {
-                val (_, decodedQuery) = EventsQueryRouteCodec.decodeHash(queryHash)
-                decodedQuery.filter
+                val (decodedCompanyId, decodedQuery) = EventsQueryRouteCodec.decodeHash(queryHash)
+                if (!decodedCompanyId.isNullOrBlank() && decodedCompanyId != companyId) {
+                    EventsFilter()
+                } else {
+                    decodedQuery.filter
+                }
             } else {
                 EventsFilter()
             }
@@ -272,7 +315,7 @@ class EventsViewModel(
                     val canRead = feedState.access.eventsRead && _state.value.access.eventsRead
                     val tz =
                         feedState.summary?.businessTimezone?.let {
-                            runCatching { TimeZone.of(it) }.getOrNull()
+                            DateFilterUtils.resolveBusinessTimeZone(it)
                         }
                     _state.update { current ->
                         val restoredFilter =
@@ -343,6 +386,7 @@ class EventsViewModel(
             viewModelScope.launch {
                 delay(400L)
                 restartFeedSession()
+                syncFilterToUrl(_state.value.filter)
             }
     }
 
@@ -353,7 +397,7 @@ class EventsViewModel(
         val tzId =
             businessTimeZone?.id
                 ?: _state.value.summary?.businessTimezone
-        val tz = tzId?.let { runCatching { TimeZone.of(it) }.getOrNull() }
+        val tz = tzId?.let { DateFilterUtils.resolveBusinessTimeZone(it) }
         if (tz == null) {
             // Strictly require business_timezone to avoid silently falling back to system timezone
             return
@@ -367,20 +411,25 @@ class EventsViewModel(
             )
         _state.update { it.copy(filter = newFilter, isDatePickerOpen = false) }
         restartFeedSession()
+        syncFilterToUrl(newFilter)
     }
 
     fun onEventTypeToggled(typeId: String) {
         val current = _state.value.filter.eventTypeIds
         val updated = if (typeId in current) current - typeId else current + typeId
-        _state.update { it.copy(filter = it.filter.copy(eventTypeIds = updated)) }
+        val newFilter = _state.value.filter.copy(eventTypeIds = updated)
+        _state.update { it.copy(filter = newFilter) }
         restartFeedSession()
+        syncFilterToUrl(newFilter)
     }
 
     fun onDeviceToggled(deviceId: String) {
         val current = _state.value.filter.deviceIds
         val updated = if (deviceId in current) current - deviceId else current + deviceId
-        _state.update { it.copy(filter = it.filter.copy(deviceIds = updated)) }
+        val newFilter = _state.value.filter.copy(deviceIds = updated)
+        _state.update { it.copy(filter = newFilter) }
         restartFeedSession()
+        syncFilterToUrl(newFilter)
     }
 
     fun onLocationToggled(location: LocationFilterGroup) {
@@ -393,19 +442,25 @@ class EventsViewModel(
             } else {
                 current + locationDevices
             }
-        _state.update { it.copy(filter = it.filter.copy(deviceIds = updated)) }
+        val newFilter = _state.value.filter.copy(deviceIds = updated)
+        _state.update { it.copy(filter = newFilter) }
         restartFeedSession()
+        syncFilterToUrl(newFilter)
     }
 
     fun onValidityChanged(validity: EventValidity) {
         if (_state.value.filter.validity == validity) return
-        _state.update { it.copy(filter = it.filter.copy(validity = validity)) }
+        val newFilter = _state.value.filter.copy(validity = validity)
+        _state.update { it.copy(filter = newFilter) }
         restartFeedSession()
+        syncFilterToUrl(newFilter)
     }
 
     fun resetFilters() {
-        _state.update { it.copy(filter = EventsFilter()) }
+        val newFilter = EventsFilter()
+        _state.update { it.copy(filter = newFilter) }
         restartFeedSession()
+        syncFilterToUrl(newFilter)
     }
 
     fun loadNextPage() {

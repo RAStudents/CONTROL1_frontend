@@ -72,6 +72,7 @@ class EventsFeedSessionImpl(
     private var rebootstrapJob: Job? = null
 
     private val connectionGeneration = kotlin.concurrent.atomics.AtomicLong(0L)
+    private val authGenerationTracker = kotlin.concurrent.atomics.AtomicLong(1L)
     private var bootstrapGeneration: Long = 0L
     private val bootstrapGenMutex = Mutex()
 
@@ -102,7 +103,7 @@ class EventsFeedSessionImpl(
     private val _filterOptionsInvalidated = MutableSharedFlow<Unit>(extraBufferCapacity = 16)
     override val filterOptionsInvalidated: Flow<Unit> = _filterOptionsInvalidated.asSharedFlow()
 
-    private val processor =
+    internal val processor =
         EventsSessionProcessor(
             query = query,
             initialAccess = initialAccess,
@@ -140,9 +141,7 @@ class EventsFeedSessionImpl(
                 _filterOptionsInvalidated.tryEmit(Unit)
             },
             onFreshAuthNeeded = { afterSeq, replayId ->
-                sessionScope.launch {
-                    connectWebSocket(afterSequence = afterSeq, replayId = replayId)
-                }
+                startFreshAuthSession(afterSequence = afterSeq, initialReplayId = replayId)
             },
         )
 
@@ -232,6 +231,15 @@ class EventsFeedSessionImpl(
                                     connectWebSocket(
                                         afterSequence = processor.getAsOfSequence(),
                                         replayId = applyResult.replayId,
+                                    )
+                                }
+                                return@launch
+                            }
+                            is BootstrapApplyResult.RequiresFreshAuth -> {
+                                if (canReadEvents()) {
+                                    startFreshAuthSession(
+                                        afterSequence = applyResult.afterSequence,
+                                        initialReplayId = applyResult.initialReplayId,
                                     )
                                 }
                                 return@launch
@@ -333,6 +341,16 @@ class EventsFeedSessionImpl(
                                     connectWebSocket(
                                         afterSequence = processor.getAsOfSequence(),
                                         replayId = applyResult.replayId,
+                                    )
+                                }
+                                return@launch
+                            }
+                            is BootstrapApplyResult.RequiresFreshAuth -> {
+                                processor.dispatch(SessionCommand.RebootstrapStateChanged(RebootstrapState.Idle))
+                                if (canReadEvents()) {
+                                    startFreshAuthSession(
+                                        afterSequence = applyResult.afterSequence,
+                                        initialReplayId = applyResult.initialReplayId,
                                     )
                                 }
                                 return@launch
@@ -439,6 +457,59 @@ class EventsFeedSessionImpl(
         processor.dispatch(SessionCommand.WsConnectionActivated(connectionId))
     }
 
+    private fun startFreshAuthSession(
+        afterSequence: Long,
+        initialReplayId: Long = 1L,
+    ) {
+        connectJob?.cancel()
+        if (!canReadEvents()) return
+        val authGen = authGenerationTracker.addAndFetch(1L)
+        val generation = connectionGeneration.addAndFetch(1L)
+
+        connectJob =
+            sessionScope.launch {
+                disconnectJob?.join()
+                if (!canReadEvents() || generation != connectionGeneration.load()) return@launch
+
+                val snapshot = sessionManager.getSnapshot()
+                val token = snapshot?.tokens?.accessToken
+                if (token.isNullOrBlank()) {
+                    processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.FAILED))
+                    return@launch
+                }
+                lastUsedAccessToken = token
+
+                processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.CONNECTING))
+
+                val connectionId =
+                    webSocketDataSource.connect(
+                        companyId = companyId,
+                        accessToken = token,
+                        replayId = initialReplayId,
+                        afterSequence = afterSequence,
+                        scope = sessionScope,
+                        getClientConfirmedSeq = { processor.getAsOfSequence() },
+                        onDisconnected = { reason, _ ->
+                            if (!isClosed && generation == connectionGeneration.load() && canReadEvents()) {
+                                handleDisconnect(reason)
+                            }
+                        },
+                    )
+                if (!canReadEvents() || generation != connectionGeneration.load()) {
+                    webSocketDataSource.disconnect(connectionId)
+                    return@launch
+                }
+                processor.dispatch(
+                    SessionCommand.FreshAuthGenerationStarted(
+                        authGenerationId = authGen,
+                        connectionId = connectionId,
+                        initialReplayId = initialReplayId,
+                        afterSequence = afterSequence,
+                    ),
+                )
+            }
+    }
+
     private fun connectWebSocket(
         afterSequence: Long,
         replayId: Long,
@@ -537,10 +608,20 @@ class EventsFeedSessionImpl(
                     val newToken = refreshed?.tokens?.accessToken
                     if (!newToken.isNullOrBlank() && newToken != lastUsedAccessToken) {
                         lastUsedAccessToken = newToken
-                        val nextReplay = processor.nextReplayGeneration()
-                        if (!canReadEvents() || generation != connectionGeneration.load()) return@launch
-                        connectWebSocket(afterSequence = processor.getAsOfSequence(), replayId = nextReplay)
-                        return@launch
+                        when (val replayRes = processor.requestNextReplayGeneration()) {
+                            is ReplayGenerationResult.Next -> {
+                                if (!canReadEvents() || generation != connectionGeneration.load()) return@launch
+                                connectWebSocket(
+                                    afterSequence = processor.getAsOfSequence(),
+                                    replayId = replayRes.replayId,
+                                )
+                                return@launch
+                            }
+                            is ReplayGenerationResult.RequiresFreshAuth -> {
+                                // Handled cleanly via onFreshAuthNeeded callback: avoids duplicate connect
+                                return@launch
+                            }
+                        }
                     }
                 } catch (e: CancellationException) {
                     throw e

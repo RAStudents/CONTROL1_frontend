@@ -86,6 +86,18 @@ fun AppNavHost(
                         companyId = tenantContext.companyId,
                         accessCapabilities = accessCapabilities,
                         queryHash = route.queryHash,
+                        onQueryHashChanged = { newHash ->
+                            if (newHash != route.queryHash) {
+                                navController.navigate(
+                                    EventsRoute(
+                                        companyId = tenantContext.companyId,
+                                        queryHash = newHash,
+                                    ),
+                                ) {
+                                    launchSingleTop = true
+                                }
+                            }
+                        },
                     )
                 }
             } else {

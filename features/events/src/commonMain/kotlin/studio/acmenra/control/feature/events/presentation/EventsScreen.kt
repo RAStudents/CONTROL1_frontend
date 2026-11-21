@@ -24,7 +24,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
-import kotlinx.datetime.TimeZone
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
@@ -63,9 +62,14 @@ fun EventsRouteContent(
     companyId: String = "",
     accessCapabilities: EventsAccessCapabilities = EventsAccessCapabilities(),
     queryHash: String? = null,
+    onQueryHashChanged: ((String?) -> Unit)? = null,
     modifier: Modifier = Modifier,
     viewModel: EventsViewModel = koinViewModel(key = companyId),
 ) {
+    LaunchedEffect(onQueryHashChanged) {
+        viewModel.onQueryHashChanged = onQueryHashChanged
+    }
+
     LaunchedEffect(companyId, accessCapabilities, queryHash) {
         viewModel.initialize(companyId, accessCapabilities, queryHash)
     }
@@ -171,7 +175,8 @@ fun EventsScreen(
         val businessTimeZone =
             remember(state.summary?.businessTimezone) {
                 state.summary?.businessTimezone?.let {
-                    runCatching { TimeZone.of(it) }.getOrNull()
+                    studio.acmenra.control.feature.events.domain.model.DateFilterUtils
+                        .resolveBusinessTimeZone(it)
                 }
             }
 

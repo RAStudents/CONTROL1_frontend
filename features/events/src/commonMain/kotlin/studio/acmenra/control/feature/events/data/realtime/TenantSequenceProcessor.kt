@@ -111,25 +111,26 @@ class TenantSequenceProcessor(
             )
         }
 
-        val expectedNext =
-            try {
-                checkedAdd(lastProcessedSequence, 1L)
-            } catch (e: ArithmeticException) {
-                return SequenceValidationResult.InvalidSequence("Sequence overflow past MAX_SAFE_JS_INTEGER")
+        // Check duplicate before checked arithmetic to handle MAX_SAFE_JS_INTEGER boundary duplicates
+        if (incomingSequence <= lastProcessedSequence) {
+            if (payloadSha256 != null && recentHashes.containsKey(incomingSequence)) {
+                val existingHash = recentHashes[incomingSequence]
+                if (existingHash != null && existingHash.lowercase() != payloadSha256.lowercase()) {
+                    return SequenceValidationResult.IntegrityViolation(
+                        "Payload SHA256 mismatch for sequence $incomingSequence: expected $existingHash, got $payloadSha256",
+                    )
+                }
             }
+            return SequenceValidationResult.Duplicate
+        }
+
+        if (lastProcessedSequence >= MAX_SAFE_JS_INTEGER) {
+            return SequenceValidationResult.InvalidSequence("Sequence overflow past MAX_SAFE_JS_INTEGER")
+        }
+
+        val expectedNext = lastProcessedSequence + 1L
 
         return when {
-            incomingSequence <= lastProcessedSequence -> {
-                if (payloadSha256 != null && recentHashes.containsKey(incomingSequence)) {
-                    val existingHash = recentHashes[incomingSequence]
-                    if (existingHash != null && existingHash.lowercase() != payloadSha256.lowercase()) {
-                        return SequenceValidationResult.IntegrityViolation(
-                            "Payload SHA256 mismatch for sequence $incomingSequence: expected $existingHash, got $payloadSha256",
-                        )
-                    }
-                }
-                SequenceValidationResult.Duplicate
-            }
             incomingSequence == expectedNext -> SequenceValidationResult.InOrder
             else -> SequenceValidationResult.GapDetected(expected = expectedNext, received = incomingSequence)
         }

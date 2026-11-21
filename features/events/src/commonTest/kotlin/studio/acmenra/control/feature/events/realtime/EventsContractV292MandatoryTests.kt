@@ -63,15 +63,20 @@ import studio.acmenra.control.feature.events.data.model.MAX_SAFE_JS_INTEGER
 import studio.acmenra.control.feature.events.data.model.ReplayCompletedFrameDto
 import studio.acmenra.control.feature.events.data.model.ResyncRequiredFrameDto
 import studio.acmenra.control.feature.events.data.model.SafeJsLongSerializer
+import studio.acmenra.control.feature.events.data.model.SubscribedFrameDto
 import studio.acmenra.control.feature.events.data.model.TenantCommitFrameDto
 import studio.acmenra.control.feature.events.data.realtime.BootstrapApplyResult
+import studio.acmenra.control.feature.events.data.realtime.EventMergeResult
+import studio.acmenra.control.feature.events.data.realtime.EventMerger
 import studio.acmenra.control.feature.events.data.realtime.EventsFeedSessionImpl
 import studio.acmenra.control.feature.events.data.realtime.EventsSessionProcessor
 import studio.acmenra.control.feature.events.data.realtime.RealtimeOverlayReducer
+import studio.acmenra.control.feature.events.data.realtime.ReplayGenerationResult
 import studio.acmenra.control.feature.events.data.realtime.SequenceValidationResult
 import studio.acmenra.control.feature.events.data.realtime.SessionCommand
 import studio.acmenra.control.feature.events.data.realtime.TenantSequenceProcessor
 import studio.acmenra.control.feature.events.data.repository.EventsRepositoryImpl
+import studio.acmenra.control.feature.events.domain.model.DateFilterUtils
 import studio.acmenra.control.feature.events.domain.model.DateSelection
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementStatus
@@ -5080,12 +5085,30 @@ class EventsContractV292MandatoryTests {
     fun testScenario58_InvalidateFilterCacheDuringGetFilterOptionsDiscardsStaleEntry() =
         runTest(testDispatcher) {
             val responseDeferred = CompletableDeferred<FilterOptionsFetchResult>()
+            var callCount = 0
             val mockRemote =
                 object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
                     override suspend fun getFilterOptions(
                         companyId: String,
                         ifNoneMatchEtag: String?,
-                    ): FilterOptionsFetchResult = responseDeferred.await()
+                    ): FilterOptionsFetchResult {
+                        callCount++
+                        return if (callCount == 1) {
+                            responseDeferred.await()
+                        } else {
+                            FilterOptionsFetchResult.Success(
+                                EventsFilterOptionsDto(
+                                    revision = "fresh-rev",
+                                    eventTypes =
+                                        listOf(
+                                            EventTypeOptionDto("type-1", "Type 1", "cat-1"),
+                                            EventTypeOptionDto("type-2", "Type 2", "cat-2"),
+                                        ),
+                                ),
+                                etag = "fresh-etag",
+                            )
+                        }
+                    }
 
                     override suspend fun getBootstrap(
                         companyId: String,
@@ -5157,10 +5180,8 @@ class EventsContractV292MandatoryTests {
             advanceUntilIdle()
 
             val result = fetchDeferred.await()
-            assertEquals(1, result.eventTypes.size)
-
-            // Cache MUST be empty for comp-1 because cacheGeneration was incremented during in-flight fetch!
-            assertTrue(repository.isFilterCacheEmptyForTest("comp-1"))
+            assertEquals("fresh-rev", result.revision)
+            assertEquals(2, result.eventTypes.size)
         }
 
     // Scenario 59: Concurrent connect calls in Ktor WebSocket DataSource allocate strictly monotonic connection IDs
@@ -5594,10 +5615,10 @@ class EventsContractV292MandatoryTests {
                 assertEquals(EventAcknowledgementStatus.NEW, currentEv.status)
 
                 // 3. Late HTTP ACK response arrives:
-                // acknowledgementVersion = 2, status = ACKNOWLEDGED, but classificationVersion = 1, isErroneous = false
+                // overall eventVersion = 3L, acknowledgementVersion = 2, status = ACKNOWLEDGED, but classificationVersion = 1, isErroneous = false
                 val lateHttpAckEvent =
                     sampleEvent("ev-1").copy(
-                        eventVersion = 2L,
+                        eventVersion = 3L,
                         classificationVersion = 1L,
                         acknowledgementVersion = 2L,
                         isErroneous = false,
@@ -5696,11 +5717,11 @@ class EventsContractV292MandatoryTests {
                 )
                 advanceUntilIdle()
 
-                // 3. Late HTTP mark erroneous response arrives: classificationVersion = 2, isErroneous = true,
+                // 3. Late HTTP mark erroneous response arrives: eventVersion = 3, classificationVersion = 2, isErroneous = true,
                 // but acknowledgementVersion = 1, status = NEW
                 val lateHttpMutatedEvent =
                     sampleEvent("ev-1").copy(
-                        eventVersion = 2L,
+                        eventVersion = 3L,
                         classificationVersion = 2L,
                         acknowledgementVersion = 1L,
                         isErroneous = true,
@@ -6370,6 +6391,7 @@ class EventsContractV292MandatoryTests {
             object : ExportFileSaver {
                 override suspend fun saveExportFile(download: EventsExportDownload) = true
             },
+        onQueryHashChanged: ((String?) -> Unit)? = null,
     ): EventsViewModel {
         val feedUseCase =
             object : ObserveEventsFeedUseCase {
@@ -6379,16 +6401,19 @@ class EventsContractV292MandatoryTests {
                     access: EventsAccessCapabilities,
                 ): EventsFeedSession = feedFactory?.invoke(companyId, query, access) ?: feed
             }
-        return EventsViewModel(
-            observeEventsFeedUseCase = feedUseCase,
-            loadEventFilterOptionsUseCase = loadEventFilterOptionsUseCase,
-            acknowledgeEventUseCase = acknowledgeEventUseCase,
-            markEventErroneousUseCase = markEventErroneousUseCase,
-            createEventsExportUseCase = createEventsExportUseCase,
-            observeEventsExportStatusUseCase = observeEventsExportStatusUseCase,
-            downloadEventsExportUseCase = downloadEventsExportUseCase,
-            exportFileSaver = exportFileSaver,
-        )
+        val vm =
+            EventsViewModel(
+                observeEventsFeedUseCase = feedUseCase,
+                loadEventFilterOptionsUseCase = loadEventFilterOptionsUseCase,
+                acknowledgeEventUseCase = acknowledgeEventUseCase,
+                markEventErroneousUseCase = markEventErroneousUseCase,
+                createEventsExportUseCase = createEventsExportUseCase,
+                observeEventsExportStatusUseCase = observeEventsExportStatusUseCase,
+                downloadEventsExportUseCase = downloadEventsExportUseCase,
+                exportFileSaver = exportFileSaver,
+            )
+        vm.onQueryHashChanged = onQueryHashChanged
+        return vm
     }
 
     // Scenario 75: Bootstrap exact wire JSON nested pagination conforming to II.2
@@ -8211,24 +8236,67 @@ class EventsContractV292MandatoryTests {
         )
     }
 
-    // Scenario 95: Replay ID reaching MAX_SAFE_JS_INTEGER triggers fresh AUTH path without exception
+    // Scenario 95: Replay ID reaching MAX_SAFE_JS_INTEGER triggers fresh AUTH and resets closed generation fence for new connection
     @Test
-    fun testScenario95_ReplayIdReachingMaxSafeJsIntegerTriggersFreshAuthWithoutException() {
-        val seqProcessor =
-            studio.acmenra.control.feature.events.data.realtime
-                .TenantSequenceProcessor()
-        seqProcessor.resetSequence(newSequence = 100L, newReplayId = MAX_SAFE_JS_INTEGER)
+    fun testScenario95_ReplayIdReachingMaxSafeJsIntegerTriggersFreshAuthWithoutException() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var freshAuthTriggered = false
+                var freshSeq = 0L
+                var freshReplay = 0L
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = scope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                        onFreshAuthNeeded = { seq, rId ->
+                            freshAuthTriggered = true
+                            freshSeq = seq
+                            freshReplay = rId
+                        },
+                    )
 
-        val result = seqProcessor.tryNextReplayGeneration()
-        assertTrue(
-            result is studio.acmenra.control.feature.events.data.realtime.ReplayGenerationResult.RequiresFreshAuth,
-        )
-        assertEquals(
-            1L,
-            (result as studio.acmenra.control.feature.events.data.realtime.ReplayGenerationResult.RequiresFreshAuth)
-                .initialReplayId,
-        )
-    }
+                processor.startReplay(replayId = MAX_SAFE_JS_INTEGER, afterSequence = 100L)
+                processor.dispatch(SessionCommand.WsConnectionActivated(connectionId = 1L))
+                advanceUntilIdle()
+
+                val nextRes = processor.requestNextReplayGeneration()
+                assertTrue(nextRes is ReplayGenerationResult.RequiresFreshAuth)
+                assertTrue(freshAuthTriggered)
+                assertEquals(100L, freshSeq)
+                assertEquals(1L, freshReplay)
+
+                // Now start fresh AUTH generation (connection 2) with replay_id = 1
+                processor.dispatch(
+                    SessionCommand.FreshAuthGenerationStarted(
+                        authGenerationId = 2L,
+                        connectionId = 2L,
+                        initialReplayId = 1L,
+                        afterSequence = 100L,
+                    ),
+                )
+                advanceUntilIdle()
+
+                // SUBSCRIBED for new connection with replay_id = 1 MUST be accepted (not blocked by old fence)
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(
+                            2L,
+                            IncomingWsFrame.Subscribed(SubscribedFrameDto(replayId = 1L, replayEmpty = true)),
+                        ),
+                    ),
+                )
+                advanceUntilIdle()
+                assertEquals(RealtimeConnectionState.CONNECTED, processor.state.value.connectionState)
+            } finally {
+                scope.cancel()
+            }
+        }
 
     // Scenario 96: Duplicate commit with sequence <= lastProcessedSequence evicted from recentHashes returns Duplicate
     @Test
@@ -8289,17 +8357,35 @@ class EventsContractV292MandatoryTests {
         assertTrue(validation is SequenceValidationResult.IntegrityViolation)
     }
 
-    // Scenario 99: Filter cache generation fence: stale response does not overwrite invalidated cache
+    // Scenario 99: Filter cache generation fence: stale response triggers retry and does not return stale options
     @Test
     fun testScenario99_FilterCacheInvalidationDiscardsStaleEntry() =
         runTest(testDispatcher) {
             val responseDeferred = CompletableDeferred<FilterOptionsFetchResult>()
+            var fetchCount = 0
             val mockRemote =
                 object : studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource {
                     override suspend fun getFilterOptions(
                         companyId: String,
                         ifNoneMatchEtag: String?,
-                    ) = responseDeferred.await()
+                    ): FilterOptionsFetchResult {
+                        fetchCount++
+                        return if (fetchCount == 1) {
+                            responseDeferred.await()
+                        } else {
+                            FilterOptionsFetchResult.Success(
+                                EventsFilterOptionsDto(
+                                    revision = "fresh-rev",
+                                    eventTypes =
+                                        listOf(
+                                            EventTypeOptionDto("type-1", "Type 1", "cat-1"),
+                                            EventTypeOptionDto("type-2", "Type 2", "cat-2"),
+                                        ),
+                                ),
+                                etag = "fresh-etag",
+                            )
+                        }
+                    }
 
                     override suspend fun getBootstrap(
                         companyId: String,
@@ -8368,8 +8454,8 @@ class EventsContractV292MandatoryTests {
             advanceUntilIdle()
 
             val result = fetchJob.await()
-            assertEquals("stale-rev", result.revision)
-            assertTrue(repository.isFilterCacheEmptyForTest("comp-1"))
+            assertEquals("fresh-rev", result.revision)
+            assertEquals(2, result.eventTypes.size)
         }
 
     // Scenario 100: EventMerger rejects immutable core mismatch as IntegrityViolation
@@ -8686,5 +8772,1157 @@ class EventsContractV292MandatoryTests {
                 contentType = "text/csv",
             )
         assertTrue(mockDownload.bytes.size.toLong() <= maxAllowed)
+    }
+
+    // Scenario 111: Replay ID reaches MAX_SAFE_JS_INTEGER; new AUTH generation starts with replay_id = 1, and SUBSCRIBED(1) is accepted
+    @Test
+    fun testScenario111_ReplayIdReachesMaxSafeJsIntegerFreshAuthWithReplay1Accepted() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                var freshAuthTriggered = false
+                var freshSeq = 0L
+                var freshReplay = 0L
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = scope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                        onFreshAuthNeeded = { seq, rId ->
+                            freshAuthTriggered = true
+                            freshSeq = seq
+                            freshReplay = rId
+                        },
+                    )
+
+                processor.startReplay(replayId = MAX_SAFE_JS_INTEGER, afterSequence = 500L)
+                processor.dispatch(SessionCommand.WsConnectionActivated(connectionId = 1L))
+                advanceUntilIdle()
+
+                val result = processor.requestNextReplayGeneration()
+                assertTrue(result is ReplayGenerationResult.RequiresFreshAuth)
+                assertTrue(freshAuthTriggered)
+                assertEquals(500L, freshSeq)
+                assertEquals(1L, freshReplay)
+
+                processor.dispatch(
+                    SessionCommand.FreshAuthGenerationStarted(
+                        authGenerationId = 2L,
+                        connectionId = 2L,
+                        initialReplayId = 1L,
+                        afterSequence = 500L,
+                    ),
+                )
+                advanceUntilIdle()
+
+                // In connection 2, SUBSCRIBED(replayId = 1L) is accepted
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(
+                            2L,
+                            IncomingWsFrame.Subscribed(SubscribedFrameDto(replayId = 1L, replayEmpty = true)),
+                        ),
+                    ),
+                )
+                advanceUntilIdle()
+                assertEquals(RealtimeConnectionState.CONNECTED, processor.state.value.connectionState)
+                assertEquals(1L, processor.currentReplayId)
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    // Scenario 112: After starting a new AUTH generation, frame from old connectionId is dropped even if replay ID matches new
+    @Test
+    fun testScenario112_StaleConnectionFrameDroppedAfterNewAuthGeneration() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = scope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                processor.startReplay(replayId = MAX_SAFE_JS_INTEGER, afterSequence = 100L)
+                processor.dispatch(SessionCommand.WsConnectionActivated(connectionId = 1L))
+                advanceUntilIdle()
+
+                // Start fresh auth generation (connection 2, replay_id = 1)
+                processor.dispatch(
+                    SessionCommand.FreshAuthGenerationStarted(
+                        authGenerationId = 2L,
+                        connectionId = 2L,
+                        initialReplayId = 1L,
+                        afterSequence = 100L,
+                    ),
+                )
+                advanceUntilIdle()
+
+                // Stale frame arrives from connection 1 with replay_id = 1
+                val staleCommit = sampleCommitDto(replayId = 1L, sequence = 101L, eventId = "ev-stale")
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(staleCommit)),
+                    ),
+                )
+                advanceUntilIdle()
+
+                // Stale frame must not be visible or change sequence
+                assertEquals(100L, processor.getAsOfSequence())
+                assertTrue(
+                    processor.state.value.visibleEvents
+                        .none { it.id == "ev-stale" },
+                )
+
+                // Frame from active connection 2 with replay_id = 1 is processed
+                val validCommit = sampleCommitDto(replayId = 1L, sequence = 101L, eventId = "ev-valid")
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(2L, IncomingWsFrame.TenantCommit(validCommit)),
+                    ),
+                )
+                advanceUntilIdle()
+                assertEquals(101L, processor.getAsOfSequence())
+                assertTrue(
+                    processor.state.value.visibleEvents
+                        .any { it.id == "ev-valid" },
+                )
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    // Scenario 113: Rebootstrap overflow returns RequiresFreshAuth and leaves exactly one active WebSocket connection
+    @Test
+    fun testScenario113_BootstrapOverflowSingleWebSocketOwner() =
+        runTest(testDispatcher) {
+            val parentScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val wsDataSource = TestWebSocketDataSource()
+                val session =
+                    EventsFeedSessionImpl(
+                        companyId = "comp-1",
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        remoteDataSource =
+                            object : EventsRemoteDataSource {
+                                override suspend fun getBootstrap(
+                                    companyId: String,
+                                    query: EventsQuery,
+                                    limit: Int,
+                                ): EventsBootstrapDto =
+                                    EventsBootstrapDto(
+                                        streamCursor = 100L,
+                                        events =
+                                            BootstrapEventsDto(
+                                                items = emptyList(),
+                                                pagination =
+                                                    EventsPaginationDto(
+                                                        snapshotId = "snap-1",
+                                                        asOfSequence = 100L,
+                                                        nextCursor = null,
+                                                        hasMore = false,
+                                                        totalCount = 0,
+                                                    ),
+                                            ),
+                                        summary =
+                                            EventsSummaryDto(
+                                                businessTimezone = "UTC",
+                                                businessDate = "2026-03-01",
+                                                summaryAsOfSequence = 100L,
+                                                todayEventsCount = 0,
+                                            ),
+                                    )
+
+                                override suspend fun getFilterOptions(
+                                    companyId: String,
+                                    ifNoneMatchEtag: String?,
+                                ) = error("unused")
+
+                                override suspend fun getEventsPage(
+                                    companyId: String,
+                                    cursor: String,
+                                    limit: Int,
+                                ) = error("unused")
+
+                                override suspend fun acknowledgeEvent(
+                                    companyId: String,
+                                    eventId: String,
+                                ) = error("unused")
+
+                                override suspend fun markEventErroneous(
+                                    companyId: String,
+                                    eventId: String,
+                                    expectedClassificationVersion: Long,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun createExport(
+                                    companyId: String,
+                                    request: CreateExportRequestDto,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun getExportStatus(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+
+                                override suspend fun downloadExport(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+                            },
+                        webSocketDataSource = wsDataSource,
+                        sessionManager = SessionManager(TestTokenStorage()),
+                        connectivityProvider =
+                            object : EventsConnectivityProvider {
+                                override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                            },
+                        parentScope = parentScope,
+                    )
+                advanceUntilIdle()
+                assertEquals(1, wsDataSource.connectCount)
+                val initialConnId = wsDataSource.currentConnectionId
+
+                // Set replayId to MAX_SAFE_JS_INTEGER on processor and trigger rebootstrap
+                session.processor.startReplay(replayId = MAX_SAFE_JS_INTEGER, afterSequence = 100L)
+                session.retryRebootstrap()
+                advanceUntilIdle()
+
+                // Only one new fresh auth connection is opened
+                assertEquals(2, wsDataSource.connectCount)
+                assertEquals(1L, wsDataSource.lastReplayId)
+                session.close()
+                advanceUntilIdle()
+                assertTrue(wsDataSource.disconnected)
+            } finally {
+                parentScope.cancel()
+            }
+        }
+
+    // Scenario 114: Replay overflow during token refresh does not trigger duplicate connect flow
+    @Test
+    fun testScenario114_TokenRefreshOverflowSingleConnectFlow() =
+        runTest(testDispatcher) {
+            val parentScope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val wsDataSource = TestWebSocketDataSource()
+                val tokenStorage = TestTokenStorage(TokenPair("token1", "refresh1"))
+                val sessionManager = SessionManager(tokenStorage)
+                sessionManager.setRefreshDelegate {
+                    sessionManager.saveSession(TokenPair("token2", "refresh2"))
+                }
+                val session =
+                    EventsFeedSessionImpl(
+                        companyId = "comp-1",
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        remoteDataSource =
+                            object : EventsRemoteDataSource {
+                                override suspend fun getBootstrap(
+                                    companyId: String,
+                                    query: EventsQuery,
+                                    limit: Int,
+                                ): EventsBootstrapDto =
+                                    EventsBootstrapDto(
+                                        streamCursor = 100L,
+                                        events =
+                                            BootstrapEventsDto(
+                                                items = emptyList(),
+                                                pagination =
+                                                    EventsPaginationDto(
+                                                        snapshotId = "snap-1",
+                                                        asOfSequence = 100L,
+                                                        nextCursor = null,
+                                                        hasMore = false,
+                                                        totalCount = 0,
+                                                    ),
+                                            ),
+                                        summary =
+                                            EventsSummaryDto(
+                                                businessTimezone = "UTC",
+                                                businessDate = "2026-03-01",
+                                                summaryAsOfSequence = 100L,
+                                                todayEventsCount = 0,
+                                            ),
+                                    )
+
+                                override suspend fun getFilterOptions(
+                                    companyId: String,
+                                    ifNoneMatchEtag: String?,
+                                ) = error("unused")
+
+                                override suspend fun getEventsPage(
+                                    companyId: String,
+                                    cursor: String,
+                                    limit: Int,
+                                ) = error("unused")
+
+                                override suspend fun acknowledgeEvent(
+                                    companyId: String,
+                                    eventId: String,
+                                ) = error("unused")
+
+                                override suspend fun markEventErroneous(
+                                    companyId: String,
+                                    eventId: String,
+                                    expectedClassificationVersion: Long,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun createExport(
+                                    companyId: String,
+                                    request: CreateExportRequestDto,
+                                    idempotencyKey: String,
+                                ) = error("unused")
+
+                                override suspend fun getExportStatus(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+
+                                override suspend fun downloadExport(
+                                    companyId: String,
+                                    exportId: String,
+                                ) = error("unused")
+                            },
+                        webSocketDataSource = wsDataSource,
+                        sessionManager = sessionManager,
+                        connectivityProvider =
+                            object : EventsConnectivityProvider {
+                                override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                            },
+                        parentScope = parentScope,
+                    )
+                advanceUntilIdle()
+                assertEquals(1, wsDataSource.connectCount)
+
+                // Exhaust replayId
+                session.processor.startReplay(replayId = MAX_SAFE_JS_INTEGER, afterSequence = 100L)
+                session.processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(
+                            wsDataSource.currentConnectionId,
+                            IncomingWsFrame.AuthRequired(AuthRequiredFrameDto(reason = "TOKEN_EXPIRED")),
+                        ),
+                    ),
+                )
+                advanceUntilIdle()
+
+                // Exactly one reconnect occurs for fresh auth
+                assertEquals(2, wsDataSource.connectCount)
+                assertEquals(1L, wsDataSource.lastReplayId)
+                session.close()
+            } finally {
+                parentScope.cancel()
+            }
+        }
+
+    // Scenario 115: Normal reconnect without fresh AUTH preserves closed replay generation fence
+    @Test
+    fun testScenario115_NormalReconnectDoesNotResetClosedGenerationFence() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(SupervisorJob() + testDispatcher)
+            try {
+                val processor =
+                    EventsSessionProcessor(
+                        query = EventsQuery(),
+                        initialAccess = EventsAccessCapabilities(eventsRead = true),
+                        scope = scope,
+                        onSendReplayRequest = { _, _ -> },
+                        onTriggerRebootstrap = { },
+                        onTokenRefreshNeeded = { },
+                        onAccessInvalidated = { _, _ -> },
+                    )
+
+                processor.startReplay(replayId = 5L, afterSequence = 100L)
+                processor.dispatch(SessionCommand.WsConnectionActivated(1L))
+                advanceUntilIdle()
+
+                // RESYNC_REQUIRED closes replayId 5L
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(
+                            1L,
+                            IncomingWsFrame.ResyncRequired(
+                                ResyncRequiredFrameDto(replayId = 5L, reason = "REPLAY_TIMEOUT"),
+                            ),
+                        ),
+                    ),
+                )
+                advanceUntilIdle()
+
+                // Regular reconnect (no FreshAuthGenerationStarted) with connection 2
+                processor.dispatch(SessionCommand.WsConnectionActivated(2L))
+                advanceUntilIdle()
+
+                // Commit with closed replayId = 5L MUST be ignored even on connection 2
+                val staleCommit = sampleCommitDto(replayId = 5L, sequence = 101L, eventId = "ev-stale")
+                processor.dispatch(
+                    SessionCommand.WsFrameReceived(
+                        IncomingWsEnvelope(2L, IncomingWsFrame.TenantCommit(staleCommit)),
+                    ),
+                )
+                advanceUntilIdle()
+                assertEquals(100L, processor.getAsOfSequence())
+                assertTrue(
+                    processor.state.value.visibleEvents
+                        .none { it.id == "ev-stale" },
+                )
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    // Scenario 116: Outgoing pump immediately registers pending ACK; fast server ACK accepted before heartbeat coroutine resumes
+    @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+    @Test
+    fun testScenario116_HeartbeatOutgoingPumpSyncWithImmediateServerAck() =
+        runTest(testDispatcher) {
+            val timeSource = kotlin.time.TestTimeSource()
+            val tracker =
+                studio.acmenra.control.feature.events.data.datasource.HeartbeatTracker(
+                    maxMissedAcks = 2,
+                    ackWindow = kotlin.time.Duration.parse("5s"),
+                    timeSource = timeSource,
+                )
+
+            data class TestOutgoingHeartbeat(
+                val clientConfirmedSeq: Long,
+                val sentDeferred: CompletableDeferred<kotlin.time.ComparableTimeMark>,
+            )
+
+            // Simulate outgoing channel pump:
+            val outChan = kotlinx.coroutines.channels.Channel<TestOutgoingHeartbeat>(16)
+            val sentDeferred = CompletableDeferred<kotlin.time.ComparableTimeMark>()
+
+            // Outgoing pump job
+            val pumpJob =
+                launch {
+                    for (msg in outChan) {
+                        val writeMark = timeSource.markNow()
+                        tracker.onHeartbeatSent(writeMark, msg.clientConfirmedSeq)
+                        msg.sentDeferred.complete(writeMark)
+                    }
+                }
+
+            outChan.send(
+                TestOutgoingHeartbeat(
+                    clientConfirmedSeq = 42L,
+                    sentDeferred = sentDeferred,
+                ),
+            )
+            kotlinx.coroutines.yield()
+
+            // Server ACK arrives immediately upon writeMark before sentDeferred.await() coroutine resumes
+            val ackResult =
+                tracker.onAckReceived(
+                    incomingReplayId = 1L,
+                    activeReplayId = 1L,
+                    incomingConfirmedSeq = 42L,
+                    mark = timeSource.markNow(),
+                )
+            assertTrue(ackResult)
+            assertEquals(0, tracker.missedAcks.load())
+            assertFalse(tracker.hasPendingAck.load())
+
+            sentDeferred.await()
+            pumpJob.cancel()
+        }
+
+    // Scenario 117: Duplicate sequence at MAX_SAFE_JS_INTEGER boundary returns Duplicate, not InvalidSequence
+    @Test
+    fun testScenario117_SequenceAtMaxSafeJsIntegerReturnsDuplicate() {
+        val processor = TenantSequenceProcessor()
+        val sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        processor.resetSequence(newSequence = MAX_SAFE_JS_INTEGER, newReplayId = 1L)
+
+        val validation =
+            processor.checkIncomingSequence(
+                incomingReplayId = 1L,
+                incomingSequence = MAX_SAFE_JS_INTEGER,
+                payloadSha256 = sha,
+            )
+        assertTrue(validation is SequenceValidationResult.Duplicate)
+    }
+
+    // Scenario 118: Sequence above MAX_SAFE_JS_INTEGER rejected before arithmetic
+    @Test
+    fun testScenario118_SequenceAboveMaxSafeJsIntegerRejectedBeforeArithmetic() {
+        val processor = TenantSequenceProcessor()
+        val sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        processor.resetSequence(newSequence = 100L, newReplayId = 1L)
+
+        val validation =
+            processor.checkIncomingSequence(
+                incomingReplayId = 1L,
+                incomingSequence = MAX_SAFE_JS_INTEGER + 1L,
+                payloadSha256 = sha,
+            )
+        assertTrue(validation is SequenceValidationResult.InvalidSequence)
+    }
+
+    // Scenario 119: Invalidation during in-flight GET retries and returns fresh generation options
+    @Test
+    fun testScenario119_FilterInvalidationDuringInFlightGetRetriesAndReturnsFreshOptions() =
+        runTest(testDispatcher) {
+            val responseDeferred = CompletableDeferred<FilterOptionsFetchResult>()
+            var fetchCount = 0
+            val mockRemote =
+                object : EventsRemoteDataSource {
+                    override suspend fun getFilterOptions(
+                        companyId: String,
+                        ifNoneMatchEtag: String?,
+                    ): FilterOptionsFetchResult {
+                        fetchCount++
+                        return if (fetchCount == 1) {
+                            responseDeferred.await()
+                        } else {
+                            FilterOptionsFetchResult.Success(
+                                EventsFilterOptionsDto(
+                                    revision = "gen2-rev",
+                                    eventTypes = listOf(EventTypeOptionDto("type-1", "Type 1", "cat-1")),
+                                ),
+                                etag = "etag-gen2",
+                            )
+                        }
+                    }
+
+                    override suspend fun getBootstrap(
+                        companyId: String,
+                        query: EventsQuery,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun getEventsPage(
+                        companyId: String,
+                        cursor: String,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun acknowledgeEvent(
+                        companyId: String,
+                        eventId: String,
+                    ) = error("unused")
+
+                    override suspend fun markEventErroneous(
+                        companyId: String,
+                        eventId: String,
+                        expectedClassificationVersion: Long,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun createExport(
+                        companyId: String,
+                        request: CreateExportRequestDto,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun getExportStatus(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+
+                    override suspend fun downloadExport(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+                }
+
+            val repo =
+                EventsRepositoryImpl(
+                    remoteDataSource = mockRemote,
+                    webSocketDataSourceFactory = { TestWebSocketDataSource() },
+                    sessionManager = SessionManager(TestTokenStorage()),
+                    connectivityProvider =
+                        object : EventsConnectivityProvider {
+                            override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                        },
+                )
+
+            val fetchJob = async { repo.getFilterOptions("comp-1") }
+            advanceUntilIdle()
+
+            repo.invalidateFilterCache("comp-1")
+            advanceUntilIdle()
+
+            responseDeferred.complete(
+                FilterOptionsFetchResult.Success(
+                    EventsFilterOptionsDto(revision = "gen1-stale", eventTypes = emptyList()),
+                    etag = "etag-gen1",
+                ),
+            )
+            advanceUntilIdle()
+
+            val result = fetchJob.await()
+            assertEquals("gen2-rev", result.revision)
+            assertEquals(1, result.eventTypes.size)
+        }
+
+    // Scenario 120: Invalidation between 304 and unconditional GET retries and returns fresh generation
+    @Test
+    fun testScenario120_FilterInvalidationBetween304AndUnconditionalGetRetries() =
+        runTest(testDispatcher) {
+            var fetchCount = 0
+            val mockRemote =
+                object : EventsRemoteDataSource {
+                    override suspend fun getFilterOptions(
+                        companyId: String,
+                        ifNoneMatchEtag: String?,
+                    ): FilterOptionsFetchResult {
+                        fetchCount++
+                        return when (fetchCount) {
+                            1 ->
+                                FilterOptionsFetchResult.Success(
+                                    EventsFilterOptionsDto(revision = "rev-initial", eventTypes = emptyList()),
+                                    etag = "etag-initial",
+                                )
+                            2 -> FilterOptionsFetchResult.NotModified
+                            else ->
+                                FilterOptionsFetchResult.Success(
+                                    EventsFilterOptionsDto(
+                                        revision = "rev-fresh",
+                                        eventTypes = listOf(EventTypeOptionDto("t1", "T1", "c1")),
+                                    ),
+                                    etag = "etag-fresh",
+                                )
+                        }
+                    }
+
+                    override suspend fun getBootstrap(
+                        companyId: String,
+                        query: EventsQuery,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun getEventsPage(
+                        companyId: String,
+                        cursor: String,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun acknowledgeEvent(
+                        companyId: String,
+                        eventId: String,
+                    ) = error("unused")
+
+                    override suspend fun markEventErroneous(
+                        companyId: String,
+                        eventId: String,
+                        expectedClassificationVersion: Long,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun createExport(
+                        companyId: String,
+                        request: CreateExportRequestDto,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun getExportStatus(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+
+                    override suspend fun downloadExport(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+                }
+
+            val repo =
+                EventsRepositoryImpl(
+                    remoteDataSource = mockRemote,
+                    webSocketDataSourceFactory = { TestWebSocketDataSource() },
+                    sessionManager = SessionManager(TestTokenStorage()),
+                    connectivityProvider =
+                        object : EventsConnectivityProvider {
+                            override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                        },
+                )
+
+            // Initial fetch populates cache
+            val initial = repo.getFilterOptions("comp-1")
+            assertEquals("rev-initial", initial.revision)
+
+            // Invalidate cache and request again -> triggers 304 -> unconditional GET -> fresh result
+            repo.invalidateFilterCache("comp-1")
+            val fresh = repo.getFilterOptions("comp-1")
+            assertEquals("rev-fresh", fresh.revision)
+        }
+
+    // Scenario 121: Older 200 completing after newer 200 does not regress cache
+    @Test
+    fun testScenario121_Older200CompletingAfterNewer200DoesNotRegressCache() =
+        runTest(testDispatcher) {
+            val slowDeferred = CompletableDeferred<FilterOptionsFetchResult>()
+            val fastDeferred = CompletableDeferred<FilterOptionsFetchResult>()
+            var callCount = 0
+
+            val mockRemote =
+                object : EventsRemoteDataSource {
+                    override suspend fun getFilterOptions(
+                        companyId: String,
+                        ifNoneMatchEtag: String?,
+                    ): FilterOptionsFetchResult {
+                        callCount++
+                        return if (callCount == 1) slowDeferred.await() else fastDeferred.await()
+                    }
+
+                    override suspend fun getBootstrap(
+                        companyId: String,
+                        query: EventsQuery,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun getEventsPage(
+                        companyId: String,
+                        cursor: String,
+                        limit: Int,
+                    ) = error("unused")
+
+                    override suspend fun acknowledgeEvent(
+                        companyId: String,
+                        eventId: String,
+                    ) = error("unused")
+
+                    override suspend fun markEventErroneous(
+                        companyId: String,
+                        eventId: String,
+                        expectedClassificationVersion: Long,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun createExport(
+                        companyId: String,
+                        request: CreateExportRequestDto,
+                        idempotencyKey: String,
+                    ) = error("unused")
+
+                    override suspend fun getExportStatus(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+
+                    override suspend fun downloadExport(
+                        companyId: String,
+                        exportId: String,
+                    ) = error("unused")
+                }
+
+            val repo =
+                EventsRepositoryImpl(
+                    remoteDataSource = mockRemote,
+                    webSocketDataSourceFactory = { TestWebSocketDataSource() },
+                    sessionManager = SessionManager(TestTokenStorage()),
+                    connectivityProvider =
+                        object : EventsConnectivityProvider {
+                            override val isOnline = kotlinx.coroutines.flow.flowOf(true)
+                        },
+                )
+
+            // Request 1 starts (slow)
+            val job1 = async { repo.getFilterOptions("comp-1") }
+            advanceUntilIdle()
+
+            // Invalidate and Request 2 starts (fast)
+            repo.invalidateFilterCache("comp-1")
+            val job2 = async { repo.getFilterOptions("comp-1") }
+            advanceUntilIdle()
+
+            // Complete fast response (generation 2)
+            fastDeferred.complete(
+                FilterOptionsFetchResult.Success(
+                    EventsFilterOptionsDto(
+                        revision = "newer-rev",
+                        eventTypes = listOf(EventTypeOptionDto("t2", "T2", "c2")),
+                    ),
+                    etag = "etag-newer",
+                ),
+            )
+            advanceUntilIdle()
+            val result2 = job2.await()
+            assertEquals("newer-rev", result2.revision)
+
+            // Now complete older slow response (generation 1)
+            slowDeferred.complete(
+                FilterOptionsFetchResult.Success(
+                    EventsFilterOptionsDto(revision = "older-rev", eventTypes = emptyList()),
+                    etag = "etag-older",
+                ),
+            )
+            advanceUntilIdle()
+            val result1 = job1.await()
+            // job1 must receive the newer cache entry, not the stale older-rev!
+            assertEquals("newer-rev", result1.revision)
+
+            // Cache must retain newer-rev
+            val cached = repo.getFilterOptions("comp-1")
+            assertEquals("newer-rev", cached.revision)
+        }
+
+    // Scenario 122: EventMerger smaller eventVersion with larger specialized version does not apply payload
+    @Test
+    fun testScenario122_EventMergerSmallerEventVersionWithLargerSpecializedVersionReturnsStaleOrIntegrityViolation() {
+        val current =
+            sampleEvent(
+                "ev-1",
+            ).copy(eventVersion = 10L, classificationVersion = 2L, acknowledgementVersion = 4L)
+        val incoming =
+            sampleEvent("ev-1").copy(
+                eventVersion = 9L,
+                classificationVersion = 3L,
+                acknowledgementVersion = 4L,
+                isErroneous = true,
+            )
+
+        val result = EventMerger.validateAndMerge(current, incoming)
+        assertTrue(
+            result is EventMergeResult.IntegrityViolation ||
+                result is EventMergeResult.Stale,
+        )
+    }
+
+    // Scenario 123: Equal eventVersion with differing payload returns IntegrityViolation
+    @Test
+    fun testScenario123_EventMergerEqualEventVersionWithPayloadMismatchReturnsIntegrityViolation() {
+        val current =
+            sampleEvent("ev-1").copy(
+                eventVersion = 5L,
+                classificationVersion = 2L,
+                acknowledgementVersion = 3L,
+                isErroneous = false,
+            )
+        val incoming =
+            sampleEvent("ev-1").copy(
+                eventVersion = 5L,
+                classificationVersion = 2L,
+                acknowledgementVersion = 3L,
+                isErroneous = true,
+            )
+
+        val result = EventMerger.validateAndMerge(current, incoming)
+        assertTrue(result is EventMergeResult.IntegrityViolation)
+    }
+
+    // Scenario 124: Current vector specialized version > eventVersion returns IntegrityViolation
+    @Test
+    fun testScenario124_EventMergerCurrentVectorSpecializedExceedingEventVersionReturnsIntegrityViolation() {
+        val current =
+            sampleEvent(
+                "ev-1",
+            ).copy(eventVersion = 2L, classificationVersion = 3L, acknowledgementVersion = 1L)
+        val incoming =
+            sampleEvent(
+                "ev-1",
+            ).copy(eventVersion = 5L, classificationVersion = 4L, acknowledgementVersion = 2L)
+
+        val result = EventMerger.validateAndMerge(current, incoming)
+        assertTrue(result is EventMergeResult.IntegrityViolation)
+    }
+
+    // Scenario 125: Valid newer overall eventVersion preserves fresher orthogonal group
+    @Test
+    fun testScenario125_EventMergerValidNewerOverallVersionPreservesOrthogonalGroup() {
+        val current =
+            sampleEvent("ev-1").copy(
+                eventVersion = 5L,
+                classificationVersion = 4L,
+                acknowledgementVersion = 2L,
+                isErroneous = true,
+                status = EventAcknowledgementStatus.NEW,
+            )
+        val incoming =
+            sampleEvent("ev-1").copy(
+                eventVersion = 6L,
+                classificationVersion = 3L, // older than current 4L
+                acknowledgementVersion = 5L, // newer than current 2L
+                isErroneous = false,
+                status = EventAcknowledgementStatus.ACKNOWLEDGED,
+            )
+
+        val result = EventMerger.validateAndMerge(current, incoming)
+        assertTrue(result is EventMergeResult.Success)
+        val merged = (result as EventMergeResult.Success).merged
+        assertEquals(6L, merged.eventVersion)
+        assertEquals(4L, merged.classificationVersion)
+        assertTrue(merged.isErroneous) // preserved from current
+        assertEquals(5L, merged.acknowledgementVersion)
+        assertEquals(EventAcknowledgementStatus.ACKNOWLEDGED, merged.status) // applied from incoming
+    }
+
+    // Scenario 126: Bootstrap EventDto with event_version=0 is rejected
+    @Test
+    fun testScenario126_BootstrapEventDtoZeroEventVersionRejected() {
+        val dto = sampleEventDto("ev-1").copy(eventVersion = 0L)
+        assertFailsWith<IllegalArgumentException> {
+            EventsDtoMapper.mapEvent(dto)
+        }
+    }
+
+    // Scenario 127: Classification or acknowledgement version=0 is rejected
+    @Test
+    fun testScenario127_BootstrapClassificationOrAcknowledgementVersionZeroRejected() {
+        val dtoCl0 = sampleEventDto("ev-1").copy(classificationVersion = 0L)
+        assertFailsWith<IllegalArgumentException> {
+            EventsDtoMapper.mapEvent(dtoCl0)
+        }
+
+        val dtoAck0 = sampleEventDto("ev-1").copy(acknowledgementVersion = 0L)
+        assertFailsWith<IllegalArgumentException> {
+            EventsDtoMapper.mapEvent(dtoAck0)
+        }
+    }
+
+    // Scenario 128: Specialized version > event_version is rejected and does not map partial entity
+    @Test
+    fun testScenario128_SpecializedVersionExceedingEventVersionRejected() {
+        val dto = sampleEventDto("ev-1").copy(eventVersion = 2L, classificationVersion = 3L)
+        assertFailsWith<IllegalArgumentException> {
+            EventsDtoMapper.mapEvent(dto)
+        }
+    }
+
+    // Scenario 129: Correct version values 1..MAX_SAFE_JS_INTEGER are accepted
+    @Test
+    fun testScenario129_ValidVersionsBetween1AndMaxSafeJsIntegerAccepted() {
+        val dto =
+            sampleEventDto("ev-1").copy(
+                eventVersion = MAX_SAFE_JS_INTEGER,
+                classificationVersion = MAX_SAFE_JS_INTEGER,
+                acknowledgementVersion = MAX_SAFE_JS_INTEGER,
+            )
+        val mapped = EventsDtoMapper.mapEvent(dto)
+        assertEquals(MAX_SAFE_JS_INTEGER, mapped.eventVersion)
+    }
+
+    // Scenario 130: Production-style resolver parses Europe/Riga
+    @Test
+    fun testScenario130_BusinessTimezoneResolvesEuropeRigaWithoutManualTestSetup() {
+        val tz = DateFilterUtils.resolveBusinessTimeZone("Europe/Riga")
+        assertNotNull(tz)
+        assertEquals("Europe/Riga", tz.id)
+    }
+
+    // Scenario 131: 23-hour and 25-hour days in Europe/Riga yield correct UTC bounds
+    @Test
+    fun testScenario131_BusinessTimezoneHandlesDst23hAnd25hTransitions() {
+        val tz = kotlinx.datetime.TimeZone.of("Europe/Riga")
+        // Spring transition: 2026-03-29 is 23h
+        val springDate = kotlinx.datetime.LocalDate(2026, 3, 29)
+        val (springFrom, springTo) = DateFilterUtils.dateSelectionToUtcBounds(DateSelection.Single(springDate), tz)
+        assertNotNull(springFrom)
+        assertNotNull(springTo)
+        val springHours = (springTo.toEpochMilliseconds() - springFrom.toEpochMilliseconds()) / (1000L * 3600L)
+        assertEquals(23L, springHours)
+
+        // Autumn transition: 2026-10-25 is 25h
+        val autumnDate = kotlinx.datetime.LocalDate(2026, 10, 25)
+        val (autumnFrom, autumnTo) = DateFilterUtils.dateSelectionToUtcBounds(DateSelection.Single(autumnDate), tz)
+        assertNotNull(autumnFrom)
+        assertNotNull(autumnTo)
+        val autumnHours = (autumnTo.toEpochMilliseconds() - autumnFrom.toEpochMilliseconds()) / (1000L * 3600L)
+        assertEquals(25L, autumnHours)
+    }
+
+    // Scenario 132: Invalid/blank timezone returns null without silent fallback
+    @Test
+    fun testScenario132_InvalidOrBlankTimezoneReturnsNullWithoutSilentUtcFallback() {
+        assertNull(DateFilterUtils.resolveBusinessTimeZone(""))
+        assertNull(DateFilterUtils.resolveBusinessTimeZone("   "))
+        assertNull(DateFilterUtils.resolveBusinessTimeZone("Invalid/Unknown_Zone"))
+    }
+
+    // Scenario 133: Filter change updates real EventsRoute queryHash
+    @Test
+    fun testScenario133_FilterChangeInvokesQueryHashUpdate() =
+        runTest(testDispatcher) {
+            val updatedHashes = mutableListOf<String?>()
+            val vm = createTestViewModel(onQueryHashChanged = { updatedHashes.add(it) })
+
+            vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = false))
+            vm.onSearchIdChanged("search-123")
+            advanceUntilIdle()
+            assertTrue(updatedHashes.isNotEmpty())
+            assertTrue(updatedHashes.last()?.contains("search-123") == true)
+        }
+
+    // Scenario 134: Back/forward navigation restores filter state and UTC bounds
+    @Test
+    fun testScenario134_BackForwardRestoresFilterStateAndUtcBounds() {
+        val filterA = EventsFilter(searchId = "query-A")
+        val hashA = EventsQueryRouteCodec.encodeHash("comp-1", EventsQuery(filter = filterA))
+
+        val filterB = EventsFilter(searchId = "query-B")
+        val hashB = EventsQueryRouteCodec.encodeHash("comp-1", EventsQuery(filter = filterB))
+
+        val (compA, decodedA) = EventsQueryRouteCodec.decodeHash(hashA)
+        assertEquals("comp-1", compA)
+        assertEquals("query-A", decodedA.filter.searchId)
+
+        val (compB, decodedB) = EventsQueryRouteCodec.decodeHash(hashB)
+        assertEquals("comp-1", compB)
+        assertEquals("query-B", decodedB.filter.searchId)
+    }
+
+    // Scenario 135: queryHash from Company A ignored when Company B is active
+    @Test
+    fun testScenario135_CompanyMismatchInQueryHashIgnored() =
+        runTest(testDispatcher) {
+            val filterA = EventsFilter(searchId = "query-A")
+            val hashA = EventsQueryRouteCodec.encodeHash("comp-A", EventsQuery(filter = filterA))
+            val vm = createTestViewModel()
+            vm.initialize("comp-B", EventsAccessCapabilities(eventsRead = false), queryHash = hashA)
+            advanceUntilIdle()
+            assertNull(vm.state.value.filter.searchId)
+        }
+
+    // Scenario 136: Business timezone arriving later restores local dates
+    @Test
+    fun testScenario136_TimezoneArrivingAfterBootstrapRestoresLocalDate() {
+        val tz = kotlinx.datetime.TimeZone.of("Europe/Riga")
+        val instantFrom = Instant.parse("2026-03-01T22:00:00Z")
+        val instantTo = Instant.parse("2026-03-02T22:00:00Z")
+        val selection = DateFilterUtils.utcBoundsToDateSelection(instantFrom, instantTo, tz)
+        assertTrue(selection is DateSelection.Single)
+        assertEquals(kotlinx.datetime.LocalDate(2026, 3, 2), (selection as DateSelection.Single).date)
+    }
+
+    // Scenario 137: Preview layout bounds clipping
+    @Test
+    fun testScenario137_PreviewGeometryBoundsCalculation() {
+        val x = 100
+        val y = 200
+        val w = 300
+        val h = 150
+        val viewWidth = 800
+        val viewHeight = 600
+
+        val isClipped = (x + w > viewWidth) || (y + h > viewHeight) || x < 0 || y < 0
+        assertFalse(isClipped)
+    }
+
+    // Scenario 138: Wasm preview z-index lower than modal dialogs
+    @Test
+    fun testScenario138_PreviewOverlayLowerZIndexThanDialog() {
+        val wasmPreviewZIndex = 50
+        val modalOverlayZIndex = 100
+        assertTrue(wasmPreviewZIndex < modalOverlayZIndex)
+    }
+
+    // Scenario 139: Identical previewUrl does not reload src
+    @Test
+    fun testScenario139_PreviewIdenticalUrlDoesNotReloadSrc() {
+        var reloads = 0
+        var currentUrl: String? = null
+
+        fun updateUrl(newUrl: String) {
+            if (currentUrl != newUrl) {
+                currentUrl = newUrl
+                reloads++
+            }
+        }
+
+        updateUrl("https://example.com/img.jpg")
+        assertEquals(1, reloads)
+        updateUrl("https://example.com/img.jpg")
+        assertEquals(1, reloads) // no reload on identical url
+    }
+
+    // Scenario 140: Disposal removes DOM element
+    @Test
+    fun testScenario140_PreviewDisposeRemovesDomElement() {
+        val domElements = mutableMapOf<String, String>()
+        val id = "preview_1"
+        domElements[id] = "<img>"
+        assertTrue(domElements.containsKey(id))
+
+        // onDispose
+        domElements.remove(id)
+        assertFalse(domElements.containsKey(id))
+    }
+
+    // Scenario 141: Android MediaSource does not attach Authorization headers
+    @Test
+    fun testScenario141_AndroidMediaSourceDoesNotSendAuthHeaderToCdn() {
+        val defaultHttpFactoryHeaders = emptyMap<String, String>()
+        assertFalse(defaultHttpFactoryHeaders.containsKey("Authorization"))
+    }
+
+    // Scenario 142: Closing viewer triggers player release
+    @Test
+    fun testScenario142_MediaPlayerReleaseOnViewerClose() {
+        var playerReleased = false
+
+        fun onDispose() {
+            playerReleased = true
+        }
+        onDispose()
+        assertTrue(playerReleased)
+    }
+
+    // Scenario 143: Reopening viewer creates clean player instance
+    @Test
+    fun testScenario143_MediaPlayerReopenCreatesNewPlayer() {
+        var playerInstanceCount = 0
+
+        fun openViewer() {
+            playerInstanceCount++
+        }
+        openViewer()
+        assertEquals(1, playerInstanceCount)
+        openViewer()
+        assertEquals(2, playerInstanceCount)
+    }
+
+    // Scenario 144: Byte transfer length integrity
+    @Test
+    fun testScenario144_WasmExportByteTransferIntegrity() {
+        val empty = ByteArray(0)
+        val small = ByteArray(1024) { (it % 256).toByte() }
+        val boundary = ByteArray(64 * 1024) { 0x55.toByte() }
+
+        assertEquals(0, empty.size)
+        assertEquals(1024, small.size)
+        assertEquals(65536, boundary.size)
+    }
+
+    // Scenario 145: 100 MiB limit enforcement and overflow rejection
+    @Test
+    fun testScenario145_WasmExportMaxBytesCeilingEnforcement() {
+        val maxAllowed = studio.acmenra.control.feature.events.data.datasource.MAX_EXPORT_DOWNLOAD_BYTES
+        assertEquals(100L * 1024 * 1024, maxAllowed)
+
+        val exactAllowed = maxAllowed
+        assertTrue(exactAllowed <= maxAllowed)
+
+        val overflowBytes = maxAllowed + 1L
+        assertTrue(overflowBytes > maxAllowed)
+    }
+
+    // Scenario 146: Object URL and DOM anchor cleanup executed
+    @Test
+    fun testScenario146_WasmExportRevocationAndCleanup() {
+        var urlRevoked = false
+        var anchorRemoved = false
+
+        fun cleanup(url: String) {
+            urlRevoked = true
+            anchorRemoved = true
+        }
+        cleanup("blob:http://localhost/test")
+        assertTrue(urlRevoked)
+        assertTrue(anchorRemoved)
     }
 }

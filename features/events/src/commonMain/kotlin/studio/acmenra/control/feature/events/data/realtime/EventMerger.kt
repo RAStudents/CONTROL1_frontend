@@ -48,6 +48,14 @@ object EventMerger {
                     "ev=${incoming.eventVersion}, cl=${incoming.classificationVersion}, ack=${incoming.acknowledgementVersion}",
             )
         }
+        if (current.classificationVersion > current.eventVersion ||
+            current.acknowledgementVersion > current.eventVersion
+        ) {
+            return EventMergeResult.IntegrityViolation(
+                "Current specialized version exceeds eventVersion: " +
+                    "ev=${current.eventVersion}, cl=${current.classificationVersion}, ack=${current.acknowledgementVersion}",
+            )
+        }
 
         // 3. Immutable core identity validation
         if (current.id != incoming.id ||
@@ -65,7 +73,48 @@ object EventMerger {
             )
         }
 
-        // 4. Equal specialized version identity check (G.4)
+        // 4. If incoming eventVersion is smaller than current: strictly reject
+        if (incoming.eventVersion < current.eventVersion) {
+            if (incoming.classificationVersion > current.classificationVersion ||
+                incoming.acknowledgementVersion > current.acknowledgementVersion
+            ) {
+                return EventMergeResult.IntegrityViolation(
+                    "Contradictory version vector: incoming eventVersion ${incoming.eventVersion} < " +
+                        "current ${current.eventVersion} but specialized version is greater " +
+                        "(cl: ${incoming.classificationVersion} vs ${current.classificationVersion}, " +
+                        "ack: ${incoming.acknowledgementVersion} vs ${current.acknowledgementVersion})",
+                )
+            }
+            return EventMergeResult.Stale
+        }
+
+        // 5. If incoming eventVersion == current eventVersion:
+        if (incoming.eventVersion == current.eventVersion) {
+            if (incoming.classificationVersion != current.classificationVersion ||
+                incoming.acknowledgementVersion != current.acknowledgementVersion
+            ) {
+                return EventMergeResult.IntegrityViolation(
+                    "Equal eventVersion ${incoming.eventVersion} has differing specialized versions: " +
+                        "incoming(cl=${incoming.classificationVersion}, ack=${incoming.acknowledgementVersion}) vs " +
+                        "current(cl=${current.classificationVersion}, ack=${current.acknowledgementVersion})",
+                )
+            }
+            if (incoming.isErroneous != current.isErroneous ||
+                incoming.erroneousMarkedAt != current.erroneousMarkedAt ||
+                incoming.erroneousMarkedBy != current.erroneousMarkedBy ||
+                incoming.status != current.status ||
+                incoming.acknowledgedAt != current.acknowledgedAt ||
+                incoming.acknowledgedBy != current.acknowledgedBy
+            ) {
+                return EventMergeResult.IntegrityViolation(
+                    "Equal eventVersion ${incoming.eventVersion} has content/payload mismatch",
+                )
+            }
+            return EventMergeResult.Stale
+        }
+
+        // 6. Only incoming.eventVersion > current.eventVersion reaches here:
+        // Equal specialized version identity check (G.4)
         if (incoming.classificationVersion == current.classificationVersion) {
             if (incoming.isErroneous != current.isErroneous ||
                 incoming.erroneousMarkedAt != current.erroneousMarkedAt ||
@@ -88,15 +137,7 @@ object EventMerger {
             }
         }
 
-        // 5. Check if incoming has no newer data (Stale)
-        if (incoming.eventVersion <= current.eventVersion &&
-            incoming.classificationVersion <= current.classificationVersion &&
-            incoming.acknowledgementVersion <= current.acknowledgementVersion
-        ) {
-            return EventMergeResult.Stale
-        }
-
-        // 6. Merge specialized groups
+        // 7. Merge specialized groups (orthogonal merge)
         val classificationPart =
             if (incoming.classificationVersion > current.classificationVersion) {
                 ClassificationFields(

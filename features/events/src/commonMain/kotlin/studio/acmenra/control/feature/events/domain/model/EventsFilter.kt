@@ -53,13 +53,15 @@ sealed interface DateSelection {
 }
 
 object DateFilterUtils {
-    fun parseSafeTimeZone(zoneId: String?): TimeZone {
+    fun resolveBusinessTimeZone(zoneId: String?): TimeZone? {
         ensureTimezoneDatabaseInitialized()
-        if (zoneId.isNullOrBlank()) return TimeZone.currentSystemDefault()
-        return runCatching { TimeZone.of(zoneId) }.getOrElse {
-            runCatching { TimeZone.of("UTC") }.getOrDefault(TimeZone.currentSystemDefault())
-        }
+        if (zoneId.isNullOrBlank()) return null
+        return runCatching { TimeZone.of(zoneId.trim()) }.getOrNull()
     }
+
+    fun parseSafeTimeZone(zoneId: String?): TimeZone =
+        resolveBusinessTimeZone(zoneId)
+            ?: throw IllegalArgumentException("Invalid or unavailable business timezone: '$zoneId'")
 
     fun dateSelectionToUtcBounds(
         selection: DateSelection,

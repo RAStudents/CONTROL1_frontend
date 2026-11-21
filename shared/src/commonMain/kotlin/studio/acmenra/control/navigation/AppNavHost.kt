@@ -1,5 +1,7 @@
 package studio.acmenra.control.navigation
 
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -17,6 +19,7 @@ import studio.acmenra.control.core.access.domain.model.TenantPermission
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.feature.auth.presentation.LoginRouteContent
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
+import studio.acmenra.control.feature.events.domain.model.EventsQueryRouteCodec
 import studio.acmenra.control.feature.events.presentation.EventsRouteContent
 import studio.acmenra.control.navigation.components.LoadingPlaceholder
 import studio.acmenra.control.navigation.screen.CompaniesDashboardScreen
@@ -27,6 +30,8 @@ fun AppNavHost(
     startDestination: Any,
     sessionState: SessionState,
     modifier: Modifier = Modifier,
+    urlHash: String? = null,
+    onUpdateUrlHash: ((companyId: String, queryHash: String?) -> Unit)? = null,
 ) {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val destination = backStackEntry?.destination
@@ -49,7 +54,11 @@ fun AppNavHost(
     NavHost(
         navController = navController,
         startDestination = startDestination,
-        modifier = modifier,
+        modifier = modifier.fillMaxSize(),
+        enterTransition = { EnterTransition.None },
+        exitTransition = { ExitTransition.None },
+        popEnterTransition = { EnterTransition.None },
+        popExitTransition = { ExitTransition.None },
     ) {
         composable<LoginRoute> {
             LoginRouteContent()
@@ -57,12 +66,41 @@ fun AppNavHost(
 
         composable<EventsRoute> { entry ->
             val route = entry.toRoute<EventsRoute>()
+            val rawUrlHash =
+                if (!urlHash.isNullOrBlank() && (urlHash.startsWith("#events") || urlHash.startsWith("events"))) {
+                    urlHash
+                } else {
+                    null
+                }
+            val decodedFromUrlHash =
+                rawUrlHash?.let {
+                    EventsQueryRouteCodec.decodeHash(it).first
+                }
+
+            val isCompanyMatching =
+                route.cleanCompanyId == null || route.cleanCompanyId == decodedFromUrlHash
+
+            val effectiveQueryHash =
+                when {
+                    !route.queryHash.isNullOrBlank() -> route.queryHash
+                    rawUrlHash != null && isCompanyMatching -> rawUrlHash
+                    else -> null
+                }
+
+            val decodedCompany =
+                if (!effectiveQueryHash.isNullOrBlank()) {
+                    EventsQueryRouteCodec.decodeHash(effectiveQueryHash).first
+                } else {
+                    null
+                }
+            val effectiveCompanyId = route.cleanCompanyId ?: decodedCompany
+
             if (sessionState == SessionState.Authenticated) {
                 TenantRouteGuard(
-                    requestedCompanyId = route.cleanCompanyId,
+                    requestedCompanyId = effectiveCompanyId,
                     requirement = RoutePermissionRequirement.Tenant(TenantPermission.EVENTS_READ),
                     onNavigateToCompany = { newCompanyId ->
-                        navController.navigateToEvents(newCompanyId)
+                        navController.navigateToEvents(newCompanyId, effectiveQueryHash)
                     },
                     onNavigateToCompaniesDashboard = {
                         navController.navigateToCompaniesDashboard()
@@ -85,9 +123,11 @@ fun AppNavHost(
                     EventsRouteContent(
                         companyId = tenantContext.companyId,
                         accessCapabilities = accessCapabilities,
-                        queryHash = route.queryHash,
+                        queryHash = effectiveQueryHash,
                         onQueryHashChanged = { newHash ->
-                            if (newHash != route.queryHash) {
+                            if (onUpdateUrlHash != null) {
+                                onUpdateUrlHash(tenantContext.companyId, newHash)
+                            } else if (newHash != route.queryHash) {
                                 navController.navigate(
                                     EventsRoute(
                                         companyId = tenantContext.companyId,
@@ -95,6 +135,9 @@ fun AppNavHost(
                                     ),
                                 ) {
                                     launchSingleTop = true
+                                    popUpTo<EventsRoute> {
+                                        inclusive = true
+                                    }
                                 }
                             }
                         },

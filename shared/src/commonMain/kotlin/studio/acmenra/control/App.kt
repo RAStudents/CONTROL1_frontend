@@ -27,7 +27,9 @@ import studio.acmenra.control.navigation.LoginRoute
 @Composable
 fun App(
     modifier: Modifier = Modifier,
+    urlHash: String? = null,
     onNavHostReady: suspend (NavController) -> Unit = {},
+    onUpdateUrlHash: ((companyId: String, queryHash: String?) -> Unit)? = null,
 ) {
     val sessionManager = koinInject<SessionManager>()
     val sessionState by sessionManager.sessionState.collectAsState()
@@ -35,7 +37,9 @@ fun App(
     AppContent(
         sessionState = sessionState,
         modifier = modifier,
+        urlHash = urlHash,
         onNavHostReady = onNavHostReady,
+        onUpdateUrlHash = onUpdateUrlHash,
     )
 }
 
@@ -43,7 +47,9 @@ fun App(
 fun AppContent(
     sessionState: SessionState,
     modifier: Modifier = Modifier,
+    urlHash: String? = null,
     onNavHostReady: suspend (NavController) -> Unit = {},
+    onUpdateUrlHash: ((companyId: String, queryHash: String?) -> Unit)? = null,
 ) {
     AmberTheme {
         val navController = rememberNavController()
@@ -65,12 +71,15 @@ fun AppContent(
                 AppScaffold(
                     navController = navController,
                     sessionState = sessionState,
-                    modifier = modifier,
+                    modifier = modifier.fillMaxSize(),
                 ) {
                     AppNavHost(
                         navController = navController,
                         startDestination = startDestination,
                         sessionState = sessionState,
+                        modifier = Modifier.fillMaxSize(),
+                        urlHash = urlHash,
+                        onUpdateUrlHash = onUpdateUrlHash,
                     )
                 }
                 NoticeHost(modifier = Modifier.align(Alignment.TopCenter))

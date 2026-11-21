@@ -24,6 +24,7 @@ import studio.acmenra.control.feature.events.domain.model.EventsPage
 import studio.acmenra.control.feature.events.domain.model.EventsPaginationError
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
 import studio.acmenra.control.feature.events.domain.model.EventsSummary
+import studio.acmenra.control.feature.events.domain.model.OverlayEntry
 import studio.acmenra.control.feature.events.domain.model.OverlayMembership
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
@@ -905,8 +906,38 @@ class EventsSessionProcessor(
             for (commit in deduplicatedCommits) {
                 commit.eventCreated?.let { createdDto ->
                     val event = EventsDtoMapper.mapEvent(createdDto)
-                    if (RealtimeOverlayReducer.matchesFilter(event, query.filter)) {
+                    val existingInSnapshot = candidateSnapshotItems.firstOrNull { it.id == event.id }
+                    val existingEntry = currentOverlay.entries[event.id]
+                    val currentEvent = existingEntry?.event ?: existingInSnapshot
+                    val wasMatching =
+                        when {
+                            existingEntry != null -> existingEntry.membership != OverlayMembership.REMOVED
+                            currentEvent != null -> RealtimeOverlayReducer.matchesFilter(currentEvent, query.filter)
+                            else -> false
+                        }
+                    val isMatching = RealtimeOverlayReducer.matchesFilter(event, query.filter)
+                    if (!wasMatching && isMatching) {
                         currentTotalCount++
+                    } else if (wasMatching && !isMatching) {
+                        currentTotalCount = maxOf(0, currentTotalCount - 1)
+                    }
+                }
+                commit.eventUpdated?.let { updatedDto ->
+                    val event = EventsDtoMapper.mapEvent(updatedDto)
+                    val existingInSnapshot = candidateSnapshotItems.firstOrNull { it.id == event.id }
+                    val existingEntry = currentOverlay.entries[event.id]
+                    val currentEvent = existingEntry?.event ?: existingInSnapshot
+                    val wasMatching =
+                        when {
+                            existingEntry != null -> existingEntry.membership != OverlayMembership.REMOVED
+                            currentEvent != null -> RealtimeOverlayReducer.matchesFilter(currentEvent, query.filter)
+                            else -> false
+                        }
+                    val isMatching = RealtimeOverlayReducer.matchesFilter(event, query.filter)
+                    if (!wasMatching && isMatching) {
+                        currentTotalCount++
+                    } else if (wasMatching && !isMatching) {
+                        currentTotalCount = maxOf(0, currentTotalCount - 1)
                     }
                 }
             }
@@ -1016,23 +1047,47 @@ class EventsSessionProcessor(
                 mutatedEvent
             }
 
+        val wasMatching =
+            when {
+                existingEntry != null -> existingEntry.membership != OverlayMembership.REMOVED
+                currentEvent != null -> RealtimeOverlayReducer.matchesFilter(currentEvent, query.filter)
+                else -> false
+            }
+        val isMatching = RealtimeOverlayReducer.matchesFilter(finalEvent, query.filter)
+        if (!wasMatching && isMatching) {
+            currentTotalCount++
+        } else if (wasMatching && !isMatching) {
+            currentTotalCount = maxOf(0, currentTotalCount - 1)
+        }
+
+        val membership =
+            when {
+                !isMatching -> OverlayMembership.REMOVED
+                existingEntry != null -> existingEntry.membership
+                else -> OverlayMembership.INCLUDED
+            }
+
         val idx = snapshotItems.indexOfFirst { it.id == finalEvent.id }
         if (idx != -1) {
             snapshotItems[idx] = finalEvent
         }
         val updatedEntries =
-            if (existingEntry != null) {
-                currentOverlay.entries +
-                    (
-                        finalEvent.id to
-                            existingEntry.copy(
+            currentOverlay.entries +
+                (
+                    finalEvent.id to
+                        (
+                            existingEntry?.copy(
                                 event = finalEvent,
                                 eventVersion = finalEvent.eventVersion,
+                                membership = membership,
+                            ) ?: OverlayEntry(
+                                eventId = finalEvent.id,
+                                event = finalEvent,
+                                eventVersion = finalEvent.eventVersion,
+                                membership = membership,
                             )
-                    )
-            } else {
-                currentOverlay.entries
-            }
+                        )
+                )
 
         currentOverlay = currentOverlay.copy(entries = updatedEntries)
         val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
@@ -1041,6 +1096,7 @@ class EventsSessionProcessor(
             it.copy(
                 visibleEvents = visible,
                 realtimeOverlay = currentOverlay,
+                snapshotTotalCount = currentTotalCount,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
             )
@@ -1069,23 +1125,47 @@ class EventsSessionProcessor(
                 ackEvent
             }
 
+        val wasMatching =
+            when {
+                existingEntry != null -> existingEntry.membership != OverlayMembership.REMOVED
+                currentEvent != null -> RealtimeOverlayReducer.matchesFilter(currentEvent, query.filter)
+                else -> false
+            }
+        val isMatching = RealtimeOverlayReducer.matchesFilter(finalEvent, query.filter)
+        if (!wasMatching && isMatching) {
+            currentTotalCount++
+        } else if (wasMatching && !isMatching) {
+            currentTotalCount = maxOf(0, currentTotalCount - 1)
+        }
+
+        val membership =
+            when {
+                !isMatching -> OverlayMembership.REMOVED
+                existingEntry != null -> existingEntry.membership
+                else -> OverlayMembership.INCLUDED
+            }
+
         val idx = snapshotItems.indexOfFirst { it.id == finalEvent.id }
         if (idx != -1) {
             snapshotItems[idx] = finalEvent
         }
         val updatedEntries =
-            if (existingEntry != null) {
-                currentOverlay.entries +
-                    (
-                        finalEvent.id to
-                            existingEntry.copy(
+            currentOverlay.entries +
+                (
+                    finalEvent.id to
+                        (
+                            existingEntry?.copy(
                                 event = finalEvent,
                                 eventVersion = finalEvent.eventVersion,
+                                membership = membership,
+                            ) ?: OverlayEntry(
+                                eventId = finalEvent.id,
+                                event = finalEvent,
+                                eventVersion = finalEvent.eventVersion,
+                                membership = membership,
                             )
-                    )
-            } else {
-                currentOverlay.entries
-            }
+                        )
+                )
 
         currentOverlay =
             currentOverlay.copy(
@@ -1098,6 +1178,7 @@ class EventsSessionProcessor(
             it.copy(
                 visibleEvents = visible,
                 realtimeOverlay = currentOverlay,
+                snapshotTotalCount = currentTotalCount,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
             )
@@ -1301,6 +1382,16 @@ class EventsSessionProcessor(
 
         if (createdDto != null) {
             val event = EventsDtoMapper.mapEvent(createdDto)
+            val existingEntry = tentativeOverlay.entries[event.id]
+            val existingInSnapshot = snapshotItems.firstOrNull { it.id == event.id }
+            val currentEvent = existingEntry?.event ?: existingInSnapshot
+            val wasMatching =
+                when {
+                    existingEntry != null -> existingEntry.membership != OverlayMembership.REMOVED
+                    currentEvent != null -> RealtimeOverlayReducer.matchesFilter(currentEvent, query.filter)
+                    else -> false
+                }
+
             val (newOverlay, membership) =
                 RealtimeOverlayReducer.applyEventCommit(
                     currentOverlay = tentativeOverlay,
@@ -1311,14 +1402,30 @@ class EventsSessionProcessor(
                     hasMore = currentHasMore,
                 )
             tentativeOverlay = newOverlay
-            if (membership != OverlayMembership.REMOVED && RealtimeOverlayReducer.matchesFilter(event, query.filter)) {
-                currentTotalCount++
+            if (!tentativeOverlay.requiresRefresh) {
+                val isMatching =
+                    membership != OverlayMembership.REMOVED && RealtimeOverlayReducer.matchesFilter(event, query.filter)
+                if (!wasMatching && isMatching) {
+                    currentTotalCount++
+                } else if (wasMatching && !isMatching) {
+                    currentTotalCount = maxOf(0, currentTotalCount - 1)
+                }
             }
         }
 
         if (updatedDto != null) {
             val event = EventsDtoMapper.mapEvent(updatedDto)
-            val (newOverlay, _) =
+            val existingEntry = tentativeOverlay.entries[event.id]
+            val existingInSnapshot = snapshotItems.firstOrNull { it.id == event.id }
+            val currentEvent = existingEntry?.event ?: existingInSnapshot
+            val wasMatching =
+                when {
+                    existingEntry != null -> existingEntry.membership != OverlayMembership.REMOVED
+                    currentEvent != null -> RealtimeOverlayReducer.matchesFilter(currentEvent, query.filter)
+                    else -> false
+                }
+
+            val (newOverlay, membership) =
                 RealtimeOverlayReducer.applyEventCommit(
                     currentOverlay = tentativeOverlay,
                     event = event,
@@ -1328,6 +1435,15 @@ class EventsSessionProcessor(
                     hasMore = currentHasMore,
                 )
             tentativeOverlay = newOverlay
+            if (!tentativeOverlay.requiresRefresh) {
+                val isMatching =
+                    membership != OverlayMembership.REMOVED && RealtimeOverlayReducer.matchesFilter(event, query.filter)
+                if (!wasMatching && isMatching) {
+                    currentTotalCount++
+                } else if (wasMatching && !isMatching) {
+                    currentTotalCount = maxOf(0, currentTotalCount - 1)
+                }
+            }
         }
 
         if (tentativeOverlay.requiresRefresh) {

@@ -232,27 +232,39 @@ class EventsDomainTest {
         val tz = TimeZone.of("UTC+3")
         val singleDay = DateSelection.Single(LocalDate(2026, 5, 10))
         val (from, to) = DateFilterUtils.dateSelectionToUtcBounds(singleDay, tz)
-        val query = EventsQuery(filter = EventsFilter(dateFrom = from, dateTo = to, dateSelection = singleDay))
+        val query = EventsQuery(filter = EventsFilter(dateFrom = from, dateTo = to))
         val encoded = EventsQueryRouteCodec.encodeHash("c1", query)
 
         val (_, decoded) = EventsQueryRouteCodec.decodeHash(encoded, tz)
         assertEquals(from, decoded.filter.dateFrom)
         assertEquals(to, decoded.filter.dateTo)
-        assertTrue(decoded.filter.dateSelection is DateSelection.Single)
-        assertEquals(LocalDate(2026, 5, 10), (decoded.filter.dateSelection as DateSelection.Single).date)
+        val decodedSelection =
+            DateFilterUtils.utcBoundsToDateSelection(
+                decoded.filter.dateFrom,
+                decoded.filter.dateTo,
+                tz,
+            )
+        assertTrue(decodedSelection is DateSelection.Single)
+        assertEquals(LocalDate(2026, 5, 10), (decodedSelection as DateSelection.Single).date)
 
         val range = DateSelection.Range(LocalDate(2026, 5, 10), LocalDate(2026, 5, 15))
         val (rangeFrom, rangeTo) = DateFilterUtils.dateSelectionToUtcBounds(range, tz)
         val rangeQuery =
-            EventsQuery(filter = EventsFilter(dateFrom = rangeFrom, dateTo = rangeTo, dateSelection = range))
+            EventsQuery(filter = EventsFilter(dateFrom = rangeFrom, dateTo = rangeTo))
         val rangeEncoded = EventsQueryRouteCodec.encodeHash("c1", rangeQuery)
 
         val (_, decodedRange) = EventsQueryRouteCodec.decodeHash(rangeEncoded, tz)
         assertEquals(rangeFrom, decodedRange.filter.dateFrom)
         assertEquals(rangeTo, decodedRange.filter.dateTo)
-        assertTrue(decodedRange.filter.dateSelection is DateSelection.Range)
-        assertEquals(LocalDate(2026, 5, 10), (decodedRange.filter.dateSelection as DateSelection.Range).startDate)
-        assertEquals(LocalDate(2026, 5, 15), (decodedRange.filter.dateSelection as DateSelection.Range).endDate)
+        val decodedRangeSelection =
+            DateFilterUtils.utcBoundsToDateSelection(
+                decodedRange.filter.dateFrom,
+                decodedRange.filter.dateTo,
+                tz,
+            )
+        assertTrue(decodedRangeSelection is DateSelection.Range)
+        assertEquals(LocalDate(2026, 5, 10), (decodedRangeSelection as DateSelection.Range).startDate)
+        assertEquals(LocalDate(2026, 5, 15), (decodedRangeSelection as DateSelection.Range).endDate)
     }
 
     @Test

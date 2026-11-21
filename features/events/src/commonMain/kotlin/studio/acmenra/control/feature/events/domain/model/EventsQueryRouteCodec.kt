@@ -134,17 +134,14 @@ object EventsQueryRouteCodec {
             }
         }
 
-        val dateSelection =
-            if (businessTimezone != null && (dateFrom != null || dateTo != null)) {
-                DateFilterUtils.utcBoundsToDateSelection(dateFrom, dateTo, businessTimezone)
-            } else {
-                DateSelection.All
-            }
+        if (dateFrom != null && dateTo != null && dateFrom >= dateTo) {
+            dateFrom = null
+            dateTo = null
+        }
 
         val filter =
             EventsFilter(
                 searchId = searchId,
-                dateSelection = dateSelection,
                 dateFrom = dateFrom,
                 dateTo = dateTo,
                 eventTypeIds = eventTypeIds,

@@ -21,7 +21,32 @@ data class EventsFilterOptions(
     val revision: String = "",
     val eventTypes: List<EventTypeOption> = emptyList(),
     val locations: List<LocationFilterGroup> = emptyList(),
-)
+) {
+    fun sanitize(filter: EventsFilter): EventsFilter {
+        val validEventTypeIds = eventTypes.map { it.id }.toSet()
+        val validDeviceIds = locations.flatMap { it.devices.map { d -> d.id } }.toSet()
+        val sanitizedEventTypes =
+            if (eventTypes.isEmpty()) {
+                filter.eventTypeIds
+            } else {
+                filter.eventTypeIds.filter { it in validEventTypeIds }.toSet()
+            }
+        val sanitizedDevices =
+            if (locations.isEmpty()) {
+                filter.deviceIds
+            } else {
+                filter.deviceIds.filter { it in validDeviceIds }.toSet()
+            }
+        return if (sanitizedEventTypes != filter.eventTypeIds || sanitizedDevices != filter.deviceIds) {
+            filter.copy(
+                eventTypeIds = sanitizedEventTypes,
+                deviceIds = sanitizedDevices,
+            )
+        } else {
+            filter
+        }
+    }
+}
 
 enum class LocationToggleState {
     OFF,

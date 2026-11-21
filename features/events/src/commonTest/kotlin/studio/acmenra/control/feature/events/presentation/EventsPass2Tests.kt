@@ -15,7 +15,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import studio.acmenra.control.core.ui.generated.resources.Res
-import studio.acmenra.control.core.ui.generated.resources.events_export_download_success
+import studio.acmenra.control.core.ui.generated.resources.events_export_download_initiated
 import studio.acmenra.control.core.ui.generated.resources.events_export_expired_msg
 import studio.acmenra.control.core.ui.generated.resources.events_export_media_links_warning
 import studio.acmenra.control.core.ui.notice.Notice
@@ -54,6 +54,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Clock
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Instant
 
@@ -472,7 +473,7 @@ class EventsPass2Tests {
             assertEquals(1, saver.savedDownloads.size)
             assertEquals("events_exp-auto.csv", saver.savedDownloads[0].fileName)
             assertEquals(
-                NoticeText.Resource(Res.string.events_export_download_success),
+                NoticeText.Resource(Res.string.events_export_download_initiated),
                 vm.state.value.errorNotice
                     ?.title,
             )
@@ -487,6 +488,8 @@ class EventsPass2Tests {
                     exportId = "exp-fail-auto",
                     status = EventsExportStatusCode.COMPLETED,
                     createdAt = Instant.parse("2026-03-01T12:00:00Z"),
+                    expiresAt = Clock.System.now() + 1.hours,
+                    downloadUrl = "https://example.com/exp-fail-auto.csv",
                 )
             val createExport = FakeCreateEventsExportUseCase(statusToReturn = completedStatus)
             val downloadExport = FakeDownloadEventsExportUseCase().apply { shouldFail = true }
@@ -521,7 +524,7 @@ class EventsPass2Tests {
             assertEquals(2, downloadExport.callCount)
             assertEquals(1, saver.savedDownloads.size)
             assertEquals(
-                NoticeText.Resource(Res.string.events_export_download_success),
+                NoticeText.Resource(Res.string.events_export_download_initiated),
                 vm.state.value.errorNotice
                     ?.title,
             )

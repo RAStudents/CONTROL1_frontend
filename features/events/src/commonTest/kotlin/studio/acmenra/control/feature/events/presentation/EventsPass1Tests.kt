@@ -9,6 +9,7 @@ import studio.acmenra.control.feature.events.domain.model.DateFilterUtils
 import studio.acmenra.control.feature.events.domain.model.DateSelection
 import studio.acmenra.control.feature.events.domain.model.EventValidityFilter
 import studio.acmenra.control.feature.events.domain.model.EventsFilter
+import studio.acmenra.control.feature.events.presentation.util.EventDateDisplayFormatter
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -95,42 +96,42 @@ class EventsPass1Tests {
         // Europe/Moscow -> MSK
         assertEquals(
             "MSK",
-            DateFilterUtils.formatMskOffset(instant, TimeZone.of("Europe/Moscow"), "MSK"),
+            EventDateDisplayFormatter.formatMskOffset(instant, TimeZone.of("Europe/Moscow"), "MSK"),
         )
 
         // Asia/Yekaterinburg (UTC+5, MSK is UTC+3) -> MSK+2
         assertEquals(
             "MSK+2",
-            DateFilterUtils.formatMskOffset(instant, TimeZone.of("Asia/Yekaterinburg"), "MSK"),
+            EventDateDisplayFormatter.formatMskOffset(instant, TimeZone.of("Asia/Yekaterinburg"), "MSK"),
         )
 
         // Europe/Kaliningrad (UTC+2, MSK is UTC+3) -> MSK-1
         assertEquals(
             "MSK-1",
-            DateFilterUtils.formatMskOffset(instant, TimeZone.of("Europe/Kaliningrad"), "MSK"),
+            EventDateDisplayFormatter.formatMskOffset(instant, TimeZone.of("Europe/Kaliningrad"), "MSK"),
         )
 
         // Asia/Kolkata (UTC+5:30, MSK is UTC+3) -> MSK+2:30
         assertEquals(
             "MSK+2:30",
-            DateFilterUtils.formatMskOffset(instant, TimeZone.of("Asia/Kolkata"), "MSK"),
+            EventDateDisplayFormatter.formatMskOffset(instant, TimeZone.of("Asia/Kolkata"), "MSK"),
         )
 
         // Custom localized prefix "МСК"
         assertEquals(
             "МСК+2",
-            DateFilterUtils.formatMskOffset(instant, TimeZone.of("Asia/Yekaterinburg"), "МСК"),
+            EventDateDisplayFormatter.formatMskOffset(instant, TimeZone.of("Asia/Yekaterinburg"), "МСК"),
         )
     }
 
     @Test
-    fun testDateFilterUtils_FormatLocalDateAndFilterDisplay() {
+    fun testEventDateDisplayFormatter_FormatLocalDateAndFilterDisplay() {
         val date = LocalDate(2026, 3, 5)
-        assertEquals("05.03.2026", DateFilterUtils.formatLocalDate(date))
+        assertEquals("05.03.2026", EventDateDisplayFormatter.formatLocalDate(date))
 
         val tz = TimeZone.of("UTC+3")
         val (singleFrom, singleTo) = DateFilterUtils.dateSelectionToUtcBounds(DateSelection.Single(date), tz)
-        assertEquals("05.03.2026", DateFilterUtils.formatFilterDisplayDate(singleFrom, singleTo, tz))
+        assertEquals("05.03.2026", EventDateDisplayFormatter.formatFilterDisplayDate(singleFrom, singleTo, tz))
 
         val rangeStart = LocalDate(2026, 3, 1)
         val rangeEnd = LocalDate(2026, 3, 7)
@@ -138,10 +139,10 @@ class EventsPass1Tests {
             DateFilterUtils.dateSelectionToUtcBounds(DateSelection.Range(rangeStart, rangeEnd), tz)
         assertEquals(
             "01.03.2026 – 07.03.2026",
-            DateFilterUtils.formatFilterDisplayDate(rangeFrom, rangeTo, tz),
+            EventDateDisplayFormatter.formatFilterDisplayDate(rangeFrom, rangeTo, tz),
         )
 
-        assertNull(DateFilterUtils.formatFilterDisplayDate(null, null, tz))
+        assertNull(EventDateDisplayFormatter.formatFilterDisplayDate(null, null, tz))
     }
 
     @Test

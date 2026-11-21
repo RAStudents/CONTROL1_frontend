@@ -16,16 +16,20 @@ import kotlinx.datetime.TimeZone
 import org.jetbrains.compose.resources.StringResource
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.events_export_download_error
+import studio.acmenra.control.core.ui.generated.resources.events_export_download_success
 import studio.acmenra.control.core.ui.generated.resources.events_export_error_access_revoked
 import studio.acmenra.control.core.ui.generated.resources.events_export_error_generic
 import studio.acmenra.control.core.ui.generated.resources.events_export_error_limit_exceeded
 import studio.acmenra.control.core.ui.generated.resources.events_export_expired_msg
+import studio.acmenra.control.core.ui.generated.resources.events_export_media_links_warning
 import studio.acmenra.control.core.ui.generated.resources.events_export_polling_timeout
+import studio.acmenra.control.core.ui.generated.resources.events_export_status_failed
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_conflict
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_generic_error
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_network_error
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_payload_mismatch
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_permission_denied
+import studio.acmenra.control.core.ui.notice.Notice
 import studio.acmenra.control.feature.events.domain.model.DateFilterUtils
 import studio.acmenra.control.feature.events.domain.model.DateSelection
 import studio.acmenra.control.feature.events.domain.model.Event
@@ -53,6 +57,7 @@ import studio.acmenra.control.feature.events.domain.usecase.MarkEventErroneousUs
 import studio.acmenra.control.feature.events.domain.usecase.ObserveEventsExportStatusUseCase
 import studio.acmenra.control.feature.events.domain.usecase.ObserveEventsFeedUseCase
 import studio.acmenra.control.feature.events.presentation.platform.ExportFileSaver
+import kotlin.time.Clock
 
 class EventsViewModel(
     private val observeEventsFeedUseCase: ObserveEventsFeedUseCase,
@@ -80,6 +85,8 @@ class EventsViewModel(
     private var filterOptionsJob: Job? = null
     private var activeExportKey: String? = null
     private var activeExportRequest: EventsExportRequest? = null
+    private var lastExportStartTime: Long = 0L
+    private var autoDownloadAttemptedExportId: String? = null
     private var companyGeneration: Long = 0L
     private var filterRequestGeneration: Long = 0L
     private var filterOptionsGeneration: Long = 0L
@@ -101,7 +108,7 @@ class EventsViewModel(
         companyId: String,
         queryHash: String?,
     ) {
-        val decodedFilter =
+        val baseFilter =
             if (!queryHash.isNullOrBlank()) {
                 val (decodedCompanyId, decodedQuery) = EventsQueryRouteCodec.decodeHash(queryHash)
                 if (!decodedCompanyId.isNullOrBlank() && decodedCompanyId != companyId) {
@@ -112,9 +119,13 @@ class EventsViewModel(
             } else {
                 EventsFilter()
             }
+        val decodedFilter = _state.value.filterOptions?.sanitize(baseFilter) ?: baseFilter
         if (decodedFilter != _state.value.filter) {
             _state.update { it.copy(filter = decodedFilter) }
             restartFeedSession()
+            if (decodedFilter != baseFilter) {
+                syncFilterToUrl(decodedFilter)
+            }
         }
     }
 
@@ -151,6 +162,7 @@ class EventsViewModel(
                     downloadExportJob?.cancel()
                     activeExportKey = null
                     activeExportRequest = null
+                    autoDownloadAttemptedExportId = null
                 }
 
                 _state.update {
@@ -178,6 +190,7 @@ class EventsViewModel(
                             isExportModeActive = if (shouldClearExport) false else it.isExportModeActive,
                             exportJobStatus = if (shouldClearExport) null else it.exportJobStatus,
                             isExportSubmitting = if (shouldClearExport) false else it.isExportSubmitting,
+                            isExportDownloading = if (shouldClearExport) false else it.isExportDownloading,
                         )
                     } else {
                         it.copy(
@@ -193,6 +206,7 @@ class EventsViewModel(
                             isExportModeActive = if (shouldClearExport) false else it.isExportModeActive,
                             exportJobStatus = if (shouldClearExport) null else it.exportJobStatus,
                             isExportSubmitting = if (shouldClearExport) false else it.isExportSubmitting,
+                            isExportDownloading = if (shouldClearExport) false else it.isExportDownloading,
                         )
                     }
                 }
@@ -219,6 +233,7 @@ class EventsViewModel(
         filterOptionsJob?.cancel()
         activeExportKey = null
         activeExportRequest = null
+        autoDownloadAttemptedExportId = null
         feedSession?.close()
         feedSession = null
 
@@ -276,11 +291,18 @@ class EventsViewModel(
                         gen == filterOptionsGeneration &&
                         _state.value.companyId == companyId
                     ) {
+                        val sanitizedFilter = options.sanitize(_state.value.filter)
+                        val filterChanged = sanitizedFilter != _state.value.filter
                         _state.update {
                             it.copy(
+                                filter = sanitizedFilter,
                                 filterOptions = options,
                                 isFilterOptionsLoading = false,
                             )
+                        }
+                        if (filterChanged) {
+                            restartFeedSession()
+                            syncFilterToUrl(sanitizedFilter)
                         }
                     }
                 } catch (e: CancellationException) {
@@ -318,24 +340,7 @@ class EventsViewModel(
                             DateFilterUtils.resolveBusinessTimeZone(it)
                         }
                     _state.update { current ->
-                        val restoredFilter =
-                            if (canRead &&
-                                tz != null &&
-                                current.filter.dateSelection is DateSelection.All &&
-                                (current.filter.dateFrom != null || current.filter.dateTo != null)
-                            ) {
-                                val restored =
-                                    DateFilterUtils.utcBoundsToDateSelection(
-                                        current.filter.dateFrom,
-                                        current.filter.dateTo,
-                                        tz,
-                                    )
-                                current.filter.copy(dateSelection = restored)
-                            } else {
-                                current.filter
-                            }
                         current.copy(
-                            filter = restoredFilter,
                             visibleEvents = if (canRead) feedState.visibleEvents else emptyList(),
                             realtimeOverlay = if (canRead) feedState.realtimeOverlay else RealtimeOverlay(),
                             asOfSequence = if (canRead) feedState.asOfSequence else 0L,
@@ -390,6 +395,52 @@ class EventsViewModel(
             }
     }
 
+    fun onSearchIdCommitted(newSearchId: String) {
+        searchDebounceJob?.cancel()
+        val trimmed = newSearchId.trim().ifBlank { null }
+        val newFilter = _state.value.filter.copy(searchId = trimmed)
+        _state.update { it.copy(filter = newFilter) }
+        restartFeedSession()
+        syncFilterToUrl(newFilter)
+    }
+
+    fun onResetDate() {
+        val newFilter =
+            _state.value.filter.copy(
+                dateFrom = null,
+                dateTo = null,
+            )
+        _state.update { it.copy(filter = newFilter, isDatePickerOpen = false) }
+        restartFeedSession()
+        syncFilterToUrl(newFilter)
+    }
+
+    fun onEventTypesApplied(typeIds: Set<String>) {
+        val sanitized =
+            _state.value.filterOptions
+                ?.sanitize(
+                    _state.value.filter.copy(eventTypeIds = typeIds),
+                )?.eventTypeIds ?: typeIds
+        if (_state.value.filter.eventTypeIds == sanitized) return
+        val newFilter = _state.value.filter.copy(eventTypeIds = sanitized)
+        _state.update { it.copy(filter = newFilter) }
+        restartFeedSession()
+        syncFilterToUrl(newFilter)
+    }
+
+    fun onDevicesApplied(deviceIds: Set<String>) {
+        val sanitized =
+            _state.value.filterOptions
+                ?.sanitize(
+                    _state.value.filter.copy(deviceIds = deviceIds),
+                )?.deviceIds ?: deviceIds
+        if (_state.value.filter.deviceIds == sanitized) return
+        val newFilter = _state.value.filter.copy(deviceIds = sanitized)
+        _state.update { it.copy(filter = newFilter) }
+        restartFeedSession()
+        syncFilterToUrl(newFilter)
+    }
+
     fun onDateSelectionChanged(
         dateSelection: DateSelection,
         businessTimeZone: TimeZone? = null,
@@ -405,7 +456,6 @@ class EventsViewModel(
         val (from, to) = DateFilterUtils.dateSelectionToUtcBounds(dateSelection, tz)
         val newFilter =
             _state.value.filter.copy(
-                dateSelection = dateSelection,
                 dateFrom = from,
                 dateTo = to,
             )
@@ -457,6 +507,7 @@ class EventsViewModel(
     }
 
     fun resetFilters() {
+        searchDebounceJob?.cancel()
         val newFilter = EventsFilter()
         _state.update { it.copy(filter = newFilter) }
         restartFeedSession()
@@ -675,7 +726,6 @@ class EventsViewModel(
     }
 
     fun toggleExportMode() {
-        if (!_state.value.access.canExport) return
         _state.update { it.copy(isExportModeActive = !it.isExportModeActive) }
     }
 
@@ -684,17 +734,48 @@ class EventsViewModel(
     }
 
     fun setExportIncludeMediaLinks(include: Boolean) {
+        val wasIncluded = _state.value.exportIncludeMediaLinks
         _state.update { it.copy(exportIncludeMediaLinks = include) }
+        if (include && !wasIncluded) {
+            _state.update {
+                it.copy(
+                    errorNotice =
+                        Notice.info(
+                            title = Res.string.events_export_media_links_warning,
+                            key = "media_links_warning",
+                        ),
+                )
+            }
+        }
     }
 
     @OptIn(kotlin.uuid.ExperimentalUuidApi::class)
     fun startExport() {
-        if (!_state.value.access.canExport) return
-        if (_state.value.isExportSubmitting) return
+        if (!_state.value.access.canExport) {
+            _state.update {
+                it.copy(
+                    errorNotice =
+                        Notice.error(
+                            title = Res.string.events_export_error_access_revoked,
+                            key = "export_access_denied",
+                        ),
+                )
+            }
+            return
+        }
+        val currentJob = _state.value.exportJobStatus?.status
+        if (_state.value.isExportSubmitting ||
+            currentJob == EventsExportStatusCode.QUEUED ||
+            currentJob == EventsExportStatusCode.PROCESSING
+        ) {
+            return
+        }
         val requestCompanyId = _state.value.companyId
         if (requestCompanyId.isBlank()) return
         val currentCompanyGen = companyGeneration
 
+        searchDebounceJob?.cancel()
+        autoDownloadAttemptedExportId = null
         _state.update { it.copy(isExportSubmitting = true, exportError = null) }
 
         val request =
@@ -735,15 +816,18 @@ class EventsViewModel(
                         status.status == EventsExportStatusCode.PROCESSING
                     ) {
                         observeExport(status.exportId, requestCompanyId, currentCompanyGen)
-                    } else if (status.status == EventsExportStatusCode.COMPLETED ||
-                        status.status == EventsExportStatusCode.FAILED ||
-                        status.status == EventsExportStatusCode.EXPIRED
-                    ) {
-                        // Truly terminal statuses
+                    } else if (status.status == EventsExportStatusCode.COMPLETED) {
                         activeExportKey = null
                         activeExportRequest = null
-                    } else {
-                        // UNKNOWN or unrecognized: retain activeExportKey and activeExportRequest so retry uses same key
+                        if (autoDownloadAttemptedExportId != status.exportId && _state.value.access.canExport) {
+                            autoDownloadAttemptedExportId = status.exportId
+                            triggerAutoDownload(status.exportId, requestCompanyId, currentCompanyGen)
+                        }
+                    } else if (status.status == EventsExportStatusCode.FAILED ||
+                        status.status == EventsExportStatusCode.EXPIRED
+                    ) {
+                        activeExportKey = null
+                        activeExportRequest = null
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -765,10 +849,16 @@ class EventsViewModel(
                     if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
                         return@launch
                     }
+                    val errRes = mapExportErrorToResource(e)
                     _state.update {
                         it.copy(
                             isExportSubmitting = false,
-                            exportError = mapExportErrorToResource(e),
+                            exportError = errRes,
+                            errorNotice =
+                                Notice.error(
+                                    title = errRes,
+                                    key = "export_submit_error",
+                                ),
                         )
                     }
                 }
@@ -809,15 +899,43 @@ class EventsViewModel(
                             return@launch
                         }
                         _state.update { it.copy(exportJobStatus = status) }
-                        if (status.status == EventsExportStatusCode.COMPLETED ||
-                            status.status == EventsExportStatusCode.FAILED ||
-                            status.status == EventsExportStatusCode.EXPIRED
-                        ) {
+                        if (status.status == EventsExportStatusCode.COMPLETED) {
                             activeExportKey = null
                             activeExportRequest = null
+                            if (autoDownloadAttemptedExportId != status.exportId && _state.value.access.canExport) {
+                                autoDownloadAttemptedExportId = status.exportId
+                                triggerAutoDownload(status.exportId, requestCompanyId, currentCompanyGen)
+                            }
+                            return@launch
+                        } else if (status.status == EventsExportStatusCode.FAILED) {
+                            activeExportKey = null
+                            activeExportRequest = null
+                            _state.update {
+                                it.copy(
+                                    exportError = Res.string.events_export_status_failed,
+                                    errorNotice =
+                                        Notice.error(
+                                            title = Res.string.events_export_status_failed,
+                                            key = "export_failed_${status.exportId}",
+                                        ),
+                                )
+                            }
+                            return@launch
+                        } else if (status.status == EventsExportStatusCode.EXPIRED) {
+                            activeExportKey = null
+                            activeExportRequest = null
+                            _state.update {
+                                it.copy(
+                                    exportError = Res.string.events_export_expired_msg,
+                                    errorNotice =
+                                        Notice.error(
+                                            title = Res.string.events_export_expired_msg,
+                                            key = "export_expired_${status.exportId}",
+                                        ),
+                                )
+                            }
                             return@launch
                         } else if (status.status == EventsExportStatusCode.UNKNOWN) {
-                            // Non-terminal unknown status: retain activeExportKey and finish polling
                             return@launch
                         }
                     } catch (e: CancellationException) {
@@ -828,8 +946,16 @@ class EventsViewModel(
                         if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
                             _state.update {
                                 it.copy(
-                                    exportJobStatus = it.exportJobStatus?.copy(status = EventsExportStatusCode.EXPIRED),
+                                    exportJobStatus =
+                                        it.exportJobStatus?.copy(
+                                            status = EventsExportStatusCode.EXPIRED,
+                                        ),
                                     exportError = Res.string.events_export_expired_msg,
+                                    errorNotice =
+                                        Notice.error(
+                                            title = Res.string.events_export_expired_msg,
+                                            key = "export_expired_$exportId",
+                                        ),
                                 )
                             }
                         }
@@ -843,20 +969,29 @@ class EventsViewModel(
                                     isExportModeActive = false,
                                     exportJobStatus = null,
                                     exportError = Res.string.events_export_error_access_revoked,
+                                    errorNotice =
+                                        Notice.error(
+                                            title = Res.string.events_export_error_access_revoked,
+                                            key = "export_revoked_$exportId",
+                                        ),
                                 )
                             }
                         }
                         return@launch
                     } catch (_: Throwable) {
-                        // Transient network or server error during polling: keep activeExportKey and activeExportRequest
+                        // Transient network or server error during polling
                     }
                 }
                 if (isActive && attempt >= maxAttempts) {
-                    // Timeout reached: retain activeExportKey and activeExportRequest so user can continue or retry
                     if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
                         _state.update {
                             it.copy(
                                 exportError = Res.string.events_export_polling_timeout,
+                                errorNotice =
+                                    Notice.error(
+                                        title = Res.string.events_export_polling_timeout,
+                                        key = "export_timeout_$exportId",
+                                    ),
                             )
                         }
                     }
@@ -864,30 +999,171 @@ class EventsViewModel(
             }
     }
 
+    private fun triggerAutoDownload(
+        exportId: String,
+        requestCompanyId: String,
+        currentCompanyGen: Long,
+    ) {
+        if (!_state.value.access.canExport) return
+        downloadExportJob?.cancel()
+        downloadExportJob =
+            viewModelScope.launch {
+                _state.update { it.copy(isExportDownloading = true) }
+                try {
+                    val download = downloadEventsExportUseCase(requestCompanyId, exportId)
+                    if (currentCompanyGen != companyGeneration ||
+                        _state.value.companyId != requestCompanyId ||
+                        !_state.value.access.canExport
+                    ) {
+                        return@launch
+                    }
+                    val saved = exportFileSaver.saveExportFile(download)
+                    if (currentCompanyGen != companyGeneration ||
+                        _state.value.companyId != requestCompanyId ||
+                        !_state.value.access.canExport
+                    ) {
+                        return@launch
+                    }
+                    if (saved) {
+                        _state.update {
+                            it.copy(
+                                errorNotice =
+                                    Notice.success(
+                                        title = Res.string.events_export_download_success,
+                                        key = "export_download_$exportId",
+                                    ),
+                            )
+                        }
+                    } else {
+                        _state.update {
+                            it.copy(
+                                exportError = Res.string.events_export_download_error,
+                                errorNotice =
+                                    Notice.error(
+                                        title = Res.string.events_export_download_error,
+                                        key = "export_download_error_$exportId",
+                                    ),
+                            )
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    if (currentCompanyGen == companyGeneration &&
+                        _state.value.companyId == requestCompanyId &&
+                        _state.value.access.canExport
+                    ) {
+                        val errRes = mapExportErrorToResource(e)
+                        _state.update {
+                            it.copy(
+                                exportError = errRes,
+                                errorNotice =
+                                    Notice.error(
+                                        title = errRes,
+                                        key = "export_error_$exportId",
+                                    ),
+                            )
+                        }
+                    }
+                } finally {
+                    if (currentCompanyGen == companyGeneration) {
+                        _state.update { it.copy(isExportDownloading = false) }
+                    }
+                }
+            }
+    }
+
     fun downloadExport(exportId: String) {
         if (!_state.value.access.canExport) return
+        if (_state.value.isExportDownloading) return
+        val jobStatus = _state.value.exportJobStatus
+        val expiresAt = jobStatus?.expiresAt
+        val now = Clock.System.now()
+        if (jobStatus?.status == EventsExportStatusCode.EXPIRED ||
+            (expiresAt != null && now >= expiresAt)
+        ) {
+            _state.update {
+                it.copy(
+                    exportJobStatus =
+                        jobStatus?.copy(
+                            status = EventsExportStatusCode.EXPIRED,
+                        ),
+                    exportError = Res.string.events_export_expired_msg,
+                    errorNotice =
+                        Notice.error(
+                            title = Res.string.events_export_expired_msg,
+                            key = "export_expired_$exportId",
+                        ),
+                )
+            }
+            return
+        }
+
         val requestCompanyId = _state.value.companyId
         val currentCompanyGen = companyGeneration
         downloadExportJob?.cancel()
         downloadExportJob =
             viewModelScope.launch {
+                _state.update { it.copy(isExportDownloading = true) }
                 try {
                     val download = downloadEventsExportUseCase(requestCompanyId, exportId)
-                    if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
+                    if (currentCompanyGen != companyGeneration ||
+                        _state.value.companyId != requestCompanyId ||
+                        !_state.value.access.canExport
+                    ) {
                         return@launch
                     }
                     val saved = exportFileSaver.saveExportFile(download)
-                    if (currentCompanyGen != companyGeneration || _state.value.companyId != requestCompanyId) {
+                    if (currentCompanyGen != companyGeneration ||
+                        _state.value.companyId != requestCompanyId ||
+                        !_state.value.access.canExport
+                    ) {
                         return@launch
                     }
-                    if (!saved) {
-                        _state.update { it.copy(exportError = Res.string.events_export_download_error) }
+                    if (saved) {
+                        _state.update {
+                            it.copy(
+                                errorNotice =
+                                    Notice.success(
+                                        title = Res.string.events_export_download_success,
+                                        key = "export_download_$exportId",
+                                    ),
+                            )
+                        }
+                    } else {
+                        _state.update {
+                            it.copy(
+                                exportError = Res.string.events_export_download_error,
+                                errorNotice =
+                                    Notice.error(
+                                        title = Res.string.events_export_download_error,
+                                        key = "export_download_error_$exportId",
+                                    ),
+                            )
+                        }
                     }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
-                    if (currentCompanyGen == companyGeneration && _state.value.companyId == requestCompanyId) {
-                        _state.update { it.copy(exportError = mapExportErrorToResource(e)) }
+                    if (currentCompanyGen == companyGeneration &&
+                        _state.value.companyId == requestCompanyId &&
+                        _state.value.access.canExport
+                    ) {
+                        val errRes = mapExportErrorToResource(e)
+                        _state.update {
+                            it.copy(
+                                exportError = errRes,
+                                errorNotice =
+                                    Notice.error(
+                                        title = errRes,
+                                        key = "export_error_$exportId",
+                                    ),
+                            )
+                        }
+                    }
+                } finally {
+                    if (currentCompanyGen == companyGeneration) {
+                        _state.update { it.copy(isExportDownloading = false) }
                     }
                 }
             }
@@ -957,6 +1233,7 @@ class EventsViewModel(
         filterOptionsJob?.cancel()
         activeExportKey = null
         activeExportRequest = null
+        autoDownloadAttemptedExportId = null
         activeMarkErroneousIdentity = null
         activeMarkErroneousKey = null
         super.onCleared()

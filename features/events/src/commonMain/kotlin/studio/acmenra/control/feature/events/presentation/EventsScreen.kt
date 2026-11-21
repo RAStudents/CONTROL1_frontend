@@ -1,5 +1,13 @@
 package studio.acmenra.control.feature.events.presentation
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -8,22 +16,41 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
@@ -32,16 +59,25 @@ import studio.acmenra.control.core.ui.components.ProvideTopBar
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.events_export_csv
 import studio.acmenra.control.core.ui.generated.resources.events_filter_tune
+import studio.acmenra.control.core.ui.generated.resources.events_filters_title
 import studio.acmenra.control.core.ui.generated.resources.events_show_statistics
+import studio.acmenra.control.core.ui.generated.resources.events_validity_all
+import studio.acmenra.control.core.ui.generated.resources.events_validity_erroneous_only
+import studio.acmenra.control.core.ui.generated.resources.events_validity_valid_only
 import studio.acmenra.control.core.ui.generated.resources.events_viewer_id_copied
+import studio.acmenra.control.core.ui.generated.resources.events_viewer_placeholder
 import studio.acmenra.control.core.ui.generated.resources.ic_bar_chart
 import studio.acmenra.control.core.ui.generated.resources.ic_download
+import studio.acmenra.control.core.ui.generated.resources.ic_expand_less
+import studio.acmenra.control.core.ui.generated.resources.ic_expand_more
 import studio.acmenra.control.core.ui.generated.resources.ic_tune
+import studio.acmenra.control.core.ui.generated.resources.ic_videocam
 import studio.acmenra.control.core.ui.generated.resources.nav_item_events
 import studio.acmenra.control.core.ui.notice.Notice
 import studio.acmenra.control.core.ui.notice.NoticeController
-import studio.acmenra.control.core.ui.theme.AmberBreakpoints
+import studio.acmenra.control.core.ui.theme.AmberCorners
 import studio.acmenra.control.core.ui.theme.AmberDimens
+import studio.acmenra.control.feature.events.domain.model.DateFilterUtils
 import studio.acmenra.control.feature.events.domain.model.DateSelection
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventValidity
@@ -51,10 +87,9 @@ import studio.acmenra.control.feature.events.domain.model.LocationFilterGroup
 import studio.acmenra.control.feature.events.presentation.components.EventViewer
 import studio.acmenra.control.feature.events.presentation.components.EventsDatePickerDialog
 import studio.acmenra.control.feature.events.presentation.components.EventsEmptyState
-import studio.acmenra.control.feature.events.presentation.components.EventsExportPanel
 import studio.acmenra.control.feature.events.presentation.components.EventsFilters
 import studio.acmenra.control.feature.events.presentation.components.EventsList
-import studio.acmenra.control.feature.events.presentation.components.EventsSummaryCard
+import studio.acmenra.control.feature.events.presentation.components.EventsSummaryExportSlot
 import studio.acmenra.control.feature.events.presentation.platform.ExternalMediaOpener
 
 @Composable
@@ -72,6 +107,9 @@ fun EventsRouteContent(
 
     LaunchedEffect(companyId, accessCapabilities, queryHash) {
         viewModel.initialize(companyId, accessCapabilities, queryHash)
+        if (!queryHash.isNullOrBlank() && onQueryHashChanged != null) {
+            onQueryHashChanged(queryHash)
+        }
     }
 
     val state by viewModel.state.collectAsState()
@@ -103,12 +141,16 @@ fun EventsRouteContent(
         state = state,
         onToggleExportMode = viewModel::toggleExportMode,
         onSearchIdChanged = viewModel::onSearchIdChanged,
+        onSearchIdCommitted = viewModel::onSearchIdCommitted,
         onOpenDatePicker = viewModel::openDatePicker,
+        onResetDate = viewModel::onResetDate,
         onDateSelectionChanged = viewModel::onDateSelectionChanged,
         onCloseDatePicker = viewModel::closeDatePicker,
         onEventTypeToggled = viewModel::onEventTypeToggled,
         onDeviceToggled = viewModel::onDeviceToggled,
         onLocationToggled = viewModel::onLocationToggled,
+        onEventTypesApplied = viewModel::onEventTypesApplied,
+        onDevicesApplied = viewModel::onDevicesApplied,
         onValidityChanged = viewModel::onValidityChanged,
         onResetFilters = viewModel::resetFilters,
         onLoadNextPage = viewModel::loadNextPage,
@@ -162,95 +204,270 @@ fun EventsScreen(
     onDownloadExport: (String) -> Unit,
     onOpenFilterDialog: () -> Unit,
     onCloseFilterDialog: () -> Unit,
-    onOpenVideo: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onSearchIdCommitted: ((String) -> Unit)? = null,
+    onResetDate: (() -> Unit)? = null,
+    onEventTypesApplied: ((Set<String>) -> Unit)? = null,
+    onDevicesApplied: ((Set<String>) -> Unit)? = null,
+    onOpenVideo: ((String) -> Unit)? = null,
 ) {
     val currentToggleExportMode by rememberUpdatedState(onToggleExportMode)
-    val currentOpenFilterDialog by rememberUpdatedState(onOpenFilterDialog)
+    val windowInfo = LocalWindowInfo.current
+    val density = LocalDensity.current
+    val windowWidth = with(density) { windowInfo.containerSize.width.toDp() }
+
+    val businessTimeZone =
+        remember(state.summary?.businessTimezone) {
+            state.summary?.businessTimezone?.let {
+                studio.acmenra.control.feature.events.domain.model.DateFilterUtils
+                    .resolveBusinessTimeZone(it)
+            } ?: studio.acmenra.control.feature.events.domain.model.DateFilterUtils
+                .resolveBusinessTimeZone("Europe/Moscow") ?: kotlinx.datetime.TimeZone.UTC
+        }
+
+    val topBarActions: @Composable RowScope.() -> Unit =
+        remember(state.isExportModeActive, state.access.canExport) {
+            {
+                if (state.access.canExport) {
+                    IconButton(onClick = { currentToggleExportMode() }) {
+                        Icon(
+                            painter =
+                                painterResource(
+                                    if (state.isExportModeActive) {
+                                        Res.drawable.ic_bar_chart
+                                    } else {
+                                        Res.drawable.ic_download
+                                    },
+                                ),
+                            contentDescription =
+                                stringResource(
+                                    if (state.isExportModeActive) {
+                                        Res.string.events_show_statistics
+                                    } else {
+                                        Res.string.events_export_csv
+                                    },
+                                ),
+                            modifier = Modifier.size(AmberDimens.ListIcon),
+                        )
+                    }
+                }
+            }
+        }
+
+    ProvideTopBar(
+        title = stringResource(Res.string.nav_item_events),
+        leadingAction = {
+            TuneValidityFilterAction(
+                validity = state.filter.validity,
+                onValidityChanged = onValidityChanged,
+            )
+        },
+        actions = topBarActions,
+    )
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
-        val isCompact = maxWidth < AmberBreakpoints.EventsCompact || maxWidth < AmberDimens.EventsMediumWorkspaceMin
-        val isWide = maxWidth >= AmberBreakpoints.EventsWide
+        val usableContentWidth = maxWidth - AmberDimens.ScreenMargin * 2
+        val layoutMode =
+            calculateEventsLayoutMode(
+                windowWidth = windowWidth,
+                usableContentWidth = usableContentWidth,
+            )
 
-        val businessTimeZone =
-            remember(state.summary?.businessTimezone) {
-                state.summary?.businessTimezone?.let {
-                    studio.acmenra.control.feature.events.domain.model.DateFilterUtils
-                        .resolveBusinessTimeZone(it)
-                }
+        when (layoutMode) {
+            EventsLayoutMode.Wide -> {
+                WideEventsLayout(
+                    state = state,
+                    businessTimeZone = businessTimeZone,
+                    onSearchIdChanged = onSearchIdChanged,
+                    onSearchIdCommitted = onSearchIdCommitted ?: onSearchIdChanged,
+                    onOpenDatePicker = onOpenDatePicker,
+                    onResetDate = onResetDate ?: {},
+                    onEventTypesApplied = onEventTypesApplied ?: {},
+                    onDevicesApplied = onDevicesApplied ?: {},
+                    onResetFilters = onResetFilters,
+                    onRefresh = onRefresh,
+                    onSelectEvent = onSelectEvent,
+                    onAcknowledgeEvent = onAcknowledgeEvent,
+                    onLoadNextPage = onLoadNextPage,
+                    onViewportAtTop = onViewportAtTop,
+                    onCopyEventId = onCopyEventId,
+                    onRequestMarkErroneous = onRequestMarkErroneous,
+                    onConfirmMarkErroneous = onConfirmMarkErroneous,
+                    onCancelMarkErroneous = onCancelMarkErroneous,
+                    onFormatPresetChanged = onFormatPresetChanged,
+                    onIncludeMediaLinksChanged = onIncludeMediaLinksChanged,
+                    onStartExport = onStartExport,
+                    onDownloadExport = onDownloadExport,
+                    onOpenVideo = onOpenVideo,
+                )
             }
+            EventsLayoutMode.Medium -> {
+                MediumEventsLayout(
+                    state = state,
+                    businessTimeZone = businessTimeZone,
+                    onSearchIdChanged = onSearchIdChanged,
+                    onSearchIdCommitted = onSearchIdCommitted ?: onSearchIdChanged,
+                    onOpenDatePicker = onOpenDatePicker,
+                    onResetDate = onResetDate ?: {},
+                    onEventTypesApplied = onEventTypesApplied ?: {},
+                    onDevicesApplied = onDevicesApplied ?: {},
+                    onResetFilters = onResetFilters,
+                    onRefresh = onRefresh,
+                    onSelectEvent = onSelectEvent,
+                    onAcknowledgeEvent = onAcknowledgeEvent,
+                    onLoadNextPage = onLoadNextPage,
+                    onViewportAtTop = onViewportAtTop,
+                    onCopyEventId = onCopyEventId,
+                    onRequestMarkErroneous = onRequestMarkErroneous,
+                    onConfirmMarkErroneous = onConfirmMarkErroneous,
+                    onCancelMarkErroneous = onCancelMarkErroneous,
+                    onFormatPresetChanged = onFormatPresetChanged,
+                    onIncludeMediaLinksChanged = onIncludeMediaLinksChanged,
+                    onStartExport = onStartExport,
+                    onDownloadExport = onDownloadExport,
+                    onOpenVideo = onOpenVideo,
+                )
+            }
+            EventsLayoutMode.Compact -> {
+                CompactEventsLayout(
+                    state = state,
+                    businessTimeZone = businessTimeZone,
+                    onSearchIdChanged = onSearchIdChanged,
+                    onSearchIdCommitted = onSearchIdCommitted ?: onSearchIdChanged,
+                    onOpenDatePicker = onOpenDatePicker,
+                    onResetDate = onResetDate ?: {},
+                    onEventTypesApplied = onEventTypesApplied ?: {},
+                    onDevicesApplied = onDevicesApplied ?: {},
+                    onOpenFilterDialog = onOpenFilterDialog,
+                    onCloseFilterDialog = onCloseFilterDialog,
+                    onResetFilters = onResetFilters,
+                    onRefresh = onRefresh,
+                    onSelectEvent = onSelectEvent,
+                    onCloseViewerCompact = onCloseViewerCompact,
+                    onAcknowledgeEvent = onAcknowledgeEvent,
+                    onLoadNextPage = onLoadNextPage,
+                    onViewportAtTop = onViewportAtTop,
+                    onCopyEventId = onCopyEventId,
+                    onRequestMarkErroneous = onRequestMarkErroneous,
+                    onConfirmMarkErroneous = onConfirmMarkErroneous,
+                    onCancelMarkErroneous = onCancelMarkErroneous,
+                    onFormatPresetChanged = onFormatPresetChanged,
+                    onIncludeMediaLinksChanged = onIncludeMediaLinksChanged,
+                    onStartExport = onStartExport,
+                    onDownloadExport = onDownloadExport,
+                    onOpenVideo = onOpenVideo,
+                )
+            }
+        }
 
-        val topBarActions: @Composable RowScope.() -> Unit =
-            remember(state.isExportModeActive, state.access.reportsExport, isCompact) {
-                {
-                    if (isCompact) {
-                        IconButton(onClick = { currentOpenFilterDialog() }) {
-                            Icon(
-                                painter = painterResource(Res.drawable.ic_tune),
-                                contentDescription = stringResource(Res.string.events_filter_tune),
-                                modifier = Modifier.size(AmberDimens.ListIcon),
+        // Date Picker Dialog
+        if (state.isDatePickerOpen) {
+            val initialDateSelection: DateSelection =
+                remember(state.filter.dateFrom, state.filter.dateTo, businessTimeZone) {
+                    if (businessTimeZone != null && (state.filter.dateFrom != null || state.filter.dateTo != null)) {
+                        try {
+                            DateFilterUtils.utcBoundsToDateSelection(
+                                dateFrom = state.filter.dateFrom,
+                                dateTo = state.filter.dateTo,
+                                businessTimeZone = businessTimeZone,
                             )
+                        } catch (_: Exception) {
+                            DateSelection.All
                         }
-                    }
-                    if (state.access.reportsExport) {
-                        IconButton(onClick = { currentToggleExportMode() }) {
-                            Icon(
-                                painter =
-                                    painterResource(
-                                        if (state.isExportModeActive) {
-                                            Res.drawable.ic_bar_chart
-                                        } else {
-                                            Res.drawable.ic_download
-                                        },
-                                    ),
-                                contentDescription =
-                                    stringResource(
-                                        if (state.isExportModeActive) {
-                                            Res.string.events_show_statistics
-                                        } else {
-                                            Res.string.events_export_csv
-                                        },
-                                    ),
-                                modifier = Modifier.size(AmberDimens.ListIcon),
-                            )
-                        }
+                    } else {
+                        DateSelection.All
                     }
                 }
-            }
+            EventsDatePickerDialog(
+                initialSelection = initialDateSelection,
+                timeZone = businessTimeZone,
+                onDismissRequest = onCloseDatePicker,
+                onApply = onDateSelectionChanged,
+                onReset = { onDateSelectionChanged(DateSelection.All) },
+            )
+        }
+    }
+}
 
-        ProvideTopBar(
-            title = stringResource(Res.string.nav_item_events),
-            leadingAction = null,
-            actions = topBarActions,
-        )
+@Composable
+private fun WideEventsLayout(
+    state: EventsState,
+    businessTimeZone: kotlinx.datetime.TimeZone?,
+    onSearchIdChanged: (String) -> Unit,
+    onSearchIdCommitted: (String) -> Unit,
+    onOpenDatePicker: () -> Unit,
+    onResetDate: () -> Unit,
+    onEventTypesApplied: (Set<String>) -> Unit,
+    onDevicesApplied: (Set<String>) -> Unit,
+    onResetFilters: () -> Unit,
+    onRefresh: () -> Unit,
+    onSelectEvent: (String) -> Unit,
+    onAcknowledgeEvent: (Event) -> Unit,
+    onLoadNextPage: () -> Unit,
+    onViewportAtTop: () -> Unit,
+    onCopyEventId: (String) -> Unit,
+    onRequestMarkErroneous: (String) -> Unit,
+    onConfirmMarkErroneous: (String, Long) -> Unit,
+    onCancelMarkErroneous: () -> Unit,
+    onFormatPresetChanged: (EventsExportFormatPreset) -> Unit,
+    onIncludeMediaLinksChanged: (Boolean) -> Unit,
+    onStartExport: () -> Unit,
+    onDownloadExport: (String) -> Unit,
+    onOpenVideo: ((String) -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier =
+            modifier
+                .fillMaxSize()
+                .padding(AmberDimens.ScreenMargin),
+    ) {
+        // Upper row: Filters on left, Summary/Export slot on right
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(AmberDimens.GapMedium),
+        ) {
+            EventsFilters(
+                filter = state.filter,
+                filterOptions = state.filterOptions,
+                onSearchIdChanged = onSearchIdChanged,
+                onSearchIdCommitted = onSearchIdCommitted,
+                onOpenDatePicker = onOpenDatePicker,
+                onResetDate = onResetDate,
+                onEventTypesApplied = onEventTypesApplied,
+                onDevicesApplied = onDevicesApplied,
+                businessTimeZone = businessTimeZone,
+                isFilterOptionsLoading = state.isFilterOptionsLoading,
+                isCompact = false,
+                modifier = Modifier.weight(1f),
+            )
+            EventsSummaryExportSlot(
+                state = state,
+                isCompact = false,
+                onFormatPresetChanged = onFormatPresetChanged,
+                onIncludeMediaLinksChanged = onIncludeMediaLinksChanged,
+                onStartExport = onStartExport,
+                onDownload = onDownloadExport,
+                modifier = Modifier.width(AmberDimens.EventsListWide),
+            )
+        }
 
-        if (isCompact) {
-            // Compact: 1 column
-            Column(
+        Spacer(modifier = Modifier.height(AmberDimens.GapMedium))
+
+        // Lower row: List on left (360.dp), EventViewer on right (weight(1f))
+        Row(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(AmberDimens.GapMedium),
+        ) {
+            Box(
                 modifier =
                     Modifier
-                        .fillMaxSize()
-                        .padding(AmberDimens.ScreenMargin),
+                        .width(AmberDimens.EventsListWide)
+                        .fillMaxHeight(),
             ) {
-                if (state.isExportModeActive) {
-                    EventsExportPanel(
-                        formatPreset = state.exportFormatPreset,
-                        includeMediaLinks = state.exportIncludeMediaLinks,
-                        totalRecords = state.snapshotTotalCount,
-                        jobStatus = state.exportJobStatus,
-                        isSubmitting = state.isExportSubmitting,
-                        errorMessage = state.exportError,
-                        onFormatPresetChanged = onFormatPresetChanged,
-                        onIncludeMediaLinksChanged = onIncludeMediaLinksChanged,
-                        onStartExport = onStartExport,
-                        onDownload = onDownloadExport,
-                    )
-                } else {
-                    EventsSummaryCard(summary = state.summary)
-                }
-
-                Spacer(modifier = Modifier.height(AmberDimens.GapMedium))
-
                 if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
                     EventsEmptyState(
                         isLoading = state.isInitialLoading,
@@ -277,139 +494,519 @@ fun EventsScreen(
                 }
             }
 
-            // Compact Viewer Modal
-            if (state.isViewerOpenInCompact && state.selectedEvent != null) {
-                val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-                ModalBottomSheet(
-                    onDismissRequest = onCloseViewerCompact,
-                    sheetState = sheetState,
-                ) {
-                    EventViewer(
-                        event = state.selectedEvent,
+            // Reserved EventViewer container
+            ReservedEventViewerContainer(
+                selectedEvent = state.selectedEvent,
+                canAcknowledge = state.access.canAcknowledge,
+                isMarkingErroneous = state.isMarkingErroneous,
+                isConfirmationOpen = state.erroneousConfirmationEventId != null,
+                confirmationTarget = state.confirmationTarget,
+                timeZone = businessTimeZone,
+                onCopyEventId = onCopyEventId,
+                onRequestMarkErroneous = onRequestMarkErroneous,
+                onConfirmMarkErroneous = onConfirmMarkErroneous,
+                onCancelMarkErroneous = onCancelMarkErroneous,
+                onOpenVideo = onOpenVideo,
+                modifier =
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun MediumEventsLayout(
+    state: EventsState,
+    businessTimeZone: kotlinx.datetime.TimeZone?,
+    onSearchIdChanged: (String) -> Unit,
+    onSearchIdCommitted: (String) -> Unit,
+    onOpenDatePicker: () -> Unit,
+    onResetDate: () -> Unit,
+    onEventTypesApplied: (Set<String>) -> Unit,
+    onDevicesApplied: (Set<String>) -> Unit,
+    onResetFilters: () -> Unit,
+    onRefresh: () -> Unit,
+    onSelectEvent: (String) -> Unit,
+    onAcknowledgeEvent: (Event) -> Unit,
+    onLoadNextPage: () -> Unit,
+    onViewportAtTop: () -> Unit,
+    onCopyEventId: (String) -> Unit,
+    onRequestMarkErroneous: (String) -> Unit,
+    onConfirmMarkErroneous: (String, Long) -> Unit,
+    onCancelMarkErroneous: () -> Unit,
+    onFormatPresetChanged: (EventsExportFormatPreset) -> Unit,
+    onIncludeMediaLinksChanged: (Boolean) -> Unit,
+    onStartExport: () -> Unit,
+    onDownloadExport: (String) -> Unit,
+    onOpenVideo: ((String) -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier =
+            modifier
+                .fillMaxSize()
+                .padding(AmberDimens.ScreenMargin),
+    ) {
+        // Upper row: Filters across full width (2x2 grid)
+        EventsFilters(
+            filter = state.filter,
+            filterOptions = state.filterOptions,
+            onSearchIdChanged = onSearchIdChanged,
+            onSearchIdCommitted = onSearchIdCommitted,
+            onOpenDatePicker = onOpenDatePicker,
+            onResetDate = onResetDate,
+            onEventTypesApplied = onEventTypesApplied,
+            onDevicesApplied = onDevicesApplied,
+            businessTimeZone = businessTimeZone,
+            isFilterOptionsLoading = state.isFilterOptionsLoading,
+            isCompact = false,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Spacer(modifier = Modifier.height(AmberDimens.GapMedium))
+
+        // Lower row: List on left (320.dp), Right Column: Summary/Export + EventViewer
+        Row(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(AmberDimens.GapMedium),
+        ) {
+            Box(
+                modifier =
+                    Modifier
+                        .width(AmberDimens.EventsListMedium)
+                        .fillMaxHeight(),
+            ) {
+                if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
+                    EventsEmptyState(
+                        isLoading = state.isInitialLoading,
+                        initialLoadError = state.initialLoadError,
+                        hasActiveFilters = state.filter.hasActiveFilters,
+                        onResetFilters = onResetFilters,
+                        onRetry = onRefresh,
+                    )
+                } else {
+                    EventsList(
+                        events = state.visibleEvents,
+                        selectedEventId = state.selectedEventId,
+                        pendingAckIds = state.pendingAckIds,
                         canAcknowledge = state.access.canAcknowledge,
-                        isMarkingErroneous = state.isMarkingErroneous,
-                        isConfirmationOpen = state.erroneousConfirmationEventId != null,
-                        confirmationTarget = state.confirmationTarget,
+                        pendingNewerCount = state.pendingNewerCount,
+                        hasMore = state.hasMore,
+                        isLoadingNextPage = state.isLoadingNextPage,
                         timeZone = businessTimeZone,
-                        onCopyId = onCopyEventId,
-                        onRequestMarkErroneous = onRequestMarkErroneous,
-                        onConfirmMarkErroneous = onConfirmMarkErroneous,
-                        onCancelMarkErroneous = onCancelMarkErroneous,
-                        onCloseCompact = onCloseViewerCompact,
-                        onOpenVideo = onOpenVideo,
+                        onSelectEvent = onSelectEvent,
+                        onAcknowledgeEvent = onAcknowledgeEvent,
+                        onLoadNextPage = onLoadNextPage,
+                        onViewportAtTop = onViewportAtTop,
                     )
                 }
             }
-        } else {
-            // Medium / Wide: 2 columns
-            val leftWidth = if (isWide) AmberDimens.EventsListWide else AmberDimens.EventsListMedium
 
-            Row(
+            Column(
+                modifier =
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                verticalArrangement = Arrangement.spacedBy(AmberDimens.GapMedium),
+            ) {
+                EventsSummaryExportSlot(
+                    state = state,
+                    isCompact = false,
+                    onFormatPresetChanged = onFormatPresetChanged,
+                    onIncludeMediaLinksChanged = onIncludeMediaLinksChanged,
+                    onStartExport = onStartExport,
+                    onDownload = onDownloadExport,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                ReservedEventViewerContainer(
+                    selectedEvent = state.selectedEvent,
+                    canAcknowledge = state.access.canAcknowledge,
+                    isMarkingErroneous = state.isMarkingErroneous,
+                    isConfirmationOpen = state.erroneousConfirmationEventId != null,
+                    confirmationTarget = state.confirmationTarget,
+                    timeZone = businessTimeZone,
+                    onCopyEventId = onCopyEventId,
+                    onRequestMarkErroneous = onRequestMarkErroneous,
+                    onConfirmMarkErroneous = onConfirmMarkErroneous,
+                    onCancelMarkErroneous = onCancelMarkErroneous,
+                    onOpenVideo = onOpenVideo,
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CompactEventsLayout(
+    state: EventsState,
+    businessTimeZone: kotlinx.datetime.TimeZone?,
+    onSearchIdChanged: (String) -> Unit,
+    onSearchIdCommitted: (String) -> Unit,
+    onOpenDatePicker: () -> Unit,
+    onResetDate: () -> Unit,
+    onEventTypesApplied: (Set<String>) -> Unit,
+    onDevicesApplied: (Set<String>) -> Unit,
+    onOpenFilterDialog: () -> Unit,
+    onCloseFilterDialog: () -> Unit,
+    onResetFilters: () -> Unit,
+    onRefresh: () -> Unit,
+    onSelectEvent: (String) -> Unit,
+    onCloseViewerCompact: () -> Unit,
+    onAcknowledgeEvent: (Event) -> Unit,
+    onLoadNextPage: () -> Unit,
+    onViewportAtTop: () -> Unit,
+    onCopyEventId: (String) -> Unit,
+    onRequestMarkErroneous: (String) -> Unit,
+    onConfirmMarkErroneous: (String, Long) -> Unit,
+    onCancelMarkErroneous: () -> Unit,
+    onFormatPresetChanged: (EventsExportFormatPreset) -> Unit,
+    onIncludeMediaLinksChanged: (Boolean) -> Unit,
+    onStartExport: () -> Unit,
+    onDownloadExport: (String) -> Unit,
+    onOpenVideo: ((String) -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier =
+            modifier
+                .fillMaxSize()
+                .padding(AmberDimens.ScreenMargin),
+    ) {
+        // Pinned CompactFilterBar directly below TopAppBar
+        CompactFilterBar(
+            isExpanded = state.isFilterDialogOpen,
+            activeFiltersCount = state.filter.activeFiltersCount,
+            onToggle = {
+                if (state.isFilterDialogOpen) {
+                    onCloseFilterDialog()
+                } else {
+                    onOpenFilterDialog()
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        // Animated pinned filters panel (not part of LazyColumn)
+        AnimatedVisibility(
+            visible = state.isFilterDialogOpen,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            Column(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 280.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(vertical = AmberDimens.GapSmall),
+            ) {
+                EventsFilters(
+                    filter = state.filter,
+                    filterOptions = state.filterOptions,
+                    onSearchIdChanged = onSearchIdChanged,
+                    onSearchIdCommitted = onSearchIdCommitted,
+                    onOpenDatePicker = onOpenDatePicker,
+                    onResetDate = onResetDate,
+                    onEventTypesApplied = onEventTypesApplied,
+                    onDevicesApplied = onDevicesApplied,
+                    businessTimeZone = businessTimeZone,
+                    isFilterOptionsLoading = state.isFilterOptionsLoading,
+                    isCompact = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(AmberDimens.GapSmall))
+
+        // EventsSummaryExportSlot shell with fixed height
+        EventsSummaryExportSlot(
+            state = state,
+            isCompact = true,
+            onFormatPresetChanged = onFormatPresetChanged,
+            onIncludeMediaLinksChanged = onIncludeMediaLinksChanged,
+            onStartExport = onStartExport,
+            onDownload = onDownloadExport,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Spacer(modifier = Modifier.height(AmberDimens.GapSmall))
+
+        // EventsList occupies remaining height
+        Box(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+        ) {
+            if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
+                EventsEmptyState(
+                    isLoading = state.isInitialLoading,
+                    initialLoadError = state.initialLoadError,
+                    hasActiveFilters = state.filter.hasActiveFilters,
+                    onResetFilters = onResetFilters,
+                    onRetry = onRefresh,
+                )
+            } else {
+                EventsList(
+                    events = state.visibleEvents,
+                    selectedEventId = state.selectedEventId,
+                    pendingAckIds = state.pendingAckIds,
+                    canAcknowledge = state.access.canAcknowledge,
+                    pendingNewerCount = state.pendingNewerCount,
+                    hasMore = state.hasMore,
+                    isLoadingNextPage = state.isLoadingNextPage,
+                    timeZone = businessTimeZone,
+                    onSelectEvent = onSelectEvent,
+                    onAcknowledgeEvent = onAcknowledgeEvent,
+                    onLoadNextPage = onLoadNextPage,
+                    onViewportAtTop = onViewportAtTop,
+                )
+            }
+        }
+
+        // Compact Viewer Modal
+        if (state.isViewerOpenInCompact && state.selectedEvent != null) {
+            val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            ModalBottomSheet(
+                onDismissRequest = onCloseViewerCompact,
+                sheetState = sheetState,
+            ) {
+                EventViewer(
+                    event = state.selectedEvent,
+                    canAcknowledge = state.access.canAcknowledge,
+                    isMarkingErroneous = state.isMarkingErroneous,
+                    isConfirmationOpen = state.erroneousConfirmationEventId != null,
+                    confirmationTarget = state.confirmationTarget,
+                    timeZone = businessTimeZone,
+                    onCopyId = onCopyEventId,
+                    onRequestMarkErroneous = onRequestMarkErroneous,
+                    onConfirmMarkErroneous = onConfirmMarkErroneous,
+                    onCancelMarkErroneous = onCancelMarkErroneous,
+                    onCloseCompact = onCloseViewerCompact,
+                    onOpenVideo = onOpenVideo,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompactFilterBar(
+    isExpanded: Boolean,
+    activeFiltersCount: Int,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier =
+            modifier
+                .height(AmberDimens.EventsCompactFilterBarHeight)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onToggle,
+                ),
+        shape = RoundedCornerShape(AmberCorners.Medium),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    ) {
+        Row(
+            modifier =
+                Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = AmberDimens.ScreenMargin),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = stringResource(Res.string.events_filters_title),
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+
+            if (activeFiltersCount > 0) {
+                Spacer(modifier = Modifier.width(AmberDimens.GapSmall))
+                Surface(
+                    shape = RoundedCornerShape(AmberCorners.Small),
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                ) {
+                    Text(
+                        text = "$activeFiltersCount",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier =
+                            Modifier.padding(
+                                horizontal = AmberDimens.StatusBadgePaddingHorizontal,
+                                vertical = AmberDimens.StatusBadgePaddingVertical,
+                            ),
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.weight(1f))
+
+            Icon(
+                painter =
+                    painterResource(
+                        if (isExpanded) Res.drawable.ic_expand_less else Res.drawable.ic_expand_more,
+                    ),
+                contentDescription = null,
+                modifier = Modifier.size(AmberDimens.ListIcon),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReservedEventViewerContainer(
+    selectedEvent: Event?,
+    canAcknowledge: Boolean,
+    isMarkingErroneous: Boolean,
+    isConfirmationOpen: Boolean,
+    confirmationTarget: studio.acmenra.control.feature.events.presentation.ErroneousConfirmationTarget?,
+    timeZone: kotlinx.datetime.TimeZone?,
+    onCopyEventId: (String) -> Unit,
+    onRequestMarkErroneous: (String) -> Unit,
+    onConfirmMarkErroneous: (String, Long) -> Unit,
+    onCancelMarkErroneous: () -> Unit,
+    onOpenVideo: ((String) -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = MaterialTheme.shapes.extraLarge,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    ) {
+        if (selectedEvent != null) {
+            EventViewer(
+                event = selectedEvent,
+                canAcknowledge = canAcknowledge,
+                isMarkingErroneous = isMarkingErroneous,
+                isConfirmationOpen = isConfirmationOpen,
+                confirmationTarget = confirmationTarget,
+                timeZone = timeZone,
+                onCopyId = onCopyEventId,
+                onRequestMarkErroneous = onRequestMarkErroneous,
+                onConfirmMarkErroneous = onConfirmMarkErroneous,
+                onCancelMarkErroneous = onCancelMarkErroneous,
+                onOpenVideo = onOpenVideo,
+            )
+        } else {
+            Box(
                 modifier =
                     Modifier
                         .fillMaxSize()
-                        .padding(AmberDimens.ScreenMargin),
+                        .padding(AmberDimens.CardPadding),
+                contentAlignment = Alignment.Center,
             ) {
-                // Left Column: List + Stats/Export + Filters
                 Column(
-                    modifier =
-                        Modifier
-                            .width(leftWidth)
-                            .fillMaxHeight(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
                 ) {
-                    if (state.isExportModeActive) {
-                        EventsExportPanel(
-                            formatPreset = state.exportFormatPreset,
-                            includeMediaLinks = state.exportIncludeMediaLinks,
-                            totalRecords = state.snapshotTotalCount,
-                            jobStatus = state.exportJobStatus,
-                            isSubmitting = state.isExportSubmitting,
-                            errorMessage = state.exportError,
-                            onFormatPresetChanged = onFormatPresetChanged,
-                            onIncludeMediaLinksChanged = onIncludeMediaLinksChanged,
-                            onStartExport = onStartExport,
-                            onDownload = onDownloadExport,
-                        )
-                    } else {
-                        EventsSummaryCard(summary = state.summary)
-                    }
-
-                    Spacer(modifier = Modifier.height(AmberDimens.GapMedium))
-
-                    EventsFilters(
-                        filter = state.filter,
-                        filterOptions = state.filterOptions,
-                        onSearchIdChanged = onSearchIdChanged,
-                        onOpenDatePicker = onOpenDatePicker,
-                        onEventTypeToggled = onEventTypeToggled,
-                        onDeviceToggled = onDeviceToggled,
-                        onLocationToggled = onLocationToggled,
-                        onValidityChanged = onValidityChanged,
-                        onResetFilters = onResetFilters,
+                    Icon(
+                        painter = painterResource(Res.drawable.ic_videocam),
+                        contentDescription = null,
+                        modifier = Modifier.size(AmberDimens.ListIconCircle),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                     )
-
                     Spacer(modifier = Modifier.height(AmberDimens.GapMedium))
-
-                    if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
-                        EventsEmptyState(
-                            isLoading = state.isInitialLoading,
-                            initialLoadError = state.initialLoadError,
-                            hasActiveFilters = state.filter.hasActiveFilters,
-                            onResetFilters = onResetFilters,
-                            onRetry = onRefresh,
-                        )
-                    } else {
-                        EventsList(
-                            events = state.visibleEvents,
-                            selectedEventId = state.selectedEventId,
-                            pendingAckIds = state.pendingAckIds,
-                            canAcknowledge = state.access.canAcknowledge,
-                            pendingNewerCount = state.pendingNewerCount,
-                            hasMore = state.hasMore,
-                            isLoadingNextPage = state.isLoadingNextPage,
-                            timeZone = businessTimeZone,
-                            onSelectEvent = onSelectEvent,
-                            onAcknowledgeEvent = onAcknowledgeEvent,
-                            onLoadNextPage = onLoadNextPage,
-                            onViewportAtTop = onViewportAtTop,
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(AmberDimens.GapMedium))
-
-                // Right Column: Event Detail Viewer
-                Box(
-                    modifier =
-                        Modifier
-                            .weight(1f)
-                            .fillMaxHeight(),
-                ) {
-                    EventViewer(
-                        event = state.selectedEvent,
-                        canAcknowledge = state.access.canAcknowledge,
-                        isMarkingErroneous = state.isMarkingErroneous,
-                        isConfirmationOpen = state.erroneousConfirmationEventId != null,
-                        confirmationTarget = state.confirmationTarget,
-                        timeZone = businessTimeZone,
-                        onCopyId = onCopyEventId,
-                        onRequestMarkErroneous = onRequestMarkErroneous,
-                        onConfirmMarkErroneous = onConfirmMarkErroneous,
-                        onCancelMarkErroneous = onCancelMarkErroneous,
-                        onOpenVideo = onOpenVideo,
+                    Text(
+                        text = stringResource(Res.string.events_viewer_placeholder),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
         }
+    }
+}
 
-        // Date Picker Dialog
-        if (state.isDatePickerOpen) {
-            EventsDatePickerDialog(
-                initialSelection = state.filter.dateSelection,
-                timeZone = businessTimeZone,
-                onDismissRequest = onCloseDatePicker,
-                onApply = onDateSelectionChanged,
-                onReset = { onDateSelectionChanged(DateSelection.All) },
+@Composable
+fun TuneValidityFilterAction(
+    validity: EventValidity,
+    onValidityChanged: (EventValidity) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val isFiltered = validity != EventValidity.ALL
+
+    Box(modifier = modifier) {
+        if (isFiltered) {
+            FilledTonalIconButton(
+                onClick = { expanded = true },
+                colors =
+                    IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    ),
+            ) {
+                Icon(
+                    painter = painterResource(Res.drawable.ic_tune),
+                    contentDescription = stringResource(Res.string.events_filter_tune),
+                    modifier = Modifier.size(AmberDimens.ListIcon),
+                )
+            }
+        } else {
+            IconButton(onClick = { expanded = true }) {
+                Icon(
+                    painter = painterResource(Res.drawable.ic_tune),
+                    contentDescription = stringResource(Res.string.events_filter_tune),
+                    modifier = Modifier.size(AmberDimens.ListIcon),
+                )
+            }
+        }
+
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = stringResource(Res.string.events_validity_all),
+                        fontWeight = if (validity == EventValidity.ALL) FontWeight.Bold else FontWeight.Normal,
+                    )
+                },
+                onClick = {
+                    expanded = false
+                    onValidityChanged(EventValidity.ALL)
+                },
+            )
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = stringResource(Res.string.events_validity_valid_only),
+                        fontWeight = if (validity == EventValidity.VALID) FontWeight.Bold else FontWeight.Normal,
+                    )
+                },
+                onClick = {
+                    expanded = false
+                    onValidityChanged(EventValidity.VALID)
+                },
+            )
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = stringResource(Res.string.events_validity_erroneous_only),
+                        fontWeight = if (validity == EventValidity.ERRONEOUS) FontWeight.Bold else FontWeight.Normal,
+                    )
+                },
+                onClick = {
+                    expanded = false
+                    onValidityChanged(EventValidity.ERRONEOUS)
+                },
             )
         }
     }

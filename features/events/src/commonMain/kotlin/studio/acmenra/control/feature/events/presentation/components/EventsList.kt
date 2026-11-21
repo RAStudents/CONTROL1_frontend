@@ -74,7 +74,7 @@ fun EventsList(
         }
     }
 
-    LaunchedEffect(isAtTop) {
+    LaunchedEffect(isAtTop, pendingNewerCount) {
         if (isAtTop) {
             onViewportAtTop()
         }

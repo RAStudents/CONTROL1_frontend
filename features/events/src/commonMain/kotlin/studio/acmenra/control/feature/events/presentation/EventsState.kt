@@ -46,6 +46,7 @@ data class EventsState(
     val exportIncludeMediaLinks: Boolean = false,
     val exportJobStatus: EventsExportStatus? = null,
     val isExportSubmitting: Boolean = false,
+    val isExportDownloading: Boolean = false,
     val exportError: StringResource? = null,
     val isFilterDialogOpen: Boolean = false,
     val isDatePickerOpen: Boolean = false,

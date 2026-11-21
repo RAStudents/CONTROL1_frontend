@@ -1,35 +1,38 @@
 package studio.acmenra.control.feature.events.presentation.components
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DateRangePicker
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberDateRangePickerState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
-import kotlinx.datetime.LocalDate
+import kotlinx.datetime.DateTimeUnit
+import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
+import kotlinx.datetime.atStartOfDayIn
+import kotlinx.datetime.minus
 import kotlinx.datetime.toLocalDateTime
 import org.jetbrains.compose.resources.stringResource
 import studio.acmenra.control.core.ui.generated.resources.Res
@@ -42,11 +45,11 @@ import studio.acmenra.control.core.ui.generated.resources.events_filter_date_tod
 import studio.acmenra.control.core.ui.generated.resources.events_filter_date_yesterday
 import studio.acmenra.control.core.ui.theme.AmberCorners
 import studio.acmenra.control.core.ui.theme.AmberDimens
+import studio.acmenra.control.feature.events.domain.model.DateFilterUtils
 import studio.acmenra.control.feature.events.domain.model.DateSelection
 import kotlin.time.Clock
-import kotlin.time.Instant
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EventsDatePickerDialog(
     initialSelection: DateSelection,
@@ -56,12 +59,71 @@ fun EventsDatePickerDialog(
     modifier: Modifier = Modifier,
     timeZone: TimeZone? = null,
 ) {
-    var selectedPreset by remember { mutableStateOf<DateSelection?>(null) }
-    val datePickerState = rememberDatePickerState()
+    val initialStartMillis =
+        remember(initialSelection) {
+            when (initialSelection) {
+                is DateSelection.Single ->
+                    initialSelection.date
+                        .atStartOfDayIn(TimeZone.UTC)
+                        .toEpochMilliseconds()
+                is DateSelection.Range ->
+                    initialSelection.startDate
+                        .atStartOfDayIn(TimeZone.UTC)
+                        .toEpochMilliseconds()
+                is DateSelection.From ->
+                    initialSelection.startDate
+                        .atStartOfDayIn(TimeZone.UTC)
+                        .toEpochMilliseconds()
+                is DateSelection.Until -> null
+                is DateSelection.All -> null
+            }
+        }
+
+    val initialEndMillis =
+        remember(initialSelection) {
+            when (initialSelection) {
+                is DateSelection.Single ->
+                    initialSelection.date
+                        .atStartOfDayIn(TimeZone.UTC)
+                        .toEpochMilliseconds()
+                is DateSelection.Range ->
+                    initialSelection.endDateInclusive
+                        .atStartOfDayIn(TimeZone.UTC)
+                        .toEpochMilliseconds()
+                is DateSelection.Until ->
+                    initialSelection.endDateInclusive
+                        .atStartOfDayIn(TimeZone.UTC)
+                        .toEpochMilliseconds()
+                is DateSelection.From -> null
+                is DateSelection.All -> null
+            }
+        }
+
+    val dateRangePickerState =
+        rememberDateRangePickerState(
+            initialSelectedStartDateMillis = initialStartMillis,
+            initialSelectedEndDateMillis = initialEndMillis,
+        )
+
+    val tz = timeZone ?: TimeZone.UTC
+    val now = remember { Clock.System.now() }
+    val mskLabel =
+        remember(timeZone, now) {
+            timeZone?.let {
+                DateFilterUtils.formatMskOffset(
+                    at = now,
+                    businessTimeZone = it,
+                    mskPrefix = "MSK",
+                )
+            }
+        }
 
     Dialog(onDismissRequest = onDismissRequest) {
         Card(
-            modifier = modifier.fillMaxWidth(),
+            modifier =
+                modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 680.dp),
             shape = RoundedCornerShape(AmberCorners.ExtraLarge),
             colors =
                 CardDefaults.cardColors(
@@ -71,58 +133,92 @@ fun EventsDatePickerDialog(
             Column(
                 modifier = Modifier.padding(AmberDimens.CardPadding),
             ) {
-                Text(
-                    text = stringResource(Res.string.events_date_picker_title),
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-
-                Spacer(modifier = Modifier.height(AmberDimens.GapMedium))
-
-                // Quick presets (enabled only when business timezone is loaded)
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(AmberDimens.GapSmall),
-                    verticalArrangement = Arrangement.spacedBy(AmberDimens.GapSmall),
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    Text(
+                        text = stringResource(Res.string.events_date_picker_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    if (mskLabel != null) {
+                        Surface(
+                            shape = RoundedCornerShape(AmberCorners.Small),
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                        ) {
+                            Text(
+                                text = mskLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier =
+                                    Modifier.padding(
+                                        horizontal = AmberDimens.StatusBadgePaddingHorizontal,
+                                        vertical = AmberDimens.StatusBadgePaddingVertical,
+                                    ),
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(AmberDimens.GapSmall))
+
+                // Presets row with horizontal scroll to avoid overflow
+                Row(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(AmberDimens.GapSmall),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val today = remember(tz, now) { now.toLocalDateTime(tz).date }
+                    val yesterday = remember(today) { today.minus(1, DateTimeUnit.DAY) }
+                    val last7DaysStart = remember(today) { today.minus(6, DateTimeUnit.DAY) }
+
                     FilterChip(
-                        selected =
-                            selectedPreset is DateSelection.Single &&
-                                isToday((selectedPreset as DateSelection.Single).date, timeZone),
+                        selected = false,
                         onClick = {
-                            val today = currentLocalDate(timeZone)
-                            selectedPreset = DateSelection.Single(today)
+                            val startMillis = today.atStartOfDayIn(TimeZone.UTC).toEpochMilliseconds()
+                            dateRangePickerState.setSelection(startMillis, startMillis)
                         },
                         enabled = timeZone != null,
                         label = { Text(stringResource(Res.string.events_filter_date_today)) },
                     )
                     FilterChip(
-                        selected =
-                            selectedPreset is DateSelection.Single &&
-                                isYesterday((selectedPreset as DateSelection.Single).date, timeZone),
+                        selected = false,
                         onClick = {
-                            val yesterday = currentLocalDate(timeZone).minusDays(1)
-                            selectedPreset = DateSelection.Single(yesterday)
+                            val startMillis = yesterday.atStartOfDayIn(TimeZone.UTC).toEpochMilliseconds()
+                            dateRangePickerState.setSelection(startMillis, startMillis)
                         },
                         enabled = timeZone != null,
                         label = { Text(stringResource(Res.string.events_filter_date_yesterday)) },
                     )
                     FilterChip(
-                        selected = selectedPreset is DateSelection.Range,
+                        selected = false,
                         onClick = {
-                            val today = currentLocalDate(timeZone)
-                            val from = today.minusDays(6)
-                            selectedPreset = DateSelection.Range(from, today)
+                            val startMillis = last7DaysStart.atStartOfDayIn(TimeZone.UTC).toEpochMilliseconds()
+                            val endMillis = today.atStartOfDayIn(TimeZone.UTC).toEpochMilliseconds()
+                            dateRangePickerState.setSelection(startMillis, endMillis)
                         },
                         enabled = timeZone != null,
                         label = { Text(stringResource(Res.string.events_filter_date_last_7_days)) },
                     )
                 }
 
-                Spacer(modifier = Modifier.height(AmberDimens.GapMedium))
+                Spacer(modifier = Modifier.height(AmberDimens.GapSmall))
 
-                DatePicker(
-                    state = datePickerState,
-                    modifier = Modifier.fillMaxWidth(),
+                // DateRangePicker from M3
+                DateRangePicker(
+                    state = dateRangePickerState,
+                    title = null,
+                    headline = null,
+                    showModeToggle = false,
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false),
                 )
 
                 Spacer(modifier = Modifier.height(AmberDimens.GapMedium))
@@ -146,17 +242,32 @@ fun EventsDatePickerDialog(
                         Spacer(modifier = Modifier.width(AmberDimens.GapSmall))
                         TextButton(
                             onClick = {
-                                val tz = timeZone ?: TimeZone.UTC
+                                val startMillis = dateRangePickerState.selectedStartDateMillis
+                                val endMillis = dateRangePickerState.selectedEndDateMillis
                                 val result =
-                                    selectedPreset ?: datePickerState.selectedDateMillis?.let { millis ->
-                                        val localDate =
+                                    if (startMillis == null) {
+                                        DateSelection.All
+                                    } else {
+                                        val startDate =
                                             Instant
-                                                .fromEpochMilliseconds(
-                                                    millis,
-                                                ).toLocalDateTime(tz)
+                                                .fromEpochMilliseconds(startMillis)
+                                                .toLocalDateTime(TimeZone.UTC)
                                                 .date
-                                        DateSelection.Single(localDate)
-                                    } ?: DateSelection.All
+                                        val endDateInclusive =
+                                            if (endMillis != null) {
+                                                Instant
+                                                    .fromEpochMilliseconds(endMillis)
+                                                    .toLocalDateTime(TimeZone.UTC)
+                                                    .date
+                                            } else {
+                                                startDate
+                                            }
+                                        if (startDate == endDateInclusive) {
+                                            DateSelection.Single(startDate)
+                                        } else {
+                                            DateSelection.Range(startDate, endDateInclusive)
+                                        }
+                                    }
                                 onApply(result)
                                 onDismissRequest()
                             },
@@ -168,25 +279,4 @@ fun EventsDatePickerDialog(
             }
         }
     }
-}
-
-private fun currentLocalDate(timeZone: TimeZone?): LocalDate =
-    Clock.System
-        .now()
-        .toLocalDateTime(timeZone ?: TimeZone.UTC)
-        .date
-
-private fun isToday(
-    date: LocalDate,
-    timeZone: TimeZone?,
-): Boolean = timeZone != null && date == currentLocalDate(timeZone)
-
-private fun isYesterday(
-    date: LocalDate,
-    timeZone: TimeZone?,
-): Boolean = timeZone != null && date == currentLocalDate(timeZone).minusDays(1)
-
-private fun LocalDate.minusDays(days: Int): LocalDate {
-    val epochDays = toEpochDays()
-    return LocalDate.fromEpochDays(epochDays - days)
 }

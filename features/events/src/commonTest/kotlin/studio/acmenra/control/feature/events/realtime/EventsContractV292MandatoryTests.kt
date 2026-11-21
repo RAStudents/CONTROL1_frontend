@@ -7393,10 +7393,16 @@ class EventsContractV292MandatoryTests {
         // Reconstruct with timezone
         val tz = kotlinx.datetime.TimeZone.UTC
         val (_, decodedWithTz) = EventsQueryRouteCodec.decodeHash(encoded, tz)
-        assertTrue(decodedWithTz.filter.dateSelection is DateSelection.Single)
+        val reconstructedSelection =
+            DateFilterUtils.utcBoundsToDateSelection(
+                decodedWithTz.filter.dateFrom,
+                decodedWithTz.filter.dateTo,
+                tz,
+            )
+        assertTrue(reconstructedSelection is DateSelection.Single)
         assertEquals(
             kotlinx.datetime.LocalDate(2026, 11, 16),
-            (decodedWithTz.filter.dateSelection as DateSelection.Single).date,
+            (reconstructedSelection as DateSelection.Single).date,
         )
     }
 

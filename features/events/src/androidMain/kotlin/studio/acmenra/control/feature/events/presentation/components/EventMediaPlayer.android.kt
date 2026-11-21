@@ -49,16 +49,18 @@ actual fun EventMediaPlayer(
     videoUrl: String?,
     previewUrl: String?,
     modifier: Modifier,
+    selectedEventId: String?,
+    isDetailSurfaceVisible: Boolean,
     onDownloadClick: (() -> Unit)?,
 ) {
-    var isPlaying by remember(videoUrl) { mutableStateOf(false) }
-    var previewBitmap by remember(previewUrl) { mutableStateOf<ImageBitmap?>(null) }
+    var isPlaying by remember(selectedEventId, isDetailSurfaceVisible, videoUrl) { mutableStateOf(false) }
+    var previewBitmap by remember(selectedEventId, previewUrl) { mutableStateOf<ImageBitmap?>(null) }
 
     val isValidHttpsPreview = previewUrl?.startsWith("https://", ignoreCase = true) == true
     val isValidHttpsVideo = videoUrl?.startsWith("https://", ignoreCase = true) == true
 
     LaunchedEffect(previewUrl, isValidHttpsPreview) {
-        if (isValidHttpsPreview && previewUrl != null) {
+        if (isValidHttpsPreview) {
             try {
                 val bitmap =
                     withContext(Dispatchers.IO) {
@@ -92,8 +94,10 @@ actual fun EventMediaPlayer(
                 ),
         contentAlignment = Alignment.Center,
     ) {
-        if (isPlaying && isValidHttpsVideo && !videoUrl.isNullOrBlank()) {
-            var exoPlayerRef by remember(videoUrl) { mutableStateOf<ExoPlayer?>(null) }
+        if (isPlaying && isValidHttpsVideo && !videoUrl.isNullOrBlank() && isDetailSurfaceVisible) {
+            var exoPlayerRef by remember(selectedEventId, isDetailSurfaceVisible, videoUrl) {
+                mutableStateOf<ExoPlayer?>(null)
+            }
             AndroidView(
                 factory = { context ->
                     val httpDataSourceFactory =
@@ -122,7 +126,7 @@ actual fun EventMediaPlayer(
                 },
                 modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(AmberCorners.Large)),
             )
-            DisposableEffect(videoUrl) {
+            DisposableEffect(selectedEventId, isDetailSurfaceVisible, videoUrl) {
                 onDispose {
                     exoPlayerRef?.stop()
                     exoPlayerRef?.release()

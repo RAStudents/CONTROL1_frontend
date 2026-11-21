@@ -58,25 +58,56 @@ data class EventsExportStatus(
         get() = isDownloadable()
 }
 
+/**
+ * Canonical C.1 / F.16 model for downloaded export files.
+ *
+ * Memory model:
+ * - Direct in-memory byte transfer is strictly bounded to `MAX_EXPORT_DOWNLOAD_BYTES` (100 MiB).
+ * - Bounded accumulation: Not an end-to-end streaming sink on browser WasmJs without
+ *   the File System Access API; heap footprint peaks at ~2-3x during Blob/Int8Array creation,
+ *   strictly bounded to <= 100 MiB payload.
+ */
 data class EventsExportDownload(
-    val exportId: String,
-    val filename: String,
-    val bytes: ByteArray,
-    val contentType: String,
+    val fileName: String,
+    val contentLength: Long,
+    val downloadHandle: String,
+    val exportId: String = downloadHandle,
+    val bytes: ByteArray = ByteArray(0),
+    val contentType: String = "text/csv",
 ) {
+    constructor(
+        exportId: String,
+        filename: String,
+        bytes: ByteArray,
+        contentType: String,
+    ) : this(
+        fileName = filename,
+        contentLength = bytes.size.toLong(),
+        downloadHandle = exportId,
+        exportId = exportId,
+        bytes = bytes,
+        contentType = contentType,
+    )
+
+    val filename: String get() = fileName
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is EventsExportDownload) return false
 
-        return exportId == other.exportId &&
-            filename == other.filename &&
+        return fileName == other.fileName &&
+            contentLength == other.contentLength &&
+            downloadHandle == other.downloadHandle &&
+            exportId == other.exportId &&
             contentType == other.contentType &&
             bytes.contentEquals(other.bytes)
     }
 
     override fun hashCode(): Int {
-        var result = exportId.hashCode()
-        result = 31 * result + filename.hashCode()
+        var result = fileName.hashCode()
+        result = 31 * result + contentLength.hashCode()
+        result = 31 * result + downloadHandle.hashCode()
+        result = 31 * result + exportId.hashCode()
         result = 31 * result + contentType.hashCode()
         result = 31 * result + bytes.contentHashCode()
         return result

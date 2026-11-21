@@ -59,11 +59,23 @@ import studio.acmenra.control.core.ui.theme.AmberDimens
     backdrop.style.height = '100vh';
     backdrop.style.backgroundColor = 'rgba(0,0,0,0.6)';
     backdrop.style.zIndex = '99998';
-    backdrop.onclick = function() {
+
+    var keyHandler = function(e) {
+        if (e.key === 'Escape' || e.keyCode === 27) {
+            cleanup();
+        }
+    };
+    window.addEventListener('keydown', keyHandler);
+
+    function cleanup() {
         try { video.pause(); } catch(e) {}
+        window.removeEventListener('keydown', keyHandler);
         if (video.parentNode) video.parentNode.removeChild(video);
         if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
-    };
+    }
+
+    backdrop.onclick = cleanup;
+    video._cleanup = cleanup;
 
     document.body.appendChild(backdrop);
     document.body.appendChild(video);
@@ -76,13 +88,17 @@ private external fun createAndPlayVideo(videoUrl: String): String
 @JsFun(
     """(elementId) => {
     var video = document.getElementById(elementId);
-    if (video) {
-        try { video.pause(); } catch(e) {}
-        if (video.parentNode) video.parentNode.removeChild(video);
-    }
-    var backdrop = document.getElementById(elementId + '-backdrop');
-    if (backdrop && backdrop.parentNode) {
-        backdrop.parentNode.removeChild(backdrop);
+    if (video && video._cleanup) {
+        video._cleanup();
+    } else {
+        if (video) {
+            try { video.pause(); } catch(e) {}
+            if (video.parentNode) video.parentNode.removeChild(video);
+        }
+        var backdrop = document.getElementById(elementId + '-backdrop');
+        if (backdrop && backdrop.parentNode) {
+            backdrop.parentNode.removeChild(backdrop);
+        }
     }
 }""",
 )
@@ -100,7 +116,7 @@ private external fun removeVideo(elementId: String)
         img.style.pointerEvents = 'none';
         img.style.objectFit = 'cover';
         img.style.borderRadius = '16px';
-        img.style.zIndex = '50';
+        img.style.zIndex = '10';
         document.body.appendChild(img);
     }
     if (img.getAttribute('data-src') !== previewUrl) {
@@ -116,12 +132,12 @@ private external fun ensurePreviewImg(
 
 @OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
 @JsFun(
-    """(imgId, x, y, width, height) => {
+    """(imgId, x, y, width, height, isHidden) => {
     var img = document.getElementById(imgId);
     if (img) {
         var winW = window.innerWidth || (document.documentElement ? document.documentElement.clientWidth : 0) || 0;
         var winH = window.innerHeight || (document.documentElement ? document.documentElement.clientHeight : 0) || 0;
-        if (x + width <= 0 || y + height <= 0 || x >= winW || y >= winH || width <= 0 || height <= 0) {
+        if (isHidden || x + width <= 0 || y + height <= 0 || x >= winW || y >= winH || width <= 0 || height <= 0) {
             img.style.display = 'none';
         } else {
             img.style.display = 'block';
@@ -139,6 +155,7 @@ private external fun updatePreviewGeometry(
     y: Double,
     width: Double,
     height: Double,
+    isHidden: Boolean,
 )
 
 @OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
@@ -161,27 +178,34 @@ actual fun EventMediaPlayer(
     videoUrl: String?,
     previewUrl: String?,
     modifier: Modifier,
+    selectedEventId: String?,
+    isDetailSurfaceVisible: Boolean,
     onDownloadClick: (() -> Unit)?,
 ) {
-    var activeVideoId by remember(videoUrl) { mutableStateOf<String?>(null) }
-    val previewElementId = remember(previewUrl) { "control-preview-" + previewElementCounter.addAndFetch(1L) }
+    var activeVideoId by remember(selectedEventId, isDetailSurfaceVisible, videoUrl) { mutableStateOf<String?>(null) }
+    val previewElementId =
+        remember(selectedEventId, previewUrl) {
+            "control-preview-" + previewElementCounter.addAndFetch(1L)
+        }
 
     val isValidHttpsPreview = previewUrl?.startsWith("https://", ignoreCase = true) == true
     val isValidHttpsVideo = videoUrl?.startsWith("https://", ignoreCase = true) == true
 
-    LaunchedEffect(previewElementId, previewUrl, isValidHttpsPreview) {
-        if (isValidHttpsPreview && previewUrl != null) {
-            ensurePreviewImg(previewElementId, previewUrl)
+    LaunchedEffect(previewElementId, previewUrl, isValidHttpsPreview, isDetailSurfaceVisible) {
+        if (isValidHttpsPreview && isDetailSurfaceVisible) {
+            ensurePreviewImg(previewElementId, previewUrl!!)
+        } else {
+            removePreviewImg(previewElementId)
         }
     }
 
-    DisposableEffect(previewElementId) {
+    DisposableEffect(selectedEventId, previewElementId, isDetailSurfaceVisible) {
         onDispose {
             removePreviewImg(previewElementId)
         }
     }
 
-    DisposableEffect(videoUrl) {
+    DisposableEffect(selectedEventId, isDetailSurfaceVisible, videoUrl) {
         onDispose {
             activeVideoId?.let { removeVideo(it) }
             activeVideoId = null
@@ -195,7 +219,7 @@ actual fun EventMediaPlayer(
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     shape = RoundedCornerShape(AmberCorners.Large),
                 ).onGloballyPositioned { coordinates ->
-                    if (isValidHttpsPreview && previewUrl != null) {
+                    if (isValidHttpsPreview) {
                         val pos = coordinates.positionInWindow()
                         val size = coordinates.size
                         updatePreviewGeometry(
@@ -204,6 +228,7 @@ actual fun EventMediaPlayer(
                             y = pos.y.toDouble(),
                             width = size.width.toDouble(),
                             height = size.height.toDouble(),
+                            isHidden = !isDetailSurfaceVisible,
                         )
                     }
                 },

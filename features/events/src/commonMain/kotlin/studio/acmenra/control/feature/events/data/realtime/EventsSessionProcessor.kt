@@ -177,6 +177,7 @@ class EventsSessionProcessor(
     private var activeAuthGenerationId: Long = 1L
     private var activeConnectionId: Long = 0L
     private var nextCursor: String? = null
+    private val earlyFramesBuffer = mutableMapOf<Long, MutableList<IncomingWsFrame>>()
 
     private data class AccessFence(
         val generation: Long = 0L,
@@ -272,6 +273,7 @@ class EventsSessionProcessor(
 
     fun close() {
         commandChannel.close()
+        earlyFramesBuffer.clear()
     }
 
     fun applyEventMutationResult(event: Event) {
@@ -386,6 +388,11 @@ class EventsSessionProcessor(
             is SessionCommand.WsConnectionActivated -> {
                 if (command.connectionId > activeConnectionId) {
                     activeConnectionId = command.connectionId
+                    val earlyFrames = earlyFramesBuffer.remove(command.connectionId)
+                    earlyFrames?.forEach { earlyFrame ->
+                        handleWsFrame(earlyFrame)
+                    }
+                    earlyFramesBuffer.keys.removeAll { it < activeConnectionId }
                 }
             }
             is SessionCommand.FreshAuthGenerationStarted -> {
@@ -404,16 +411,28 @@ class EventsSessionProcessor(
                             connectionState = RealtimeConnectionState.CONNECTING,
                         )
                     }
+                    val earlyFrames = earlyFramesBuffer.remove(command.connectionId)
+                    earlyFrames?.forEach { earlyFrame ->
+                        handleWsFrame(earlyFrame)
+                    }
+                    earlyFramesBuffer.keys.removeAll { it < activeConnectionId }
                 }
             }
             is SessionCommand.WsFrameReceived -> {
                 val (connId, frame) = command.envelope
                 if (activeConnectionId == 0L) {
                     activeConnectionId = connId
-                } else if (connId != activeConnectionId) {
+                    handleWsFrame(frame)
+                } else if (connId == activeConnectionId) {
+                    handleWsFrame(frame)
+                } else if (connId > activeConnectionId) {
+                    val list = earlyFramesBuffer.getOrPut(connId) { mutableListOf() }
+                    if (list.size < 128) {
+                        list.add(frame)
+                    }
+                } else {
                     return
                 }
-                handleWsFrame(frame)
             }
             is SessionCommand.ConnectionStateChanged -> {
                 _state.update { it.copy(connectionState = command.state) }
@@ -1216,4 +1235,8 @@ class EventsSessionProcessor(
     fun getNextCursor(): String? = nextCursor
 
     fun getAsOfSequence(): Long = sequenceProcessor.currentSequence
+
+    internal fun getActiveConnectionIdForTest(): Long = activeConnectionId
+
+    internal fun getActiveAuthGenerationIdForTest(): Long = activeAuthGenerationId
 }

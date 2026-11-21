@@ -1,6 +1,7 @@
 package studio.acmenra.control.feature.events.data.realtime
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -436,6 +437,7 @@ class EventsFeedSessionImpl(
 
         processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.CONNECTING))
 
+        val activationGate = CompletableDeferred<Unit>()
         val connectionId =
             webSocketDataSource.connect(
                 companyId = companyId,
@@ -444,6 +446,7 @@ class EventsFeedSessionImpl(
                 afterSequence = afterSequence,
                 scope = sessionScope,
                 getClientConfirmedSeq = { processor.getAsOfSequence() },
+                activationGate = activationGate,
                 onDisconnected = { reason, _ ->
                     if (!isClosed && generation == connectionGeneration.load() && canReadEvents()) {
                         handleDisconnect(reason)
@@ -451,10 +454,13 @@ class EventsFeedSessionImpl(
                 },
             )
         if (!canReadEvents() || generation != connectionGeneration.load()) {
+            activationGate.cancel()
             webSocketDataSource.disconnect(connectionId)
             return
         }
         processor.dispatch(SessionCommand.WsConnectionActivated(connectionId))
+        activationGate.complete(Unit)
+        webSocketDataSource.activateConnection(connectionId)
     }
 
     private fun startFreshAuthSession(
@@ -481,6 +487,7 @@ class EventsFeedSessionImpl(
 
                 processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.CONNECTING))
 
+                val activationGate = CompletableDeferred<Unit>()
                 val connectionId =
                     webSocketDataSource.connect(
                         companyId = companyId,
@@ -489,6 +496,7 @@ class EventsFeedSessionImpl(
                         afterSequence = afterSequence,
                         scope = sessionScope,
                         getClientConfirmedSeq = { processor.getAsOfSequence() },
+                        activationGate = activationGate,
                         onDisconnected = { reason, _ ->
                             if (!isClosed && generation == connectionGeneration.load() && canReadEvents()) {
                                 handleDisconnect(reason)
@@ -496,6 +504,7 @@ class EventsFeedSessionImpl(
                         },
                     )
                 if (!canReadEvents() || generation != connectionGeneration.load()) {
+                    activationGate.cancel()
                     webSocketDataSource.disconnect(connectionId)
                     return@launch
                 }
@@ -507,6 +516,8 @@ class EventsFeedSessionImpl(
                         afterSequence = afterSequence,
                     ),
                 )
+                activationGate.complete(Unit)
+                webSocketDataSource.activateConnection(connectionId)
             }
     }
 

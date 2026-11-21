@@ -8,5 +8,7 @@ expect fun EventMediaPlayer(
     videoUrl: String?,
     previewUrl: String?,
     modifier: Modifier = Modifier,
+    selectedEventId: String? = null,
+    isDetailSurfaceVisible: Boolean = true,
     onDownloadClick: (() -> Unit)? = null,
 )

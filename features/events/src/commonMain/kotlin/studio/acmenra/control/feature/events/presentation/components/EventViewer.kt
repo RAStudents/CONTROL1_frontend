@@ -146,6 +146,8 @@ fun EventViewer(
             EventMediaPlayer(
                 videoUrl = event.videoUrl,
                 previewUrl = event.previewUrl,
+                selectedEventId = event.id,
+                isDetailSurfaceVisible = true,
                 modifier =
                     Modifier
                         .fillMaxWidth()

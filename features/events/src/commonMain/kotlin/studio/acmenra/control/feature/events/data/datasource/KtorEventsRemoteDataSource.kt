@@ -35,12 +35,13 @@ import studio.acmenra.control.feature.events.domain.model.EventsQuery
 
 internal const val MAX_EXPORT_DOWNLOAD_BYTES = 100L * 1024 * 1024
 
-private class BoundedByteAccumulator(
+internal class BoundedByteAccumulator(
     private val maxBytes: Long,
     initialCapacity: Int = 0,
 ) {
     private var buffer = ByteArray(initialCapacity.coerceAtLeast(1024).coerceAtMost(maxBytes.toInt()))
-    private var size = 0
+    var size = 0
+        private set
 
     fun write(
         bytes: ByteArray,

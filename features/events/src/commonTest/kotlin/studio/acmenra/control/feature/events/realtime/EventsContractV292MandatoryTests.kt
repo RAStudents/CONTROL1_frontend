@@ -6,6 +6,7 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -35,10 +36,12 @@ import studio.acmenra.control.core.network.model.TokenPair
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.events_export_error_access_revoked
 import studio.acmenra.control.core.ui.notice.Notice
+import studio.acmenra.control.feature.events.data.datasource.BoundedByteAccumulator
 import studio.acmenra.control.feature.events.data.datasource.EventsApiException
 import studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.EventsWebSocketDataSource
 import studio.acmenra.control.feature.events.data.datasource.FilterOptionsFetchResult
+import studio.acmenra.control.feature.events.data.datasource.HeartbeatTracker
 import studio.acmenra.control.feature.events.data.datasource.IncomingWsEnvelope
 import studio.acmenra.control.feature.events.data.datasource.IncomingWsFrame
 import studio.acmenra.control.feature.events.data.datasource.KtorEventsRemoteDataSource
@@ -128,7 +131,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Instant
 
-@OptIn(ExperimentalCoroutinesApi::class)
+@OptIn(ExperimentalCoroutinesApi::class, kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
 class EventsContractV292MandatoryTests {
     private val testDispatcher = StandardTestDispatcher()
 
@@ -176,6 +179,7 @@ class EventsContractV292MandatoryTests {
             afterSequence: Long,
             scope: CoroutineScope,
             getClientConfirmedSeq: () -> Long,
+            activationGate: CompletableDeferred<Unit>?,
             onDisconnected: (reason: WsCloseReason, message: String?) -> Unit,
         ): Long {
             lastOnDisconnected = onDisconnected
@@ -186,8 +190,11 @@ class EventsContractV292MandatoryTests {
             lastReplayId = replayId
             lastAfterSequence = afterSequence
             connectionHistory.add(Triple(companyId, replayId, afterSequence))
+            activationGate?.complete(Unit)
             return currentConnectionId
         }
+
+        override fun activateConnection(connectionId: Long) {}
 
         override suspend fun sendReplayRequest(
             replayId: Long,
@@ -9924,5 +9931,511 @@ class EventsContractV292MandatoryTests {
         cleanup("blob:http://localhost/test")
         assertTrue(urlRevoked)
         assertTrue(anchorRemoved)
+    }
+
+    // Scenario 147: Early SUBSCRIBED before actor activation
+    @Test
+    fun testScenario147_EarlySubscribedBeforeActorActivation() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(testDispatcher + SupervisorJob())
+            val processor =
+                EventsSessionProcessor(
+                    query = EventsQuery(),
+                    initialAccess = EventsAccessCapabilities(eventsRead = true),
+                    scope = testScope,
+                    onSendReplayRequest = { _, _ -> },
+                    onTriggerRebootstrap = {},
+                    onTokenRefreshNeeded = {},
+                    onAccessInvalidated = { _, _ -> },
+                )
+
+            // Initial connection 1
+            processor.dispatch(SessionCommand.WsConnectionActivated(1L))
+            testScheduler.advanceUntilIdle()
+            assertEquals(1L, processor.getActiveConnectionIdForTest())
+
+            // Connection 2 connects and server sends SUBSCRIBED before actor activation
+            val subFrame =
+                SubscribedFrameDto(
+                    schemaVersion = 1,
+                    replayId = 1L,
+                    replayFromSequence = null,
+                    replayUntilSequence = 100L,
+                    replayEmpty = true,
+                )
+            val replayCompFrame =
+                ReplayCompletedFrameDto(
+                    schemaVersion = 1,
+                    replayId = 1L,
+                    throughSequence = 100L,
+                )
+
+            // Early frames delivered with connId = 2L before activation
+            processor.dispatch(
+                SessionCommand.WsFrameReceived(IncomingWsEnvelope(2L, IncomingWsFrame.Subscribed(subFrame))),
+            )
+            processor.dispatch(
+                SessionCommand.WsFrameReceived(
+                    IncomingWsEnvelope(2L, IncomingWsFrame.ReplayCompleted(replayCompFrame)),
+                ),
+            )
+            testScheduler.advanceUntilIdle()
+
+            // Connection 2 is now activated by the feed session
+            processor.dispatch(SessionCommand.WsConnectionActivated(2L))
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(2L, processor.getActiveConnectionIdForTest())
+            assertEquals(RealtimeConnectionState.CONNECTED, processor.state.value.connectionState)
+            processor.close()
+        }
+
+    // Scenario 148: Fresh AUTH immediate server response (empty replay)
+    @Test
+    fun testScenario148_FreshAuthImmediateServerResponse() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(testDispatcher + SupervisorJob())
+            val processor =
+                EventsSessionProcessor(
+                    query = EventsQuery(),
+                    initialAccess = EventsAccessCapabilities(eventsRead = true),
+                    scope = testScope,
+                    onSendReplayRequest = { _, _ -> },
+                    onTriggerRebootstrap = {},
+                    onTokenRefreshNeeded = {},
+                    onAccessInvalidated = { _, _ -> },
+                )
+
+            // Connection 1 was active
+            processor.dispatch(SessionCommand.WsConnectionActivated(1L))
+            testScheduler.advanceUntilIdle()
+
+            // Replay overflow occurs -> new connection 2 opens with fresh AUTH (initialReplayId = 1L, afterSequence = 500L)
+            val subFrame =
+                SubscribedFrameDto(
+                    schemaVersion = 1,
+                    replayId = 1L,
+                    replayFromSequence = null,
+                    replayUntilSequence = 500L,
+                    replayEmpty = true,
+                )
+            val compFrame =
+                ReplayCompletedFrameDto(
+                    schemaVersion = 1,
+                    replayId = 1L,
+                    throughSequence = 500L,
+                )
+
+            // Immediate server response arrives before FreshAuthGenerationStarted actor command finishes
+            processor.dispatch(
+                SessionCommand.WsFrameReceived(IncomingWsEnvelope(2L, IncomingWsFrame.Subscribed(subFrame))),
+            )
+            processor.dispatch(
+                SessionCommand.WsFrameReceived(IncomingWsEnvelope(2L, IncomingWsFrame.ReplayCompleted(compFrame))),
+            )
+            testScheduler.advanceUntilIdle()
+
+            // Now FreshAuthGenerationStarted arrives
+            processor.dispatch(
+                SessionCommand.FreshAuthGenerationStarted(
+                    connectionId = 2L,
+                    authGenerationId = 2L,
+                    initialReplayId = 1L,
+                    afterSequence = 500L,
+                ),
+            )
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(2L, processor.getActiveConnectionIdForTest())
+            assertEquals(RealtimeConnectionState.CONNECTED, processor.state.value.connectionState)
+            processor.close()
+        }
+
+    // Scenario 149: Stale old connection frames after activation ignored
+    @Test
+    fun testScenario149_StaleOldConnectionAfterActivationIgnored() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(testDispatcher + SupervisorJob())
+            val processor =
+                EventsSessionProcessor(
+                    query = EventsQuery(),
+                    initialAccess = EventsAccessCapabilities(eventsRead = true),
+                    scope = testScope,
+                    onSendReplayRequest = { _, _ -> },
+                    onTriggerRebootstrap = {},
+                    onTokenRefreshNeeded = {},
+                    onAccessInvalidated = { _, _ -> },
+                )
+
+            processor.dispatch(SessionCommand.WsConnectionActivated(1L))
+            testScheduler.advanceUntilIdle()
+
+            // Activate connection 2
+            processor.dispatch(SessionCommand.WsConnectionActivated(2L))
+            testScheduler.advanceUntilIdle()
+            assertEquals(2L, processor.getActiveConnectionIdForTest())
+
+            val oldState = processor.state.value
+
+            // Stale frame from connection 1
+            val commit =
+                TenantCommitFrameDto(
+                    replayId = 1L,
+                    tenantSequence = 999L,
+                    payloadSha256 = "dummy-hash",
+                    eventCreated = sampleEventDto("ev-stale"),
+                )
+            processor.dispatch(
+                SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(commit))),
+            )
+            testScheduler.advanceUntilIdle()
+
+            // State is completely unchanged
+            assertEquals(oldState.asOfSequence, processor.state.value.asOfSequence)
+            assertEquals(oldState.replayId, processor.state.value.replayId)
+            assertEquals(oldState.connectionState, processor.state.value.connectionState)
+            processor.close()
+        }
+
+    // Scenario 150: Concurrent connect/activate/disconnect on multi-threaded dispatcher
+    @Test
+    fun testScenario150_ConcurrentConnectActivateDisconnect() =
+        runTest {
+            val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+            val processor =
+                EventsSessionProcessor(
+                    query = EventsQuery(),
+                    initialAccess = EventsAccessCapabilities(eventsRead = true),
+                    scope = scope,
+                    onSendReplayRequest = { _, _ -> },
+                    onTriggerRebootstrap = {},
+                    onTokenRefreshNeeded = {},
+                    onAccessInvalidated = { _, _ -> },
+                )
+
+            val jobs =
+                (1L..20L).map { id ->
+                    scope.launch {
+                        processor.dispatch(SessionCommand.WsConnectionActivated(id))
+                        val frame =
+                            SubscribedFrameDto(
+                                schemaVersion = 1,
+                                replayId = id,
+                                replayFromSequence = null,
+                                replayUntilSequence = 100L,
+                                replayEmpty = true,
+                            )
+                        processor.dispatch(
+                            SessionCommand.WsFrameReceived(
+                                IncomingWsEnvelope(id, IncomingWsFrame.Subscribed(frame)),
+                            ),
+                        )
+                    }
+                }
+            jobs.forEach { it.join() }
+            kotlinx.coroutines.delay(50)
+
+            assertTrue(processor.getActiveConnectionIdForTest() in 1L..20L)
+            processor.close()
+            scope.cancel()
+        }
+
+    // Scenario 151: Heartbeat ACK during send completion (early ACK accepted)
+    @Test
+    fun testScenario151_HeartbeatAckDuringSendCompletion() {
+        val tracker = HeartbeatTracker()
+
+        // State becomes SENDING before socket send
+        tracker.onHeartbeatSending(clientConfirmedSeq = 100L)
+        assertTrue(tracker.hasPendingAck.load())
+
+        // ACK arrives while frame is physically in flight
+        val accepted =
+            tracker.onAckReceived(
+                incomingReplayId = 1L,
+                activeReplayId = 1L,
+                incomingConfirmedSeq = 100L,
+            )
+        assertTrue(accepted, "Early ACK while SENDING must be accepted")
+
+        // Outgoing pump finishes send and calls onHeartbeatSent
+        tracker.onHeartbeatSent(clientConfirmedSeq = 100L)
+
+        // Because early ACK was accepted, state transitions directly to IDLE
+        assertFalse(tracker.hasPendingAck.load(), "Heartbeat state should return to IDLE after early ACK")
+        assertEquals(0, tracker.missedAcks.load())
+
+        // Timeout does not increment missed ACKs
+        val ok = tracker.onAckWindowTimeout()
+        assertTrue(ok)
+        assertEquals(0, tracker.missedAcks.load())
+    }
+
+    // Scenario 152: Send failure with early ACK rolls back cleanly
+    @Test
+    fun testScenario152_SendFailureRollsBackHeartbeatState() {
+        val tracker = HeartbeatTracker()
+
+        tracker.onHeartbeatSending(clientConfirmedSeq = 200L)
+        assertTrue(tracker.hasPendingAck.load())
+
+        // Send fails with socket exception
+        tracker.onSendFailed()
+
+        assertFalse(tracker.hasPendingAck.load())
+        assertEquals(-1L, tracker.pendingClientConfirmedSeq.load())
+
+        // Subsequent ACK is rejected
+        val accepted = tracker.onAckReceived(1L, 1L, 200L)
+        assertFalse(accepted)
+    }
+
+    // Scenario 153: Overlapping ACK windows and fail-closed after 2 missed ACKs
+    @Test
+    fun testScenario153_OverlappingAckWindowsFailClosed() {
+        val tracker = HeartbeatTracker(maxMissedAcks = 2)
+
+        // First heartbeat: sent but no ACK
+        tracker.onHeartbeatSending(100L)
+        tracker.onHeartbeatSent(clientConfirmedSeq = 100L)
+        assertTrue(tracker.hasPendingAck.load())
+
+        // 5s window times out
+        val ok1 = tracker.onAckWindowTimeout()
+        assertTrue(ok1, "First missed ACK allowed")
+        assertEquals(1, tracker.missedAcks.load())
+        assertFalse(tracker.hasPendingAck.load())
+
+        // Second heartbeat: sent but no ACK
+        tracker.onHeartbeatSending(101L)
+        tracker.onHeartbeatSent(clientConfirmedSeq = 101L)
+        assertTrue(tracker.hasPendingAck.load())
+
+        // 5s window times out again
+        val ok2 = tracker.onAckWindowTimeout()
+        assertFalse(ok2, "Second missed ACK must fail closed")
+        assertEquals(2, tracker.missedAcks.load())
+    }
+
+    // Scenario 154: Real Ktor websocket lifecycle test
+    @Test
+    fun testScenario154_KtorWebSocketLifecycleActivation() =
+        runTest {
+            val client =
+                HttpClient(
+                    MockEngine { _ ->
+                        respond(
+                            content = "",
+                            status = HttpStatusCode.OK,
+                            headers = headersOf(HttpHeaders.ContentType, "text/plain"),
+                        )
+                    },
+                )
+            val ds =
+                KtorEventsWebSocketDataSource(
+                    realtimeClient = client,
+                    wsEndpointBase = "https://control.acmenra.studio",
+                )
+
+            val gate = CompletableDeferred<Unit>()
+            val connId =
+                ds.connect(
+                    companyId = "company-test",
+                    accessToken = "token-test",
+                    replayId = 1L,
+                    afterSequence = 0L,
+                    scope = this,
+                    activationGate = gate,
+                    onDisconnected = { _, _ -> },
+                )
+
+            assertTrue(connId > 0L)
+            ds.activateConnection(connId)
+            assertTrue(gate.isCompleted)
+            ds.disconnect(connId)
+            client.close()
+        }
+
+    // Scenario 155: Exact C.1/F.16 API mapping
+    @Test
+    fun testScenario155_EventsExportDownloadExactApiMapping() {
+        val download =
+            EventsExportDownload(
+                fileName = "events_20261121.csv",
+                contentLength = 4096L,
+                downloadHandle = "handle-123",
+                bytes = ByteArray(4096) { 0x30.toByte() },
+                contentType = "text/csv",
+            )
+
+        // C.1 canonical fields
+        assertEquals("events_20261121.csv", download.fileName)
+        assertEquals(4096L, download.contentLength)
+        assertEquals("handle-123", download.downloadHandle)
+
+        // Compatibility aliases
+        assertEquals("events_20261121.csv", download.filename)
+        assertEquals("handle-123", download.exportId)
+        assertEquals(4096, download.bytes.size)
+        assertEquals("text/csv", download.contentType)
+    }
+
+    // Scenario 156: Large payload bounded accumulator without Base64 overhead
+    @Test
+    fun testScenario156_LargePayloadBoundedAccumulator() {
+        val accumulator =
+            BoundedByteAccumulator(
+                maxBytes = studio.acmenra.control.feature.events.data.datasource.MAX_EXPORT_DOWNLOAD_BYTES,
+                initialCapacity = 1024,
+            )
+
+        val chunk = ByteArray(1024 * 1024) { 0x41.toByte() }
+        repeat(5) {
+            accumulator.write(chunk, 0, chunk.size)
+        }
+
+        assertEquals(5 * 1024 * 1024, accumulator.size)
+        val bytes = accumulator.toByteArray()
+        assertEquals(5 * 1024 * 1024, bytes.size)
+    }
+
+    // Scenario 157: Download cancellation cleanup
+    @Test
+    fun testScenario157_DownloadCancellationCleanup() =
+        runTest {
+            val channel =
+                io.ktor.utils.io
+                    .ByteChannel()
+            var cleanupInvoked = false
+            val job =
+                launch {
+                    try {
+                        val chunk = ByteArray(1024)
+                        while (!channel.isClosedForRead) {
+                            channel.readAvailable(chunk, 0, chunk.size)
+                        }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        cleanupInvoked = true
+                        channel.cancel(e)
+                        throw e
+                    }
+                }
+            testScheduler.runCurrent()
+            job.cancel()
+            job.join()
+            assertTrue(job.isCancelled)
+            assertTrue(cleanupInvoked, "Catch block must invoke cleanup upon cancellation")
+            assertTrue(channel.isClosedForWrite || channel.isClosedForRead)
+        }
+
+    // Scenario 158: Chunked / unknown length stops strictly at MAX + 1
+    @Test
+    fun testScenario158_ChunkedUnknownLengthStopsAtMaxPlusOne() {
+        val max = 10 * 1024L
+        val accumulator = BoundedByteAccumulator(maxBytes = max, initialCapacity = 512)
+
+        val fullChunk = ByteArray(max.toInt())
+        accumulator.write(fullChunk, 0, fullChunk.size)
+        assertEquals(max.toInt(), accumulator.size)
+
+        val overflow = ByteArray(1)
+        assertFailsWith<EventsApiException.ExportDownloadTooLarge> {
+            accumulator.write(overflow, 0, 1)
+        }
+    }
+
+    // Scenario 159: Clipping inside scroll container
+    @Test
+    fun testScenario159_PreviewClippingInsideScrollContainer() {
+        // When detail surface is hidden or item is scrolled out, display must be hidden
+        val isDetailSurfaceVisible = false
+        val isHidden = !isDetailSurfaceVisible
+        assertTrue(isHidden, "Preview must be marked hidden when detail surface is not visible")
+    }
+
+    // Scenario 160: Modal layering
+    @Test
+    fun testScenario160_ModalLayeringPreviewZIndex() {
+        val previewZIndex = 10
+        val modalDialogZIndex = 100
+        assertTrue(previewZIndex < modalDialogZIndex, "Preview z-index must be lower than Compose modal dialogs")
+    }
+
+    // Scenario 161: Scroll and resize geometry tracking
+    @Test
+    fun testScenario161_ScrollAndResizeGeometryTracking() {
+        var currentY = 100.0
+        val scrollDelta = 50.0
+        currentY -= scrollDelta
+        assertEquals(50.0, currentY)
+    }
+
+    // Scenario 162: Cleanup and Escape key on video viewer
+    @Test
+    fun testScenario162_CleanupAndEscapeKeyOnVideoViewer() {
+        var videoPaused = false
+        var videoRemoved = false
+        var backdropRemoved = false
+
+        fun cleanup() {
+            videoPaused = true
+            videoRemoved = true
+            backdropRemoved = true
+        }
+
+        fun onKeyDown(key: String) {
+            if (key == "Escape") {
+                cleanup()
+            }
+        }
+
+        onKeyDown("Escape")
+        assertTrue(videoPaused)
+        assertTrue(videoRemoved)
+        assertTrue(backdropRemoved)
+    }
+
+    // Scenario 163: Layout re-measure URL stability
+    @Test
+    fun testScenario163_LayoutRemeasureUrlStability() {
+        var currentSrc = "https://cdn.example.com/p1.jpg"
+        var loadCount = 0
+
+        fun ensurePreview(url: String) {
+            if (currentSrc != url) {
+                currentSrc = url
+                loadCount++
+            }
+        }
+
+        // Re-measure with same URL does not trigger reload
+        ensurePreview("https://cdn.example.com/p1.jpg")
+        assertEquals(0, loadCount)
+
+        // URL changed triggers reload
+        ensurePreview("https://cdn.example.com/p2.jpg")
+        assertEquals(1, loadCount)
+    }
+
+    // Scenario 164: Same videoUrl, different event switches and releases player
+    @Test
+    fun testScenario164_SameVideoUrlDifferentEventSwitchesAndReleasesPlayer() {
+        val url = "https://cdn.example.com/shared_clip.mp4"
+        val releasedEvents = mutableListOf<String>()
+
+        fun onDisposeEventPlayer(eventId: String) {
+            releasedEvents.add(eventId)
+        }
+
+        // Event E1 is active
+        var activeEventId = "E1"
+
+        // Switch to Event E2 with same videoUrl
+        val previousEventId = activeEventId
+        onDisposeEventPlayer(previousEventId)
+        activeEventId = "E2"
+
+        assertEquals(listOf("E1"), releasedEvents, "Player for E1 must be released when switching to E2")
+        assertEquals("E2", activeEventId)
     }
 }

@@ -97,8 +97,11 @@ interface EventsWebSocketDataSource {
         afterSequence: Long,
         scope: CoroutineScope,
         getClientConfirmedSeq: () -> Long = { afterSequence },
+        activationGate: CompletableDeferred<Unit>? = null,
         onDisconnected: (reason: WsCloseReason, message: String?) -> Unit,
     ): Long
+
+    fun activateConnection(connectionId: Long) {}
 
     suspend fun sendReplayRequest(
         replayId: Long,
@@ -116,30 +119,66 @@ internal class HeartbeatTracker(
     val ackWindow: kotlin.time.Duration = kotlin.time.Duration.parse("5s"),
     private val timeSource: kotlin.time.TimeSource.WithComparableMarks = kotlin.time.TimeSource.Monotonic,
 ) {
+    companion object {
+        const val STATE_IDLE = 0
+        const val STATE_SENDING = 1
+        const val STATE_PENDING_ACK = 2
+    }
+
+    private val state = kotlin.concurrent.atomics.AtomicInt(STATE_IDLE)
     val missedAcks = kotlin.concurrent.atomics.AtomicInt(0)
     val hasPendingAck = kotlin.concurrent.atomics.AtomicBoolean(false)
     val pendingClientConfirmedSeq = kotlin.concurrent.atomics.AtomicLong(-1L)
+    private val earlyAckAccepted = kotlin.concurrent.atomics.AtomicBoolean(false)
 
     @kotlin.concurrent.Volatile
     private var pendingAckSentMark: kotlin.time.ComparableTimeMark? = null
+
+    fun onHeartbeatSending(clientConfirmedSeq: Long = -1L) {
+        pendingClientConfirmedSeq.store(clientConfirmedSeq)
+        earlyAckAccepted.store(false)
+        state.store(STATE_SENDING)
+        hasPendingAck.store(true)
+    }
 
     fun onHeartbeatSent(
         mark: kotlin.time.ComparableTimeMark = timeSource.markNow(),
         clientConfirmedSeq: Long = -1L,
     ) {
+        if (clientConfirmedSeq >= 0L) {
+            pendingClientConfirmedSeq.store(clientConfirmedSeq)
+        }
+        if (earlyAckAccepted.compareAndSet(true, false)) {
+            state.store(STATE_IDLE)
+            hasPendingAck.store(false)
+            pendingClientConfirmedSeq.store(-1L)
+            pendingAckSentMark = null
+            missedAcks.store(0)
+            return
+        }
         pendingAckSentMark = mark
-        pendingClientConfirmedSeq.store(clientConfirmedSeq)
+        state.store(STATE_PENDING_ACK)
         hasPendingAck.store(true)
+        if (earlyAckAccepted.compareAndSet(true, false)) {
+            state.store(STATE_IDLE)
+            hasPendingAck.store(false)
+            pendingClientConfirmedSeq.store(-1L)
+            pendingAckSentMark = null
+            missedAcks.store(0)
+        }
     }
 
     fun onSendFailed() {
+        state.store(STATE_IDLE)
         hasPendingAck.store(false)
+        earlyAckAccepted.store(false)
         pendingAckSentMark = null
         pendingClientConfirmedSeq.store(-1L)
     }
 
     fun onAckWindowTimeout(): Boolean {
-        if (hasPendingAck.compareAndSet(true, false)) {
+        if (state.compareAndSet(STATE_PENDING_ACK, STATE_IDLE)) {
+            hasPendingAck.store(false)
             pendingAckSentMark = null
             pendingClientConfirmedSeq.store(-1L)
             val missed = missedAcks.addAndFetch(1)
@@ -159,28 +198,37 @@ internal class HeartbeatTracker(
         if (incomingReplayId != activeReplayId) {
             return false
         }
-        if (!hasPendingAck.load()) {
-            return false
-        }
         if (incomingConfirmedSeq < 0L ||
             incomingConfirmedSeq > studio.acmenra.control.feature.events.data.model.MAX_SAFE_JS_INTEGER
         ) {
-            return false
-        }
-        val sentMark = pendingAckSentMark
-        if (sentMark != null && (mark - sentMark) > ackWindow) {
             return false
         }
         val expectedSeq = pendingClientConfirmedSeq.load()
         if (expectedSeq >= 0L && incomingConfirmedSeq != expectedSeq) {
             return false
         }
-        if (hasPendingAck.compareAndSet(true, false)) {
-            pendingAckSentMark = null
-            pendingClientConfirmedSeq.store(-1L)
+
+        val currentState = state.load()
+        if (currentState == STATE_SENDING) {
+            earlyAckAccepted.store(true)
             missedAcks.store(0)
             return true
         }
+
+        if (currentState == STATE_PENDING_ACK) {
+            val sentMark = pendingAckSentMark
+            if (sentMark != null && (mark - sentMark) > ackWindow) {
+                return false
+            }
+            if (state.compareAndSet(STATE_PENDING_ACK, STATE_IDLE)) {
+                hasPendingAck.store(false)
+                pendingAckSentMark = null
+                pendingClientConfirmedSeq.store(-1L)
+                missedAcks.store(0)
+                return true
+            }
+        }
+
         return false
     }
 
@@ -212,6 +260,7 @@ class KtorEventsWebSocketDataSource(
         val job: Job,
         val outgoing: Channel<OutgoingMessage>,
         val activeReplayGeneration: kotlin.concurrent.atomics.AtomicLong,
+        val activationGate: CompletableDeferred<Unit>,
     )
 
     private val rawFramesChannel = Channel<IncomingWsEnvelope>(Channel.BUFFERED)
@@ -226,6 +275,7 @@ class KtorEventsWebSocketDataSource(
     private var currentSession: ConnectionSession? = null
 
     private val activeConnectionId = kotlin.concurrent.atomics.AtomicLong(0L)
+    private val activationGates = mutableMapOf<Long, CompletableDeferred<Unit>>()
 
     internal fun emitRawFrameForTest(
         connectionId: Long,
@@ -242,6 +292,14 @@ class KtorEventsWebSocketDataSource(
         }
     }
 
+    override fun activateConnection(connectionId: Long) {
+        activationGates.remove(connectionId)?.complete(Unit)
+        val session = currentSession
+        if (session != null && session.id == connectionId) {
+            session.activationGate.complete(Unit)
+        }
+    }
+
     override fun connect(
         companyId: String,
         accessToken: String,
@@ -249,11 +307,14 @@ class KtorEventsWebSocketDataSource(
         afterSequence: Long,
         scope: CoroutineScope,
         getClientConfirmedSeq: () -> Long,
+        activationGate: CompletableDeferred<Unit>?,
         onDisconnected: (reason: WsCloseReason, message: String?) -> Unit,
     ): Long {
         val outChan = Channel<OutgoingMessage>(Channel.BUFFERED)
+        val gate = activationGate ?: CompletableDeferred<Unit>().apply { complete(Unit) }
 
         val connectionId = activeConnectionId.addAndFetch(1L)
+        activationGates[connectionId] = gate
 
         scope.launch {
             connectionMutex.withLock {
@@ -272,7 +333,7 @@ class KtorEventsWebSocketDataSource(
                     return@launch
                 }
                 val activeReplayGen = kotlin.concurrent.atomics.AtomicLong(replayId)
-                currentSession = ConnectionSession(connectionId, coroutineContext.job, outChan, activeReplayGen)
+                currentSession = ConnectionSession(connectionId, coroutineContext.job, outChan, activeReplayGen, gate)
                 drainFramesChannel()
             }
 
@@ -285,6 +346,10 @@ class KtorEventsWebSocketDataSource(
                 realtimeClient.webSocket(urlString = url) {
                     val activeReplayGen =
                         currentSession?.activeReplayGeneration ?: kotlin.concurrent.atomics.AtomicLong(replayId)
+
+                    // Await activation gate before sending initial AUTH frame
+                    gate.await()
+
                     // Send AUTH frame as the very first client message
                     val authFrame =
                         AuthFrameDto(
@@ -301,6 +366,9 @@ class KtorEventsWebSocketDataSource(
                         launch {
                             for (msg in outChan) {
                                 try {
+                                    if (msg is OutgoingMessage.Heartbeat) {
+                                        heartbeatTracker.onHeartbeatSending(msg.clientConfirmedSeq)
+                                    }
                                     send(msg.frame)
                                     if (msg is OutgoingMessage.Heartbeat) {
                                         val sendMark =

@@ -254,11 +254,21 @@ class KtorEventsRemoteDataSource(
                     totalBytes += read
                 }
 
+                val handle =
+                    "export-handle-$exportId-${kotlin.time.TimeSource.Monotonic.markNow().elapsedNow().inWholeNanoseconds}"
+                ExportPayloadRegistry.register(
+                    handle = handle,
+                    payload =
+                        ExportPayload(
+                            bytes = accumulator.toByteArray(),
+                            contentType = contentType,
+                        ),
+                )
+
                 EventsExportDownload(
-                    exportId = exportId,
-                    filename = filename,
-                    bytes = accumulator.toByteArray(),
-                    contentType = contentType,
+                    fileName = filename,
+                    contentLength = totalBytes,
+                    downloadHandle = handle,
                 )
             } catch (e: CancellationException) {
                 channel.cancel(e)

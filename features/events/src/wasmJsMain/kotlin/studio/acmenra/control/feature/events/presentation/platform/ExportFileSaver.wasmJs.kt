@@ -4,13 +4,14 @@ import io.ktor.util.toJsArray
 import kotlinx.coroutines.CancellationException
 import org.koin.core.module.Module
 import org.koin.dsl.module
+import studio.acmenra.control.feature.events.data.datasource.ExportPayloadRegistry
 import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
 
 /**
  * WasmJS implementation of [ExportFileSaver].
  *
  * Memory model and lifecycle:
- * - The payload is downloaded into memory as a [ByteArray], strictly capped by `MAX_EXPORT_DOWNLOAD_BYTES` (100 MiB).
+ * - The payload is referenced via the opaque [downloadHandle] from [ExportPayloadRegistry].
  * - Direct transformation to [io.ktor.util.toJsArray] produces a JS `Int8Array` without intermediate Base64 encoding.
  * - In the browser JavaScript heap, a `Blob` wraps the `Int8Array`.
  * - Peak transient allocation is approximately 2-3x payload size (Kotlin ByteArray + JS TypedArray + Blob)
@@ -54,10 +55,11 @@ private external fun triggerBrowserDownload(
 class WasmExportFileSaver : ExportFileSaver {
     override suspend fun saveExportFile(download: EventsExportDownload): Boolean =
         try {
-            val jsArray = download.bytes.toJsArray()
+            val payload = ExportPayloadRegistry.consume(download.downloadHandle) ?: return false
+            val jsArray = payload.bytes.toJsArray()
             triggerBrowserDownload(
-                filename = download.filename,
-                contentType = download.contentType.ifBlank { "text/csv" },
+                filename = download.fileName,
+                contentType = payload.contentType.ifBlank { "text/csv" },
                 int8Array = jsArray,
             )
         } catch (e: CancellationException) {

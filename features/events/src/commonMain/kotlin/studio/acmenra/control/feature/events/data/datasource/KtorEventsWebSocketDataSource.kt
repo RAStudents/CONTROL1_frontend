@@ -275,7 +275,45 @@ class KtorEventsWebSocketDataSource(
     private var currentSession: ConnectionSession? = null
 
     private val activeConnectionId = kotlin.concurrent.atomics.AtomicLong(0L)
-    private val activationGates = mutableMapOf<Long, CompletableDeferred<Unit>>()
+    private val activationGates =
+        kotlin.concurrent.atomics.AtomicReference<Map<Long, CompletableDeferred<Unit>>>(emptyMap())
+
+    private fun registerActivationGate(
+        connectionId: Long,
+        gate: CompletableDeferred<Unit>,
+    ) {
+        while (true) {
+            val current = activationGates.load()
+            val next = current + (connectionId to gate)
+            if (activationGates.compareAndSet(current, next)) break
+        }
+    }
+
+    private fun removeActivationGate(connectionId: Long): CompletableDeferred<Unit>? {
+        while (true) {
+            val current = activationGates.load()
+            val gate = current[connectionId] ?: return null
+            val next = current - connectionId
+            if (activationGates.compareAndSet(current, next)) return gate
+        }
+    }
+
+    private fun clearAllActivationGates(exception: CancellationException? = null) {
+        while (true) {
+            val current = activationGates.load()
+            if (current.isEmpty()) break
+            if (activationGates.compareAndSet(current, emptyMap())) {
+                current.values.forEach { gate ->
+                    if (!gate.isCompleted) {
+                        gate.cancel(exception ?: CancellationException("All connections disconnected"))
+                    }
+                }
+                break
+            }
+        }
+    }
+
+    internal fun getActivationGatesCountForTest(): Int = activationGates.load().size
 
     internal fun emitRawFrameForTest(
         connectionId: Long,
@@ -293,7 +331,8 @@ class KtorEventsWebSocketDataSource(
     }
 
     override fun activateConnection(connectionId: Long) {
-        activationGates.remove(connectionId)?.complete(Unit)
+        val gate = removeActivationGate(connectionId)
+        gate?.complete(Unit)
         val session = currentSession
         if (session != null && session.id == connectionId) {
             session.activationGate.complete(Unit)
@@ -314,11 +353,14 @@ class KtorEventsWebSocketDataSource(
         val gate = activationGate ?: CompletableDeferred<Unit>().apply { complete(Unit) }
 
         val connectionId = activeConnectionId.addAndFetch(1L)
-        activationGates[connectionId] = gate
+        registerActivationGate(connectionId, gate)
 
         scope.launch {
             connectionMutex.withLock {
                 if (connectionId != activeConnectionId.load()) {
+                    removeActivationGate(connectionId)?.cancel(
+                        CancellationException("Stale connection ID $connectionId"),
+                    )
                     outChan.close()
                     return@launch
                 }
@@ -329,6 +371,9 @@ class KtorEventsWebSocketDataSource(
                     oldSession.outgoing.close()
                 }
                 if (connectionId != activeConnectionId.load()) {
+                    removeActivationGate(connectionId)?.cancel(
+                        CancellationException("Stale connection ID $connectionId"),
+                    )
                     outChan.close()
                     return@launch
                 }
@@ -627,6 +672,11 @@ class KtorEventsWebSocketDataSource(
                 disconnectReason = WsCloseReason.NETWORK_ERROR
                 disconnectMessage = e.message ?: "Socket error"
             } finally {
+                removeActivationGate(connectionId)?.let { g ->
+                    if (!g.isCompleted) {
+                        g.cancel(CancellationException("Connection finished: $disconnectReason"))
+                    }
+                }
                 localHeartbeatJob?.cancel()
                 localOutgoingJob?.cancel()
                 outChan.close()
@@ -680,6 +730,11 @@ class KtorEventsWebSocketDataSource(
                     sessionToDisconnect.job.join()
                 }
                 sessionToDisconnect.outgoing.close()
+            }
+            if (connectionId != null) {
+                removeActivationGate(connectionId)?.cancel(CancellationException("Explicit disconnect"))
+            } else {
+                clearAllActivationGates(CancellationException("Explicit disconnect all"))
             }
             drainFramesChannel()
         }

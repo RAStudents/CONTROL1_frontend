@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import studio.acmenra.control.feature.events.data.datasource.IncomingWsEnvelope
 import studio.acmenra.control.feature.events.data.datasource.IncomingWsFrame
 import studio.acmenra.control.feature.events.data.mapper.EventsDtoMapper
@@ -138,6 +139,7 @@ private data class BufferedCommit(
     val receivedAt: TimeMark,
 )
 
+@OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
 class EventsSessionProcessor(
     private val query: EventsQuery,
     initialAccess: EventsAccessCapabilities,
@@ -164,6 +166,8 @@ class EventsSessionProcessor(
     val state: StateFlow<EventsFeedState> = _state.asStateFlow()
 
     private val commandChannel = Channel<SessionCommand>(capacity = 512)
+    private val priorityCommandChannel = Channel<SessionCommand>(capacity = 16)
+    private val isClosed = kotlin.concurrent.atomics.AtomicBoolean(false)
     private val sequenceProcessor = TenantSequenceProcessor()
     private val snapshotItems = mutableListOf<Event>()
     private var currentOverlay = RealtimeOverlay()
@@ -219,8 +223,18 @@ class EventsSessionProcessor(
     init {
         scope.launch {
             try {
-                for (command in commandChannel) {
-                    if (!isActive) break
+                while (isActive) {
+                    val priorityCmd = priorityCommandChannel.tryReceive().getOrNull()
+                    val command =
+                        if (priorityCmd != null) {
+                            priorityCmd
+                        } else {
+                            select<SessionCommand?> {
+                                priorityCommandChannel.onReceiveCatching { it.getOrNull() }
+                                commandChannel.onReceiveCatching { it.getOrNull() }
+                            }
+                        }
+                    if (command == null || command is SessionCommand.Close) break
                     try {
                         processCommand(command)
                     } catch (e: kotlinx.coroutines.CancellationException) {
@@ -236,44 +250,143 @@ class EventsSessionProcessor(
                             is SessionCommand.NextReplayGeneration -> command.response.completeExceptionally(e)
                             else -> Unit
                         }
-                        if (command is SessionCommand.Close) break
                         // Prevent uncaught exceptions from killing the command processing loop
                         isRebootstrapping = true
                         rebootstrapBuffer.clear()
                         onTriggerRebootstrap()
                     }
-                    if (command is SessionCommand.Close) break
                 }
             } finally {
+                // Actor-owned collections are cleared exclusively inside the actor loop to guarantee thread safety
                 commandChannel.close()
-                while (true) {
-                    val remaining = commandChannel.tryReceive().getOrNull() ?: break
-                    when (remaining) {
-                        is SessionCommand.InstallBootstrap ->
-                            remaining.response.complete(BootstrapApplyResult.Stale)
-                        is SessionCommand.NextReplayGeneration ->
-                            remaining.response.completeExceptionally(
-                                kotlinx.coroutines.CancellationException("Processor closed"),
-                            )
-                        else -> Unit
-                    }
-                }
+                priorityCommandChannel.close()
+                earlyFramesBuffer.clear()
+                rebootstrapBuffer.clear()
+                snapshotItems.clear()
+
+                drainPendingCommands(priorityCommandChannel)
+                drainPendingCommands(commandChannel)
+            }
+        }
+    }
+
+    private fun drainPendingCommands(channel: Channel<SessionCommand>) {
+        while (true) {
+            val remaining = channel.tryReceive().getOrNull() ?: break
+            when (remaining) {
+                is SessionCommand.InstallBootstrap ->
+                    remaining.response.complete(BootstrapApplyResult.Stale)
+                is SessionCommand.NextReplayGeneration ->
+                    remaining.response.completeExceptionally(
+                        kotlinx.coroutines.CancellationException("Processor closed"),
+                    )
+                else -> Unit
             }
         }
     }
 
     fun dispatch(command: SessionCommand) {
+        if (isClosed.load()) {
+            when (command) {
+                is SessionCommand.InstallBootstrap ->
+                    command.response.complete(BootstrapApplyResult.Stale)
+                is SessionCommand.NextReplayGeneration ->
+                    command.response.completeExceptionally(
+                        kotlinx.coroutines.CancellationException("Processor closed"),
+                    )
+                else -> Unit
+            }
+            return
+        }
+
+        if (command is SessionCommand.WsFrameReceived) {
+            val (connId, frame) = command.envelope
+            when (frame) {
+                is IncomingWsFrame.AccessInvalidated -> {
+                    // Fail-Closed: Immediately engage deny latch synchronously before queueing
+                    setImmediateEventsReadDenied(denied = true, generation = Long.MAX_VALUE)
+                    isAccessInvalidated = true
+                    val wasRead = _state.value.access.eventsRead
+                    _state.update {
+                        it.copy(
+                            access = it.access.copy(eventsRead = false),
+                            connectionState = RealtimeConnectionState.FAILED,
+                            visibleEvents = emptyList(),
+                            realtimeOverlay = RealtimeOverlay(),
+                            summary = null,
+                            snapshotTotalCount = 0,
+                            asOfSequence = 0L,
+                            pendingNewerCount = 0,
+                            pendingHistoryCount = 0,
+                        )
+                    }
+                    if (wasRead) {
+                        onEventsReadRevoked()
+                    }
+
+                    val prioritySent = priorityCommandChannel.trySend(command)
+                    if (prioritySent.isFailure) {
+                        // Actor saturated or not processing: invoke terminal callback synchronously
+                        onAccessInvalidated(frame.frame.reason ?: "UNKNOWN", frame.frame.companyId)
+                    }
+                    return
+                }
+                is IncomingWsFrame.AuthRequired -> {
+                    val prioritySent = priorityCommandChannel.trySend(command)
+                    if (prioritySent.isFailure) {
+                        when (frame.frame.reason) {
+                            "TOKEN_EXPIRED" -> onTokenRefreshNeeded()
+                            "SESSION_REVOKED" -> onSessionRevoked()
+                            else -> _state.update { it.copy(connectionState = RealtimeConnectionState.FAILED) }
+                        }
+                    }
+                    return
+                }
+                else -> {
+                    val result = commandChannel.trySend(command)
+                    if (result.isFailure) {
+                        // Ordinary commit queue overflow -> controlled rebootstrap without sequence advance
+                        isRebootstrapping = true
+                        bufferReplayId = sequenceProcessor.currentReplayId
+                        onTriggerRebootstrap()
+                    }
+                    return
+                }
+            }
+        }
+
+        if (command is SessionCommand.Close) {
+            if (!priorityCommandChannel.trySend(command).isSuccess) {
+                commandChannel.trySend(command)
+            }
+            return
+        }
+
         val result = commandChannel.trySend(command)
         if (result.isFailure) {
-            if (command is SessionCommand.WsFrameReceived) {
-                onTriggerRebootstrap()
+            when (command) {
+                is SessionCommand.InstallBootstrap ->
+                    command.response.complete(BootstrapApplyResult.Stale)
+                is SessionCommand.NextReplayGeneration ->
+                    command.response.completeExceptionally(
+                        kotlinx.coroutines.CancellationException("Processor command queue full"),
+                    )
+                is SessionCommand.AccessUpdated -> {
+                    if (!command.access.eventsRead) {
+                        setImmediateEventsReadDenied(denied = true, generation = command.generation)
+                    }
+                }
+                else -> Unit
             }
         }
     }
 
     fun close() {
+        if (!isClosed.compareAndSet(false, true)) return
+        priorityCommandChannel.trySend(SessionCommand.Close)
         commandChannel.close()
-        earlyFramesBuffer.clear()
+        priorityCommandChannel.close()
+        // Actor-owned collections are cleared in the actor's finally block to avoid thread-safety races
     }
 
     fun applyEventMutationResult(event: Event) {
@@ -289,6 +402,10 @@ class EventsSessionProcessor(
 
     suspend fun requestNextReplayGeneration(): ReplayGenerationResult {
         val deferred = CompletableDeferred<ReplayGenerationResult>()
+        if (isClosed.load()) {
+            deferred.completeExceptionally(kotlinx.coroutines.CancellationException("Processor closed"))
+            return deferred.await()
+        }
         try {
             commandChannel.send(SessionCommand.NextReplayGeneration(deferred))
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -313,6 +430,9 @@ class EventsSessionProcessor(
         generation: Long,
     ): BootstrapApplyResult {
         val deferred = CompletableDeferred<BootstrapApplyResult>()
+        if (isClosed.load()) {
+            return BootstrapApplyResult.Stale
+        }
         try {
             commandChannel.send(SessionCommand.InstallBootstrap(bootstrap, generation, deferred))
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -325,6 +445,12 @@ class EventsSessionProcessor(
 
     private suspend fun processCommand(command: SessionCommand) {
         if (isAccessInvalidated && command !is SessionCommand.Close) {
+            if (command is SessionCommand.WsFrameReceived &&
+                command.envelope.frame is IncomingWsFrame.AccessInvalidated
+            ) {
+                handleWsFrame(command.envelope.frame)
+                return
+            }
             // Terminal state: ignore all frames and updates
             when (command) {
                 is SessionCommand.InstallBootstrap ->
@@ -566,6 +692,7 @@ class EventsSessionProcessor(
             }
             is SessionCommand.Close -> {
                 commandChannel.close()
+                priorityCommandChannel.close()
             }
         }
     }
@@ -961,9 +1088,48 @@ class EventsSessionProcessor(
     }
 
     private suspend fun handleWsFrame(frame: IncomingWsFrame) {
+        if (frame is IncomingWsFrame.AccessInvalidated) {
+            isAccessInvalidated = true
+            isRebootstrapping = false
+            bufferReplayId = null
+            snapshotItems.clear()
+            rebootstrapBuffer.clear()
+            currentOverlay = RealtimeOverlay()
+            onAccessInvalidated(frame.frame.reason ?: "UNKNOWN", frame.frame.companyId)
+            _state.update {
+                it.copy(
+                    access = it.access.copy(eventsRead = false),
+                    connectionState = RealtimeConnectionState.FAILED,
+                    visibleEvents = emptyList(),
+                    realtimeOverlay = RealtimeOverlay(),
+                    summary = null,
+                    snapshotTotalCount = 0,
+                    hasMore = false,
+                    asOfSequence = 0L,
+                    pendingNewerCount = 0,
+                    pendingHistoryCount = 0,
+                )
+            }
+            return
+        }
+
+        if (frame is IncomingWsFrame.AuthRequired) {
+            when (frame.frame.reason) {
+                "TOKEN_EXPIRED" -> onTokenRefreshNeeded()
+                "SESSION_REVOKED" -> onSessionRevoked()
+                else -> {
+                    _state.update { it.copy(connectionState = RealtimeConnectionState.FAILED) }
+                }
+            }
+            return
+        }
+
         if (isAccessInvalidated || !_state.value.access.eventsRead || accessFence.value.denied) return
 
         when (frame) {
+            is IncomingWsFrame.AccessInvalidated,
+            is IncomingWsFrame.AuthRequired,
+            -> Unit
             is IncomingWsFrame.MalformedCommit -> {
                 if (frame.replayId != null && frame.replayId <= maxClosedReplayGeneration) {
                     return
@@ -1091,37 +1257,6 @@ class EventsSessionProcessor(
                     frame.frame.replayId <= maxClosedReplayGeneration
                 ) {
                     return
-                }
-            }
-            is IncomingWsFrame.AuthRequired -> {
-                when (frame.frame.reason) {
-                    "TOKEN_EXPIRED" -> onTokenRefreshNeeded()
-                    "SESSION_REVOKED" -> onSessionRevoked()
-                    else -> {
-                        _state.update { it.copy(connectionState = RealtimeConnectionState.FAILED) }
-                    }
-                }
-            }
-            is IncomingWsFrame.AccessInvalidated -> {
-                isAccessInvalidated = true
-                isRebootstrapping = false
-                bufferReplayId = null
-                snapshotItems.clear()
-                rebootstrapBuffer.clear()
-                currentOverlay = RealtimeOverlay()
-                onAccessInvalidated(frame.frame.reason ?: "UNKNOWN", frame.frame.companyId)
-                _state.update {
-                    it.copy(
-                        connectionState = RealtimeConnectionState.FAILED,
-                        visibleEvents = emptyList(),
-                        realtimeOverlay = RealtimeOverlay(),
-                        summary = null,
-                        snapshotTotalCount = 0,
-                        hasMore = false,
-                        asOfSequence = 0L,
-                        pendingNewerCount = 0,
-                        pendingHistoryCount = 0,
-                    )
                 }
             }
         }

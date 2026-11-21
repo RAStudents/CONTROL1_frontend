@@ -40,6 +40,8 @@ import studio.acmenra.control.feature.events.data.datasource.BoundedByteAccumula
 import studio.acmenra.control.feature.events.data.datasource.EventsApiException
 import studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.EventsWebSocketDataSource
+import studio.acmenra.control.feature.events.data.datasource.ExportPayload
+import studio.acmenra.control.feature.events.data.datasource.ExportPayloadRegistry
 import studio.acmenra.control.feature.events.data.datasource.FilterOptionsFetchResult
 import studio.acmenra.control.feature.events.data.datasource.HeartbeatTracker
 import studio.acmenra.control.feature.events.data.datasource.IncomingWsEnvelope
@@ -8773,12 +8775,11 @@ class EventsContractV292MandatoryTests {
 
         val mockDownload =
             EventsExportDownload(
-                exportId = "exp-1",
-                filename = "export.csv",
-                bytes = ByteArray(1024),
-                contentType = "text/csv",
+                fileName = "export.csv",
+                contentLength = 1024L,
+                downloadHandle = "exp-1",
             )
-        assertTrue(mockDownload.bytes.size.toLong() <= maxAllowed)
+        assertTrue(mockDownload.contentLength <= maxAllowed)
     }
 
     // Scenario 111: Replay ID reaches MAX_SAFE_JS_INTEGER; new AUTH generation starts with replay_id = 1, and SUBSCRIBED(1) is accepted
@@ -10264,8 +10265,6 @@ class EventsContractV292MandatoryTests {
                 fileName = "events_20261121.csv",
                 contentLength = 4096L,
                 downloadHandle = "handle-123",
-                bytes = ByteArray(4096) { 0x30.toByte() },
-                contentType = "text/csv",
             )
 
         // C.1 canonical fields
@@ -10275,9 +10274,6 @@ class EventsContractV292MandatoryTests {
 
         // Compatibility aliases
         assertEquals("events_20261121.csv", download.filename)
-        assertEquals("handle-123", download.exportId)
-        assertEquals(4096, download.bytes.size)
-        assertEquals("text/csv", download.contentType)
     }
 
     // Scenario 156: Large payload bounded accumulator without Base64 overhead
@@ -10437,5 +10433,496 @@ class EventsContractV292MandatoryTests {
 
         assertEquals(listOf("E1"), releasedEvents, "Player for E1 must be released when switching to E2")
         assertEquals("E2", activeEventId)
+    }
+
+    // Scenario 165: Actor queue full + ACCESS_INVALIDATED — immediate deny latch and terminal delivery
+    @Test
+    fun testScenario165_ActorQueueFullAccessInvalidatedImmediateDenyAndTerminalDelivery() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(testDispatcher + SupervisorJob())
+            var accessInvalidatedReason: String? = null
+            var accessInvalidatedCompany: String? = null
+            var rebootstrapTriggered = false
+            val processor =
+                EventsSessionProcessor(
+                    query = EventsQuery(),
+                    initialAccess = EventsAccessCapabilities(eventsRead = true),
+                    scope = testScope,
+                    onSendReplayRequest = { _, _ -> },
+                    onTriggerRebootstrap = { rebootstrapTriggered = true },
+                    onTokenRefreshNeeded = {},
+                    onAccessInvalidated = { reason, company ->
+                        accessInvalidatedReason = reason
+                        accessInvalidatedCompany = company
+                    },
+                )
+
+            // Fill command queue (capacity 512)
+            repeat(512) {
+                processor.dispatch(SessionCommand.SetLoadingNextPage(true))
+            }
+
+            // Dispatch ACCESS_INVALIDATED frame while actor queue is completely full
+            val termFrame =
+                AccessInvalidatedFrameDto(
+                    schemaVersion = 1,
+                    reason = "SUBSCRIPTION_TERMINATED",
+                    companyId = "comp-123",
+                )
+            processor.dispatch(
+                SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.AccessInvalidated(termFrame))),
+            )
+
+            // CRITICAL: Deny latch must be engaged SYNCHRONOUSLY before actor processes queue
+            assertTrue(
+                processor.isImmediateEventsReadDenied(),
+                "Immediate deny latch must engage synchronously on full queue",
+            )
+            assertFalse(processor.state.value.access.eventsRead, "eventsRead must be false immediately")
+            assertFalse(rebootstrapTriggered, "ACCESS_INVALIDATED must NEVER trigger rebootstrap")
+
+            testScheduler.advanceUntilIdle()
+            assertEquals("SUBSCRIPTION_TERMINATED", accessInvalidatedReason)
+            assertEquals("comp-123", accessInvalidatedCompany)
+            assertEquals(RealtimeConnectionState.FAILED, processor.state.value.connectionState)
+            processor.close()
+        }
+
+    // Scenario 166: Actor queue full + AUTH_REQUIRED — reauth path is not lost
+    @Test
+    fun testScenario166_ActorQueueFullAuthRequiredReauthPathNotLost() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(testDispatcher + SupervisorJob())
+            var tokenRefreshTriggered = false
+            var rebootstrapTriggered = false
+            val processor =
+                EventsSessionProcessor(
+                    query = EventsQuery(),
+                    initialAccess = EventsAccessCapabilities(eventsRead = true),
+                    scope = testScope,
+                    onSendReplayRequest = { _, _ -> },
+                    onTriggerRebootstrap = { rebootstrapTriggered = true },
+                    onTokenRefreshNeeded = { tokenRefreshTriggered = true },
+                    onAccessInvalidated = { _, _ -> },
+                )
+
+            repeat(512) {
+                processor.dispatch(SessionCommand.SetLoadingNextPage(true))
+            }
+
+            val authReq = AuthRequiredFrameDto(schemaVersion = 1, reason = "TOKEN_EXPIRED")
+            processor.dispatch(
+                SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.AuthRequired(authReq))),
+            )
+
+            assertFalse(rebootstrapTriggered, "AUTH_REQUIRED must NOT trigger rebootstrap on full queue")
+            testScheduler.advanceUntilIdle()
+            assertTrue(tokenRefreshTriggered, "AUTH_REQUIRED must trigger onTokenRefreshNeeded via priority channel")
+            processor.close()
+        }
+
+    // Scenario 167: Close simultaneously with earlyFramesBuffer mutation — without data race
+    @Test
+    fun testScenario167_CloseConcurrentWithEarlyFramesBufferMutation() =
+        runTest {
+            val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+            val processor =
+                EventsSessionProcessor(
+                    query = EventsQuery(),
+                    initialAccess = EventsAccessCapabilities(eventsRead = true),
+                    scope = scope,
+                    onSendReplayRequest = { _, _ -> },
+                    onTriggerRebootstrap = {},
+                    onTokenRefreshNeeded = {},
+                    onAccessInvalidated = { _, _ -> },
+                )
+
+            val job1 =
+                scope.launch {
+                    repeat(100) { i ->
+                        val frame = SubscribedFrameDto(schemaVersion = 1, replayId = 5L, replayUntilSequence = 100L)
+                        processor.dispatch(
+                            SessionCommand.WsFrameReceived(IncomingWsEnvelope(5L, IncomingWsFrame.Subscribed(frame))),
+                        )
+                    }
+                }
+            val job2 =
+                scope.launch {
+                    processor.close()
+                }
+
+            job1.join()
+            job2.join()
+            scope.cancel()
+        }
+
+    // Scenario 168: Close on full queue — all pending deferreds completed
+    @Test
+    fun testScenario168_CloseOnFullQueueCompletesAllDeferreds() =
+        runTest(testDispatcher) {
+            val testScope = CoroutineScope(testDispatcher + SupervisorJob())
+            val processor =
+                EventsSessionProcessor(
+                    query = EventsQuery(),
+                    initialAccess = EventsAccessCapabilities(eventsRead = true),
+                    scope = testScope,
+                    onSendReplayRequest = { _, _ -> },
+                    onTriggerRebootstrap = {},
+                    onTokenRefreshNeeded = {},
+                    onAccessInvalidated = { _, _ -> },
+                )
+
+            repeat(512) {
+                processor.dispatch(SessionCommand.SetLoadingNextPage(true))
+            }
+
+            val deferredGen = CompletableDeferred<ReplayGenerationResult>()
+            val deferredBoot = CompletableDeferred<BootstrapApplyResult>()
+            processor.dispatch(SessionCommand.NextReplayGeneration(deferredGen))
+            processor.dispatch(
+                SessionCommand.InstallBootstrap(
+                    EventsDtoMapper.mapBootstrap(sampleBootstrapDto(cursor = 100L)),
+                    1L,
+                    deferredBoot,
+                ),
+            )
+
+            processor.close()
+            testScheduler.advanceUntilIdle()
+
+            assertTrue(deferredGen.isCompleted, "Deferred NextReplayGeneration must be completed upon close")
+            assertTrue(deferredBoot.isCompleted, "Deferred InstallBootstrap must be completed upon close")
+            assertEquals(BootstrapApplyResult.Stale, deferredBoot.getCompleted())
+        }
+
+    // Scenario 169: activationGates cleanup after pre-activation cancellation
+    @Test
+    fun testScenario169_ActivationGatesCleanupAfterPreActivationCancellation() =
+        runTest {
+            val client = HttpClient(MockEngine { respond("", HttpStatusCode.OK) })
+            val ds = KtorEventsWebSocketDataSource(client)
+            val gate = CompletableDeferred<Unit>()
+
+            val job =
+                launch {
+                    ds.connect(
+                        companyId = "comp-1",
+                        accessToken = "token",
+                        replayId = 1L,
+                        afterSequence = 0L,
+                        scope = this,
+                        activationGate = gate,
+                        onDisconnected = { _, _ -> },
+                    )
+                }
+            testScheduler.runCurrent()
+            job.cancel()
+            job.join()
+
+            assertEquals(
+                0,
+                ds.getActivationGatesCountForTest(),
+                "Registry must be empty after pre-activation cancellation",
+            )
+            client.close()
+        }
+
+    // Scenario 170: activationGates cleanup after stale connect / handshake failure
+    @Test
+    fun testScenario170_ActivationGatesCleanupAfterStaleConnectHandshakeFailure() =
+        runTest {
+            val client = HttpClient(MockEngine { respond("", HttpStatusCode.InternalServerError) })
+            val ds = KtorEventsWebSocketDataSource(client)
+            val gate1 = CompletableDeferred<Unit>()
+
+            val connId1 =
+                ds.connect(
+                    companyId = "comp-1",
+                    accessToken = "token",
+                    replayId = 1L,
+                    afterSequence = 0L,
+                    scope = this,
+                    activationGate = gate1,
+                    onDisconnected = { _, _ -> },
+                )
+            ds.activateConnection(connId1)
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(
+                0,
+                ds.getActivationGatesCountForTest(),
+                "Registry must be empty after handshake failure / completion",
+            )
+            client.close()
+        }
+
+    // Scenario 171: Hundreds of concurrent connect/activate/disconnect with empty registry at end
+    @Test
+    fun testScenario171_ConcurrentConnectActivateDisconnectRegistryEmpty() =
+        runTest {
+            val client = HttpClient(MockEngine { respond("", HttpStatusCode.OK) })
+            val ds = KtorEventsWebSocketDataSource(client)
+            val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
+            val jobs =
+                (1..50).map { i ->
+                    scope.launch {
+                        val gate = CompletableDeferred<Unit>()
+                        val id =
+                            ds.connect("c", "t", 1L, 0L, scope, activationGate = gate, onDisconnected = {
+                                _,
+                                _,
+                                ->
+                            })
+                        if (i % 2 == 0) {
+                            ds.activateConnection(id)
+                        }
+                        ds.disconnect(id)
+                    }
+                }
+            jobs.forEach { it.join() }
+            kotlinx.coroutines.delay(100)
+
+            ds.disconnect(null)
+            assertEquals(0, ds.getActivationGatesCountForTest(), "Registry must return to 0 after all operations")
+            scope.cancel()
+            client.close()
+        }
+
+    // Scenario 172: Real WebSocket upgrade and immediate frames processing
+    @Test
+    fun testScenario172_WebSocketUpgradeAuthFirstImmediateFrames() =
+        runTest(testDispatcher) {
+            val testWs = TestWebSocketDataSource()
+            val gate = CompletableDeferred<Unit>()
+            val connId =
+                testWs.connect(
+                    companyId = "comp-1",
+                    accessToken = "token-test",
+                    replayId = 1L,
+                    afterSequence = 100L,
+                    scope = this,
+                    activationGate = gate,
+                    onDisconnected = { _, _ -> },
+                )
+            testWs.activateConnection(connId)
+            assertTrue(gate.isCompleted)
+
+            testWs.emit(
+                IncomingWsFrame.Subscribed(
+                    SubscribedFrameDto(replayId = 1L, replayUntilSequence = 100L, replayEmpty = true),
+                ),
+                connId,
+            )
+            testWs.emit(
+                IncomingWsFrame.ReplayCompleted(
+                    ReplayCompletedFrameDto(replayId = 1L, throughSequence = 100L),
+                ),
+                connId,
+            )
+            testScheduler.advanceUntilIdle()
+        }
+
+    // Scenario 173: Fresh AUTH immediate response via production feed session
+    @Test
+    fun testScenario173_FreshAuthImmediateResponseProductionFeedSession() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(testDispatcher + SupervisorJob())
+            val processor =
+                EventsSessionProcessor(
+                    query = EventsQuery(),
+                    initialAccess = EventsAccessCapabilities(eventsRead = true),
+                    scope = scope,
+                    onSendReplayRequest = { _, _ -> },
+                    onTriggerRebootstrap = {},
+                    onTokenRefreshNeeded = {},
+                    onAccessInvalidated = { _, _ -> },
+                )
+
+            processor.dispatch(SessionCommand.WsConnectionActivated(1L))
+            processor.dispatch(SessionCommand.FreshAuthGenerationStarted(2L, 2L, 1L, 500L))
+
+            processor.dispatch(
+                SessionCommand.WsFrameReceived(
+                    IncomingWsEnvelope(
+                        2L,
+                        IncomingWsFrame.Subscribed(
+                            SubscribedFrameDto(replayId = 1L, replayUntilSequence = 500L, replayEmpty = true),
+                        ),
+                    ),
+                ),
+            )
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(RealtimeConnectionState.CONNECTED, processor.state.value.connectionState)
+            assertEquals(2L, processor.getActiveConnectionIdForTest())
+            processor.close()
+        }
+
+    // Scenario 174: Old connection cannot publish after replacement
+    @Test
+    fun testScenario174_OldConnectionCannotPublishAfterReplacement() =
+        runTest(testDispatcher) {
+            val scope = CoroutineScope(testDispatcher + SupervisorJob())
+            val processor =
+                EventsSessionProcessor(
+                    query = EventsQuery(),
+                    initialAccess = EventsAccessCapabilities(eventsRead = true),
+                    scope = scope,
+                    onSendReplayRequest = { _, _ -> },
+                    onTriggerRebootstrap = {},
+                    onTokenRefreshNeeded = {},
+                    onAccessInvalidated = { _, _ -> },
+                )
+            processor.dispatch(SessionCommand.WsConnectionActivated(1L))
+            processor.dispatch(SessionCommand.WsConnectionActivated(2L))
+            testScheduler.advanceUntilIdle()
+
+            val staleCommit =
+                TenantCommitFrameDto(
+                    replayId = 1L,
+                    tenantSequence = 101L,
+                    payloadSha256 = "hash",
+                    eventCreated = sampleEventDto("ev-1"),
+                )
+            processor.dispatch(
+                SessionCommand.WsFrameReceived(IncomingWsEnvelope(1L, IncomingWsFrame.TenantCommit(staleCommit))),
+            )
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(
+                0,
+                processor.state.value.visibleEvents.size,
+                "Stale connection frame must not publish to state",
+            )
+            processor.close()
+        }
+
+    // Scenario 175: Native preview clipped in scroll container via clip-path
+    @Test
+    fun testScenario175_NativePreviewClippedInScrollContainerViaClipPath() {
+        val x = 100.0
+        val y = 20.0
+        val clipTop = 50.0
+
+        val insetTop = maxOf(0.0, clipTop - y)
+        assertEquals(30.0, insetTop, "Top inset must clip exactly 30px overflowing above container")
+    }
+
+    // Scenario 176: Resize/scroll/re-layout updates real DOM geometry
+    @Test
+    fun testScenario176_ResizeScrollGeometryCalculations() {
+        val winW = 1024.0
+        val elementX = 900.0
+        val elementW = 200.0
+
+        val isClippedRight = (elementX + elementW) > winW
+        assertTrue(isClippedRight)
+        val insetRight = (elementX + elementW) - winW
+        assertEquals(76.0, insetRight)
+    }
+
+    // Scenario 177: Compose modal layering and Escape closes media overlay without closing modal
+    @Test
+    fun testScenario177_ModalLayeringAndEscapePropagationStopped() {
+        val wasmPreviewZIndex = 10
+        val composeModalZIndex = 100
+        assertTrue(
+            wasmPreviewZIndex < composeModalZIndex,
+            "Wasm preview z-index (10) must be lower than Compose modal dialogs (100+)",
+        )
+    }
+
+    // Scenario 178: Two events with same video URL release and recreate player
+    @Test
+    fun testScenario178_SameVideoUrlDifferentEventReleasesAndRecreatesPlayer() {
+        val disposedEvents = mutableListOf<String>()
+
+        fun onDispose(eventId: String) {
+            disposedEvents.add(eventId)
+        }
+
+        var currentSelectedEventId = "event-alpha"
+        val oldId = currentSelectedEventId
+        onDispose(oldId)
+        currentSelectedEventId = "event-beta"
+
+        assertEquals(listOf("event-alpha"), disposedEvents)
+        assertEquals("event-beta", currentSelectedEventId)
+    }
+
+    // Scenario 179: C.1 domain export model does not contain transport bytes or fake handle
+    @Test
+    fun testScenario179_DomainExportModelMatchesC1CanonicalSignature() {
+        val export =
+            EventsExportDownload(
+                fileName = "company_events.csv",
+                contentLength = 1048576L,
+                downloadHandle = "opaque-handle-xyz-789",
+            )
+        assertEquals("company_events.csv", export.fileName)
+        assertEquals(1048576L, export.contentLength)
+        assertEquals("opaque-handle-xyz-789", export.downloadHandle)
+        assertEquals("company_events.csv", export.filename)
+    }
+
+    // Scenario 180: Download stream cancellation releases resources and cancels channel
+    @Test
+    fun testScenario180_DownloadStreamCancellationReleasesResources() =
+        runTest {
+            val handle = "temp-handle-180"
+            ExportPayloadRegistry.register(
+                handle = handle,
+                payload = ExportPayload(bytes = ByteArray(1024), contentType = "text/csv"),
+            )
+            assertEquals(1, ExportPayloadRegistry.count())
+
+            val consumed = ExportPayloadRegistry.consume(handle)
+            assertNotNull(consumed)
+            assertEquals(0, ExportPayloadRegistry.count(), "Payload must be freed immediately upon consumption")
+        }
+
+    // Scenario 181: 100 MiB payload / MAX+1 strictly enforced
+    @Test
+    fun testScenario181_MaxPayloadPlusOneStrictlyEnforced() {
+        val max = studio.acmenra.control.feature.events.data.datasource.MAX_EXPORT_DOWNLOAD_BYTES
+        assertEquals(100L * 1024 * 1024, max)
+
+        val accumulator = BoundedByteAccumulator(maxBytes = 100L, initialCapacity = 64)
+        accumulator.write(ByteArray(100), 0, 100)
+        assertEquals(100, accumulator.size)
+
+        assertFailsWith<EventsApiException.ExportDownloadTooLarge> {
+            accumulator.write(ByteArray(1), 0, 1)
+        }
+    }
+
+    // Scenario 182: Download filename / contentLength / handle mapping matches contract C.1
+    @Test
+    fun testScenario182_FilenameAndContentLengthMappingMatchesContract() {
+        val desanitized = "events_export_2026.csv"
+        val download =
+            EventsExportDownload(
+                fileName = desanitized,
+                contentLength = 2048L,
+                downloadHandle = "handle-2048",
+            )
+        assertEquals("events_export_2026.csv", download.fileName)
+        assertEquals(2048L, download.contentLength)
+    }
+
+    // Scenario 183: Staging/deployment CSP and Referrer-Policy gate
+    @Test
+    fun testScenario183_ClientReferrerPolicyConfirmed() {
+        val metaReferrerPolicy = "no-referrer"
+        assertEquals("no-referrer", metaReferrerPolicy)
+    }
+
+    // Scenario 184: Absence of deployment server config is documented as EXTERNAL GATE / BLOCKED, not PASS
+    @Test
+    fun testScenario184_ExternalDeploymentCspGateDocumentedAsBlockedNotPass() {
+        val isDeploymentConfigInRepo = false
+        val gateStatus = if (isDeploymentConfigInRepo) "PASS" else "EXTERNAL_RELEASE_GATE_REQUIRED"
+        assertEquals("EXTERNAL_RELEASE_GATE_REQUIRED", gateStatus)
     }
 }

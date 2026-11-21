@@ -202,10 +202,9 @@ class EventsViewModelTest {
                     exportId: String,
                 ): EventsExportDownload =
                     EventsExportDownload(
-                        exportId = exportId,
-                        filename = "export.csv",
-                        bytes = byteArrayOf(1, 2, 3),
-                        contentType = "text/csv",
+                        fileName = "export.csv",
+                        contentLength = 3L,
+                        downloadHandle = "handle-$exportId",
                     )
             }
 

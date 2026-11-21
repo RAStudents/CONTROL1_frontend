@@ -268,27 +268,25 @@ class EventsDomainTest {
     fun testEventsExportDownloadEqualsAndHashCode() {
         val d1 =
             EventsExportDownload(
-                exportId = "exp-1",
-                filename = "report.csv",
-                bytes = byteArrayOf(1, 2, 3),
-                contentType = "text/csv",
+                fileName = "report.csv",
+                contentLength = 1024L,
+                downloadHandle = "handle-1",
             )
         val d2 =
             EventsExportDownload(
-                exportId = "exp-1",
-                filename = "report.csv",
-                bytes = byteArrayOf(1, 2, 3),
-                contentType = "text/csv",
+                fileName = "report.csv",
+                contentLength = 1024L,
+                downloadHandle = "handle-1",
             )
         val d3 =
             EventsExportDownload(
-                exportId = "exp-1",
-                filename = "report.csv",
-                bytes = byteArrayOf(1, 2, 4),
-                contentType = "text/csv",
+                fileName = "report.csv",
+                contentLength = 2048L,
+                downloadHandle = "handle-1",
             )
         assertEquals(d1, d2)
         assertEquals(d1.hashCode(), d2.hashCode())
         assertFalse(d1 == d3)
+        assertEquals("report.csv", d1.filename)
     }
 }

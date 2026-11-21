@@ -11,6 +11,7 @@ import kotlinx.coroutines.withContext
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.module.Module
 import org.koin.dsl.module
+import studio.acmenra.control.feature.events.data.datasource.ExportPayloadRegistry
 import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
 import java.io.File
 import java.io.FileOutputStream
@@ -20,13 +21,14 @@ class AndroidExportFileSaver(
 ) : ExportFileSaver {
     override suspend fun saveExportFile(download: EventsExportDownload): Boolean =
         withContext(Dispatchers.IO) {
-            val safeFilename = sanitizeFilename(download.filename)
+            val payload = ExportPayloadRegistry.consume(download.downloadHandle) ?: return@withContext false
+            val safeFilename = sanitizeFilename(download.fileName)
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     val contentValues =
                         ContentValues().apply {
                             put(MediaStore.MediaColumns.DISPLAY_NAME, safeFilename)
-                            put(MediaStore.MediaColumns.MIME_TYPE, download.contentType.ifBlank { "text/csv" })
+                            put(MediaStore.MediaColumns.MIME_TYPE, payload.contentType.ifBlank { "text/csv" })
                             put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                         }
                     val resolver = context.contentResolver
@@ -40,7 +42,7 @@ class AndroidExportFileSaver(
                             return@withContext false
                         }
                         stream.use { out ->
-                            out.write(download.bytes)
+                            out.write(payload.bytes)
                             out.flush()
                         }
                         true
@@ -59,7 +61,7 @@ class AndroidExportFileSaver(
                     val targetFile = File(downloadsDir, safeFilename)
                     try {
                         FileOutputStream(targetFile).use { out ->
-                            out.write(download.bytes)
+                            out.write(payload.bytes)
                             out.flush()
                         }
                         true

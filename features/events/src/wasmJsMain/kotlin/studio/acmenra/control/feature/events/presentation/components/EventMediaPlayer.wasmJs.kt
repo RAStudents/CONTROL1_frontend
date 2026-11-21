@@ -17,6 +17,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.findRootCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import org.jetbrains.compose.resources.painterResource
@@ -36,6 +37,7 @@ import studio.acmenra.control.core.ui.theme.AmberDimens
     var video = document.createElement('video');
     video.id = id;
     video.src = videoUrl;
+    video.setAttribute('referrerpolicy', 'no-referrer');
     video.referrerPolicy = 'no-referrer';
     video.controls = true;
     video.autoplay = true;
@@ -62,6 +64,8 @@ import studio.acmenra.control.core.ui.theme.AmberDimens
 
     var keyHandler = function(e) {
         if (e.key === 'Escape' || e.keyCode === 27) {
+            e.stopPropagation();
+            e.preventDefault();
             cleanup();
         }
     };
@@ -132,12 +136,22 @@ private external fun ensurePreviewImg(
 
 @OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
 @JsFun(
-    """(imgId, x, y, width, height, isHidden) => {
+    """(imgId, x, y, width, height, clipLeft, clipTop, clipRight, clipBottom, isHidden) => {
     var img = document.getElementById(imgId);
     if (img) {
         var winW = window.innerWidth || (document.documentElement ? document.documentElement.clientWidth : 0) || 0;
         var winH = window.innerHeight || (document.documentElement ? document.documentElement.clientHeight : 0) || 0;
-        if (isHidden || x + width <= 0 || y + height <= 0 || x >= winW || y >= winH || width <= 0 || height <= 0) {
+        var effClipLeft = Math.max(0, clipLeft);
+        var effClipTop = Math.max(0, clipTop);
+        var effClipRight = Math.min(winW, clipRight);
+        var effClipBottom = Math.min(winH, clipBottom);
+
+        var visLeft = Math.max(x, effClipLeft);
+        var visTop = Math.max(y, effClipTop);
+        var visRight = Math.min(x + width, effClipRight);
+        var visBottom = Math.min(y + height, effClipBottom);
+
+        if (isHidden || visRight <= visLeft || visBottom <= visTop || width <= 0 || height <= 0) {
             img.style.display = 'none';
         } else {
             img.style.display = 'block';
@@ -145,6 +159,16 @@ private external fun ensurePreviewImg(
             img.style.top = y + 'px';
             img.style.width = width + 'px';
             img.style.height = height + 'px';
+
+            var insetTop = Math.max(0, effClipTop - y);
+            var insetRight = Math.max(0, (x + width) - effClipRight);
+            var insetBottom = Math.max(0, (y + height) - effClipBottom);
+            var insetLeft = Math.max(0, effClipLeft - x);
+            if (insetTop > 0 || insetRight > 0 || insetBottom > 0 || insetLeft > 0) {
+                img.style.clipPath = 'inset(' + insetTop + 'px ' + insetRight + 'px ' + insetBottom + 'px ' + insetLeft + 'px round 16px)';
+            } else {
+                img.style.clipPath = '';
+            }
         }
     }
 }""",
@@ -155,6 +179,10 @@ private external fun updatePreviewGeometry(
     y: Double,
     width: Double,
     height: Double,
+    clipLeft: Double,
+    clipTop: Double,
+    clipRight: Double,
+    clipBottom: Double,
     isHidden: Boolean,
 )
 
@@ -222,12 +250,18 @@ actual fun EventMediaPlayer(
                     if (isValidHttpsPreview) {
                         val pos = coordinates.positionInWindow()
                         val size = coordinates.size
+                        val root = coordinates.findRootCoordinates()
+                        val rootSize = root.size
                         updatePreviewGeometry(
                             imgId = previewElementId,
                             x = pos.x.toDouble(),
                             y = pos.y.toDouble(),
                             width = size.width.toDouble(),
                             height = size.height.toDouble(),
+                            clipLeft = 0.0,
+                            clipTop = 0.0,
+                            clipRight = rootSize.width.toDouble(),
+                            clipBottom = rootSize.height.toDouble(),
                             isHidden = !isDetailSurfaceVisible,
                         )
                     }

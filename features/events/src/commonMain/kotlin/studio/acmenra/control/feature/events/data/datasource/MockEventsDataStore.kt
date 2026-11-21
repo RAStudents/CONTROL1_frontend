@@ -33,11 +33,17 @@ const val MOCK_PREVIEW_URL =
 
 class MockEventsDataStore {
     private val mutex = Mutex()
-    private var currentSequence = 100L
-    private var todayEventsCount = 20
-    private var generatedCount = 0
     private var exportIdCounter = 0
     private val exportRequests = mutableMapOf<String, CreateExportRequestDto>()
+
+    private data class CompanyMockState(
+        val events: MutableList<EventDto>,
+        var currentSequence: Long = 100L,
+        var todayEventsCount: Int = 20,
+        var generatedCount: Int = 0,
+    )
+
+    private val companyStates = mutableMapOf<String, CompanyMockState>()
 
     val mockEventTypes =
         listOf(
@@ -101,9 +107,8 @@ class MockEventsDataStore {
             loc.devices.map { dev -> loc to dev }
         }
 
-    private val events = mutableListOf<EventDto>()
-
-    init {
+    private fun createInitialEvents(companyId: String): MutableList<EventDto> {
+        val list = mutableListOf<EventDto>()
         val now = Clock.System.now()
         for (i in 1..20) {
             val type = mockEventTypes[(i - 1) % mockEventTypes.size]
@@ -122,9 +127,9 @@ class MockEventsDataStore {
                     else -> "CRITICAL"
                 }
 
-            events.add(
+            list.add(
                 EventDto(
-                    id = "ev_mock_$i",
+                    id = "ev_mock_${companyId}_$i",
                     eventVersion = 1L,
                     classificationVersion = 1L,
                     acknowledgementVersion = 1L,
@@ -149,14 +154,20 @@ class MockEventsDataStore {
                 ),
             )
         }
+        return list
     }
 
-    private fun getSummaryDtoLocked(seq: Long): EventsSummaryDto =
+    private fun getOrCreateCompanyStateLocked(companyId: String): CompanyMockState =
+        companyStates.getOrPut(companyId) {
+            CompanyMockState(events = createInitialEvents(companyId))
+        }
+
+    private fun getSummaryDtoLocked(state: CompanyMockState): EventsSummaryDto =
         EventsSummaryDto(
             businessTimezone = "Europe/Moscow",
             businessDate = "2026-11-21",
-            summaryAsOfSequence = seq,
-            todayEventsCount = todayEventsCount,
+            summaryAsOfSequence = state.currentSequence,
+            todayEventsCount = state.todayEventsCount,
             categories = mockCategories,
             devices = mockDevicesSummary,
         )
@@ -206,23 +217,24 @@ class MockEventsDataStore {
         limit: Int = 50,
     ): EventsBootstrapDto =
         mutex.withLock {
-            val filtered = filterEventsLocked(events, query)
+            val state = getOrCreateCompanyStateLocked(companyId)
+            val filtered = filterEventsLocked(state.events, query)
             val paged = filtered.take(limit)
             EventsBootstrapDto(
-                streamCursor = currentSequence,
+                streamCursor = state.currentSequence,
                 events =
                     BootstrapEventsDto(
                         items = paged,
                         pagination =
                             EventsPaginationDto(
-                                snapshotId = "mock_snap_$currentSequence",
-                                asOfSequence = currentSequence,
+                                snapshotId = "mock_snap_${state.currentSequence}",
+                                asOfSequence = state.currentSequence,
                                 nextCursor = if (filtered.size > limit) "mock_cur_$limit" else null,
                                 hasMore = filtered.size > limit,
                                 totalCount = filtered.size,
                             ),
                     ),
-                summary = getSummaryDtoLocked(currentSequence),
+                summary = getSummaryDtoLocked(state),
             )
         }
 
@@ -232,8 +244,9 @@ class MockEventsDataStore {
         limit: Int = 50,
     ): EventsPageDto =
         mutex.withLock {
+            val state = getOrCreateCompanyStateLocked(companyId)
             val offset = cursor.removePrefix("mock_cur_").toIntOrNull() ?: limit
-            val filtered = filterEventsLocked(events, EventsQuery())
+            val filtered = filterEventsLocked(state.events, EventsQuery())
             val paged = filtered.drop(offset).take(limit)
             val nextOffset = offset + paged.size
             val hasMore = filtered.size > nextOffset
@@ -242,8 +255,8 @@ class MockEventsDataStore {
                 nextCursor = if (hasMore) "mock_cur_$nextOffset" else null,
                 hasMore = hasMore,
                 totalCount = filtered.size,
-                asOfSequence = currentSequence,
-                snapshotId = "mock_snap_$currentSequence",
+                asOfSequence = state.currentSequence,
+                snapshotId = "mock_snap_${state.currentSequence}",
             )
         }
 
@@ -266,11 +279,12 @@ class MockEventsDataStore {
         eventId: String,
     ): EventDto =
         mutex.withLock {
-            val index = events.indexOfFirst { it.id == eventId }
+            val state = getOrCreateCompanyStateLocked(companyId)
+            val index = state.events.indexOfFirst { it.id == eventId }
             val now = Clock.System.now().toString()
             val updated =
                 if (index >= 0) {
-                    val cur = events[index]
+                    val cur = state.events[index]
                     val up =
                         cur.copy(
                             status = "ACKNOWLEDGED",
@@ -279,7 +293,7 @@ class MockEventsDataStore {
                             eventVersion = cur.eventVersion + 1,
                             acknowledgementVersion = cur.acknowledgementVersion + 1,
                         )
-                    events[index] = up
+                    state.events[index] = up
                     up
                 } else {
                     EventDto(
@@ -325,11 +339,12 @@ class MockEventsDataStore {
         idempotencyKey: String,
     ): EventDto =
         mutex.withLock {
-            val index = events.indexOfFirst { it.id == eventId }
+            val state = getOrCreateCompanyStateLocked(companyId)
+            val index = state.events.indexOfFirst { it.id == eventId }
             val now = Clock.System.now().toString()
             val updated =
                 if (index >= 0) {
-                    val cur = events[index]
+                    val cur = state.events[index]
                     val up =
                         cur.copy(
                             isErroneous = true,
@@ -338,7 +353,7 @@ class MockEventsDataStore {
                             eventVersion = cur.eventVersion + 1,
                             classificationVersion = cur.classificationVersion + 1,
                         )
-                    events[index] = up
+                    state.events[index] = up
                     up
                 } else {
                     EventDto(
@@ -382,6 +397,7 @@ class MockEventsDataStore {
         request: CreateExportRequestDto,
         idempotencyKey: String,
     ): EventsExportStatusDto {
+        val state = getOrCreateCompanyStateLocked(companyId)
         val exportId = "mock-export-${++exportIdCounter}"
         exportRequests[exportId] = request
         val now = Clock.System.now()
@@ -403,7 +419,7 @@ class MockEventsDataStore {
                             },
                     ),
             )
-        val matchingEvents = filterEventsLocked(events, query)
+        val matchingEvents = filterEventsLocked(state.events, query)
         return EventsExportStatusDto(
             exportId = exportId,
             status = "COMPLETED",
@@ -421,6 +437,7 @@ class MockEventsDataStore {
         companyId: String,
         exportId: String,
     ): EventsExportStatusDto {
+        val state = getOrCreateCompanyStateLocked(companyId)
         val now = Clock.System.now()
         val expiresAt = now + 1.hours
         val req = exportRequests[exportId]
@@ -443,9 +460,9 @@ class MockEventsDataStore {
                                     },
                             ),
                     )
-                filterEventsLocked(events, query).size.toLong()
+                filterEventsLocked(state.events, query).size.toLong()
             } else {
-                events.size.toLong()
+                state.events.size.toLong()
             }
         return EventsExportStatusDto(
             exportId = exportId,
@@ -464,6 +481,7 @@ class MockEventsDataStore {
         companyId: String,
         exportId: String,
     ): EventsExportDownload {
+        val state = getOrCreateCompanyStateLocked(companyId)
         val req = exportRequests[exportId]
         val includeMedia = req?.includeMediaLinks ?: false
         val isSemicolon = req?.formatPreset != "STANDARD_COMMA_UTF8"
@@ -489,7 +507,7 @@ class MockEventsDataStore {
             } else {
                 EventsQuery()
             }
-        val targetEvents = filterEventsLocked(events, query)
+        val targetEvents = filterEventsLocked(state.events, query)
 
         val bytes =
             buildString {
@@ -531,28 +549,30 @@ class MockEventsDataStore {
     }
 
     suspend fun generateAndAddRealtimeCommit(
+        companyId: String = "comp-001",
         replayId: Long,
         insertAtBeginning: Boolean,
     ): TenantCommitFrameDto =
         mutex.withLock {
-            currentSequence++
-            generatedCount++
-            todayEventsCount++
+            val state = getOrCreateCompanyStateLocked(companyId)
+            state.currentSequence++
+            state.generatedCount++
+            state.todayEventsCount++
 
-            val typeIndex = (generatedCount - 1) % mockEventTypes.size
+            val typeIndex = (state.generatedCount - 1) % mockEventTypes.size
             val type = mockEventTypes[typeIndex]
 
-            val (loc, dev) = allDevicesWithLocations[(generatedCount - 1) % allDevicesWithLocations.size]
+            val (loc, dev) = allDevicesWithLocations[(state.generatedCount - 1) % allDevicesWithLocations.size]
 
             val now = Clock.System.now()
             val occurredAt =
-                if (insertAtBeginning || events.isEmpty()) {
-                    now + (generatedCount * 2).seconds
+                if (insertAtBeginning || state.events.isEmpty()) {
+                    now + (state.generatedCount * 2).seconds
                 } else {
-                    val sorted = events.sortedByDescending { Instant.parse(it.occurredAt) }
+                    val sorted = state.events.sortedByDescending { Instant.parse(it.occurredAt) }
                     val newestTime = Instant.parse(sorted.first().occurredAt).toEpochMilliseconds()
                     val oldestTime = Instant.parse(sorted.last().occurredAt).toEpochMilliseconds()
-                    val midTime = (newestTime + oldestTime) / 2 + ((generatedCount % 5) * 1000L)
+                    val midTime = (newestTime + oldestTime) / 2 + ((state.generatedCount % 5) * 1000L)
                     Instant.fromEpochMilliseconds(midTime)
                 }
 
@@ -566,7 +586,7 @@ class MockEventsDataStore {
 
             val eventDto =
                 EventDto(
-                    id = "ev_rt_${currentSequence}_$generatedCount",
+                    id = "ev_rt_${state.currentSequence}_${state.generatedCount}",
                     eventVersion = 1L,
                     classificationVersion = 1L,
                     acknowledgementVersion = 1L,
@@ -590,16 +610,16 @@ class MockEventsDataStore {
                     videoUrl = MOCK_VIDEO_URL,
                 )
 
-            events.add(eventDto)
+            state.events.add(eventDto)
 
             TenantCommitFrameDto(
                 schemaVersion = 1,
                 type = "TENANT_COMMIT",
                 replayId = replayId,
-                tenantSequence = currentSequence,
-                payloadSha256 = currentSequence.toString(16).padStart(64, '0'),
+                tenantSequence = state.currentSequence,
+                payloadSha256 = state.currentSequence.toString(16).padStart(64, '0'),
                 eventCreated = eventDto,
-                summaryUpdated = getSummaryDtoLocked(currentSequence),
+                summaryUpdated = getSummaryDtoLocked(state),
             )
         }
 }

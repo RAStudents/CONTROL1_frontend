@@ -41,29 +41,13 @@ val eventsModule =
     module {
         includes(exportFileSaverModule, externalMediaOpenerModule)
 
-        single {
-            MockEventsDataStore()
-        }
-
         single<EventsRemoteDataSource> {
-            MockEventsRemoteDataSource(
-                dataStore = get(),
-            )
-        }
-
-        factory<EventsWebSocketDataSource> {
-            MockEventsWebSocketDataSource(
-                dataStore = get(),
-            )
-        }
-
-        single<EventsRemoteDataSource>(named("ktor")) {
             KtorEventsRemoteDataSource(
                 apiClient = get(named("api")),
             )
         }
 
-        factory<EventsWebSocketDataSource>(named("ktor")) {
+        factory<EventsWebSocketDataSource> {
             val config = get<ApiConfig>()
             KtorEventsWebSocketDataSource(
                 realtimeClient = get(named("realtime")),
@@ -133,6 +117,25 @@ val eventsModule =
                 observeEventsExportStatusUseCase = get(),
                 downloadEventsExportUseCase = get(),
                 exportFileSaver = get(),
+            )
+        }
+    }
+
+val eventsMockModule =
+    module {
+        single {
+            MockEventsDataStore()
+        }
+
+        single<EventsRemoteDataSource>(named("mock")) {
+            MockEventsRemoteDataSource(
+                dataStore = get(),
+            )
+        }
+
+        factory<EventsWebSocketDataSource>(named("mock")) {
+            MockEventsWebSocketDataSource(
+                dataStore = get(),
             )
         }
     }

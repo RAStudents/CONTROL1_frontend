@@ -22,6 +22,7 @@ class MockEventsWebSocketDataSource(
     private var nextConnectionId = 1L
     private var activeJob: Job? = null
     private var activeConnectionId: Long = 0L
+    private var activeReplayId: Long = 1L
 
     override fun connect(
         companyId: String,
@@ -35,6 +36,7 @@ class MockEventsWebSocketDataSource(
     ): Long {
         val connectionId = nextConnectionId++
         activeConnectionId = connectionId
+        activeReplayId = replayId
         activeJob?.cancel()
 
         activeJob =
@@ -63,7 +65,8 @@ class MockEventsWebSocketDataSource(
                 while (isActive) {
                     val commit =
                         dataStore.generateAndAddRealtimeCommit(
-                            replayId = replayId,
+                            companyId = companyId,
+                            replayId = activeReplayId,
                             insertAtBeginning = insertAtBeginning,
                         )
                     insertAtBeginning = !insertAtBeginning
@@ -86,6 +89,7 @@ class MockEventsWebSocketDataSource(
         replayId: Long,
         afterSequence: Long,
     ) {
+        activeReplayId = replayId
         _incomingFrames.emit(
             IncomingWsEnvelope(
                 connectionId = activeConnectionId,
@@ -107,7 +111,7 @@ class MockEventsWebSocketDataSource(
                 frame =
                     IncomingWsFrame.HeartbeatAck(
                         HeartbeatAckFrameDto(
-                            replayId = 1L,
+                            replayId = activeReplayId,
                             replayBaseSeq = clientConfirmedSeq,
                             lastReplayWrittenSeq = clientConfirmedSeq,
                             clientConfirmedSeq = clientConfirmedSeq,

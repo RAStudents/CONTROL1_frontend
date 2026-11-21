@@ -30,7 +30,6 @@ import studio.acmenra.control.core.ui.notice.Notice
 import studio.acmenra.control.feature.events.data.datasource.EventsApiException
 import studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.EventsWebSocketDataSource
-import studio.acmenra.control.feature.events.data.datasource.MockEventsWebSocketDataSource
 import studio.acmenra.control.feature.events.data.datasource.WsCloseReason
 import studio.acmenra.control.feature.events.data.mapper.EventsDtoMapper
 import studio.acmenra.control.feature.events.domain.model.Event
@@ -429,9 +428,7 @@ class EventsFeedSessionImpl(
         if (!canReadEvents() || generation != connectionGeneration.load()) return
 
         val snapshot = sessionManager.getSnapshot()
-        val token =
-            snapshot?.tokens?.accessToken
-                ?: if (webSocketDataSource is MockEventsWebSocketDataSource) "mock_access_token" else null
+        val token = snapshot?.tokens?.accessToken
         if (token.isNullOrBlank()) {
             processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.FAILED))
             return
@@ -481,9 +478,7 @@ class EventsFeedSessionImpl(
                 if (!canReadEvents() || generation != connectionGeneration.load()) return@launch
 
                 val snapshot = sessionManager.getSnapshot()
-                val token =
-                    snapshot?.tokens?.accessToken
-                        ?: if (webSocketDataSource is MockEventsWebSocketDataSource) "mock_access_token" else null
+                val token = snapshot?.tokens?.accessToken
                 if (token.isNullOrBlank()) {
                     processor.dispatch(SessionCommand.ConnectionStateChanged(RealtimeConnectionState.FAILED))
                     return@launch

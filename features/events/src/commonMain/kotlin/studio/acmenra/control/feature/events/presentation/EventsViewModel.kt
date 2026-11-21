@@ -16,7 +16,7 @@ import kotlinx.datetime.TimeZone
 import org.jetbrains.compose.resources.StringResource
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.events_export_download_error
-import studio.acmenra.control.core.ui.generated.resources.events_export_download_success
+import studio.acmenra.control.core.ui.generated.resources.events_export_download_initiated
 import studio.acmenra.control.core.ui.generated.resources.events_export_error_access_revoked
 import studio.acmenra.control.core.ui.generated.resources.events_export_error_generic
 import studio.acmenra.control.core.ui.generated.resources.events_export_error_limit_exceeded
@@ -90,6 +90,7 @@ class EventsViewModel(
     private var companyGeneration: Long = 0L
     private var filterRequestGeneration: Long = 0L
     private var filterOptionsGeneration: Long = 0L
+    private var downloadGeneration: Long = 0L
 
     var onQueryHashChanged: ((String?) -> Unit)? = null
     private var activeQueryHash: String? = null
@@ -398,6 +399,7 @@ class EventsViewModel(
     fun onSearchIdCommitted(newSearchId: String) {
         searchDebounceJob?.cancel()
         val trimmed = newSearchId.trim().ifBlank { null }
+        if (_state.value.filter.searchId == trimmed) return
         val newFilter = _state.value.filter.copy(searchId = trimmed)
         _state.update { it.copy(filter = newFilter) }
         restartFeedSession()
@@ -445,6 +447,17 @@ class EventsViewModel(
         dateSelection: DateSelection,
         businessTimeZone: TimeZone? = null,
     ) {
+        if (dateSelection is DateSelection.All) {
+            val newFilter =
+                _state.value.filter.copy(
+                    dateFrom = null,
+                    dateTo = null,
+                )
+            _state.update { it.copy(filter = newFilter, isDatePickerOpen = false) }
+            restartFeedSession()
+            syncFilterToUrl(newFilter)
+            return
+        }
         val tzId =
             businessTimeZone?.id
                 ?: _state.value.summary?.businessTimezone
@@ -726,6 +739,7 @@ class EventsViewModel(
     }
 
     fun toggleExportMode() {
+        if (!_state.value.access.canExport) return
         _state.update { it.copy(isExportModeActive = !it.isExportModeActive) }
     }
 
@@ -765,6 +779,7 @@ class EventsViewModel(
         }
         val currentJob = _state.value.exportJobStatus?.status
         if (_state.value.isExportSubmitting ||
+            _state.value.isExportDownloading ||
             currentJob == EventsExportStatusCode.QUEUED ||
             currentJob == EventsExportStatusCode.PROCESSING
         ) {
@@ -1005,6 +1020,7 @@ class EventsViewModel(
         currentCompanyGen: Long,
     ) {
         if (!_state.value.access.canExport) return
+        val currentDownloadGen = ++downloadGeneration
         downloadExportJob?.cancel()
         downloadExportJob =
             viewModelScope.launch {
@@ -1012,6 +1028,7 @@ class EventsViewModel(
                 try {
                     val download = downloadEventsExportUseCase(requestCompanyId, exportId)
                     if (currentCompanyGen != companyGeneration ||
+                        currentDownloadGen != downloadGeneration ||
                         _state.value.companyId != requestCompanyId ||
                         !_state.value.access.canExport
                     ) {
@@ -1019,6 +1036,7 @@ class EventsViewModel(
                     }
                     val saved = exportFileSaver.saveExportFile(download)
                     if (currentCompanyGen != companyGeneration ||
+                        currentDownloadGen != downloadGeneration ||
                         _state.value.companyId != requestCompanyId ||
                         !_state.value.access.canExport
                     ) {
@@ -1029,7 +1047,7 @@ class EventsViewModel(
                             it.copy(
                                 errorNotice =
                                     Notice.success(
-                                        title = Res.string.events_export_download_success,
+                                        title = Res.string.events_export_download_initiated,
                                         key = "export_download_$exportId",
                                     ),
                             )
@@ -1050,6 +1068,7 @@ class EventsViewModel(
                     throw e
                 } catch (e: Throwable) {
                     if (currentCompanyGen == companyGeneration &&
+                        currentDownloadGen == downloadGeneration &&
                         _state.value.companyId == requestCompanyId &&
                         _state.value.access.canExport
                     ) {
@@ -1066,7 +1085,7 @@ class EventsViewModel(
                         }
                     }
                 } finally {
-                    if (currentCompanyGen == companyGeneration) {
+                    if (currentCompanyGen == companyGeneration && currentDownloadGen == downloadGeneration) {
                         _state.update { it.copy(isExportDownloading = false) }
                     }
                 }
@@ -1098,9 +1117,11 @@ class EventsViewModel(
             }
             return
         }
+        if (jobStatus != null && !jobStatus.isDownloadable) return
 
         val requestCompanyId = _state.value.companyId
         val currentCompanyGen = companyGeneration
+        val currentDownloadGen = ++downloadGeneration
         downloadExportJob?.cancel()
         downloadExportJob =
             viewModelScope.launch {
@@ -1108,6 +1129,7 @@ class EventsViewModel(
                 try {
                     val download = downloadEventsExportUseCase(requestCompanyId, exportId)
                     if (currentCompanyGen != companyGeneration ||
+                        currentDownloadGen != downloadGeneration ||
                         _state.value.companyId != requestCompanyId ||
                         !_state.value.access.canExport
                     ) {
@@ -1115,6 +1137,7 @@ class EventsViewModel(
                     }
                     val saved = exportFileSaver.saveExportFile(download)
                     if (currentCompanyGen != companyGeneration ||
+                        currentDownloadGen != downloadGeneration ||
                         _state.value.companyId != requestCompanyId ||
                         !_state.value.access.canExport
                     ) {
@@ -1125,7 +1148,7 @@ class EventsViewModel(
                             it.copy(
                                 errorNotice =
                                     Notice.success(
-                                        title = Res.string.events_export_download_success,
+                                        title = Res.string.events_export_download_initiated,
                                         key = "export_download_$exportId",
                                     ),
                             )
@@ -1146,6 +1169,7 @@ class EventsViewModel(
                     throw e
                 } catch (e: Throwable) {
                     if (currentCompanyGen == companyGeneration &&
+                        currentDownloadGen == downloadGeneration &&
                         _state.value.companyId == requestCompanyId &&
                         _state.value.access.canExport
                     ) {
@@ -1162,7 +1186,7 @@ class EventsViewModel(
                         }
                     }
                 } finally {
-                    if (currentCompanyGen == companyGeneration) {
+                    if (currentCompanyGen == companyGeneration && currentDownloadGen == downloadGeneration) {
                         _state.update { it.copy(isExportDownloading = false) }
                     }
                 }

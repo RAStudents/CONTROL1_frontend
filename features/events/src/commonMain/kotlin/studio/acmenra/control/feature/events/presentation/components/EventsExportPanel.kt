@@ -158,11 +158,7 @@ fun EventsExportPanel(
 
         // Line 3: Main Button (full width, or with redownload button if completed)
         var lastClickTime by remember { mutableStateOf(0L) }
-        val now = Clock.System.now()
-        val isExpired =
-            jobStatus?.status == EventsExportStatusCode.EXPIRED ||
-                (jobStatus?.expiresAt != null && now >= jobStatus.expiresAt)
-        val canRedownload = jobStatus?.status == EventsExportStatusCode.COMPLETED && !isExpired
+        val canRedownload = jobStatus?.isDownloadable == true
         val isWorking = isSubmitting || isQueuedOrProcessing || isDownloading
 
         Row(
@@ -248,7 +244,7 @@ fun EventsExportPanel(
                 ) {
                     FilledTonalIconButton(
                         onClick = { jobStatus?.exportId?.let(onDownload) },
-                        enabled = !isDownloading,
+                        enabled = !isDownloading && (jobStatus?.isDownloadable == true),
                         modifier = Modifier.size(AmberDimens.EventsCompactButtonHeight),
                     ) {
                         if (isDownloading) {

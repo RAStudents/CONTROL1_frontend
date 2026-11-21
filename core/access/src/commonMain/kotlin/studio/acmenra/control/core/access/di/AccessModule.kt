@@ -16,13 +16,17 @@ import studio.acmenra.control.core.access.domain.concurrent.TenantSingleFlight
 import studio.acmenra.control.core.access.domain.parser.AccessErrorParser
 import studio.acmenra.control.core.access.domain.repository.AccessRepository
 import studio.acmenra.control.core.access.domain.usecase.CheckPermissionUseCase
+import studio.acmenra.control.core.access.domain.usecase.EnsureTenantContextUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveTenantContextUseCase
+import studio.acmenra.control.core.access.domain.usecase.RefreshGlobalAccessUseCase
 import studio.acmenra.control.core.access.domain.usecase.RefreshTenantUseCase
 import studio.acmenra.control.core.access.domain.usecase.SelectTenantUseCase
 import studio.acmenra.control.core.access.domain.usecase.impl.CheckPermissionUseCaseImpl
+import studio.acmenra.control.core.access.domain.usecase.impl.EnsureTenantContextUseCaseImpl
 import studio.acmenra.control.core.access.domain.usecase.impl.ObserveGlobalAccessUseCaseImpl
 import studio.acmenra.control.core.access.domain.usecase.impl.ObserveTenantContextUseCaseImpl
+import studio.acmenra.control.core.access.domain.usecase.impl.RefreshGlobalAccessUseCaseImpl
 import studio.acmenra.control.core.access.domain.usecase.impl.RefreshTenantUseCaseImpl
 import studio.acmenra.control.core.access.domain.usecase.impl.SelectTenantUseCaseImpl
 import studio.acmenra.control.core.network.auth.AccessInvalidationDispatcher
@@ -89,9 +93,19 @@ val accessDomainModule =
                 coordinator = get(),
             )
         }
+        factory<EnsureTenantContextUseCase> {
+            EnsureTenantContextUseCaseImpl(
+                coordinator = get(),
+            )
+        }
         factory<RefreshTenantUseCase> {
             RefreshTenantUseCaseImpl(
                 coordinator = get(),
+            )
+        }
+        factory<RefreshGlobalAccessUseCase> {
+            RefreshGlobalAccessUseCaseImpl(
+                accessManager = get(),
             )
         }
         factory<CheckPermissionUseCase> {

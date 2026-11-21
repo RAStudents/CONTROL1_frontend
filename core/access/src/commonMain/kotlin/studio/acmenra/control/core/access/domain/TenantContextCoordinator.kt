@@ -97,16 +97,17 @@ class TenantContextCoordinator(
             reset()
         }
         val updated = _tenantState.value
-        val currentCompanyId =
+        val isAlreadySatisfied =
             when (updated) {
-                is TenantContextState.Authorized -> updated.context.companyId
-                is TenantContextState.Restricted -> updated.companyId
-                is TenantContextState.Error -> updated.companyId
-                is TenantContextState.Loading -> updated.requestedCompanyId
-                is TenantContextState.NotSelected -> null
+                is TenantContextState.Authorized -> updated.context.companyId == requestedCompanyId
+                is TenantContextState.Restricted -> updated.companyId == requestedCompanyId
+                is TenantContextState.Loading ->
+                    updated.requestedCompanyId == requestedCompanyId &&
+                        activeSelectionJob?.isActive == true
+                is TenantContextState.Error, is TenantContextState.NotSelected -> false
             }
 
-        if (currentCompanyId == requestedCompanyId) {
+        if (isAlreadySatisfied) {
             if (updated is TenantContextState.Authorized && updated.context.requiresImmediateRevalidation) {
                 refreshCurrentTenant(force = true)
             }
@@ -219,6 +220,14 @@ class TenantContextCoordinator(
                                 )
                             }
 
+                            is GlobalAccessState.Error -> {
+                                TenantContextState.Error(
+                                    companyId = companyId,
+                                    error = globalState.error,
+                                    canSwitchCompany = false,
+                                )
+                            }
+
                             else -> {
                                 TenantContextState.Error(
                                     companyId = companyId,
@@ -255,6 +264,13 @@ class TenantContextCoordinator(
                 )
             }
 
+        val (originVerdict, verificationError) =
+            if (result is NetworkResult.Success) {
+                verifyOrigins(result.data)
+            } else {
+                OriginVerdict.VALID to null
+            }
+
         mutex.withLock {
             val latest = _tenantState.value
             val latestRevision = sessionManager.currentRevision()
@@ -286,6 +302,8 @@ class TenantContextCoordinator(
                         canSwitch = canSwitch,
                         context = context,
                         sessionRevision = latestRevision,
+                        originVerdict = originVerdict,
+                        verificationError = verificationError,
                     )
                 }
 
@@ -449,6 +467,14 @@ class TenantContextCoordinator(
                                 )
                             }
 
+                            is GlobalAccessState.Error -> {
+                                TenantContextState.Error(
+                                    companyId = companyId,
+                                    error = globalState.error,
+                                    canSwitchCompany = false,
+                                )
+                            }
+
                             else -> {
                                 TenantContextState.Error(
                                     companyId = companyId,
@@ -476,6 +502,13 @@ class TenantContextCoordinator(
         val result =
             singleFlight.execute(key) {
                 accessRepository.getCompanyAccess(userId = userId, companyId = companyId, forceRefresh = force)
+            }
+
+        val (originVerdict, verificationError) =
+            if (result is NetworkResult.Success) {
+                verifyOrigins(result.data)
+            } else {
+                OriginVerdict.VALID to null
             }
 
         mutex.withLock {
@@ -512,6 +545,8 @@ class TenantContextCoordinator(
                         canSwitch = canSwitch,
                         context = context,
                         sessionRevision = latestRevision,
+                        originVerdict = originVerdict,
+                        verificationError = verificationError,
                     )
                 }
 
@@ -617,13 +652,70 @@ class TenantContextCoordinator(
         }
     }
 
+    private suspend fun verifyOrigins(domain: CompanyAccessDomain): Pair<OriginVerdict, NetworkError?> {
+        val currentContext = accessManager.currentUserContext()
+        val initialVerdict = TenantAccessValidator.verdict(domain.activeOrigins, currentContext)
+        if (initialVerdict == OriginVerdict.VALID) {
+            return OriginVerdict.VALID to null
+        }
+
+        val refreshResult = accessManager.refreshGlobalContext(force = true)
+        val freshContext = accessManager.currentUserContext()
+        val finalVerdict = TenantAccessValidator.verdict(domain.activeOrigins, freshContext)
+        val refreshError = (refreshResult as? NetworkResult.Failure)?.error
+        return finalVerdict to refreshError
+    }
+
     private fun applyDomainResultLocked(
         domain: CompanyAccessDomain,
         companyId: String,
         canSwitch: Boolean,
         context: AuthorizedTenantContext,
         sessionRevision: Long = -1L,
+        originVerdict: OriginVerdict = OriginVerdict.VALID,
+        verificationError: NetworkError? = null,
     ) {
+        if (sessionRevision != -1L && sessionManager.currentRevision() != sessionRevision) {
+            return
+        }
+
+        when (originVerdict) {
+            OriginVerdict.NEEDS_GLOBAL -> {
+                expirationJob?.cancel()
+                expirationJob = null
+                val error =
+                    verificationError
+                        ?: NetworkError.Unknown(
+                            message = "Global user context is not available for origin validation",
+                        )
+                setTenantStateLocked(
+                    TenantContextState.Error(
+                        companyId = companyId,
+                        error = error,
+                        canSwitchCompany = canSwitch,
+                    ),
+                    sessionRevision,
+                )
+                return
+            }
+
+            OriginVerdict.ROGUE -> {
+                expirationJob?.cancel()
+                expirationJob = null
+                setTenantStateLocked(
+                    TenantContextState.Restricted.AccessDenied(
+                        companyId = companyId,
+                        companyName = domain.companyName,
+                        canSwitchCompany = canSwitch,
+                    ),
+                    sessionRevision,
+                )
+                return
+            }
+
+            OriginVerdict.VALID -> Unit
+        }
+
         val isAuthorized =
             when {
                 domain.companyStatus == CompanyStatus.RESTRICTED -> {

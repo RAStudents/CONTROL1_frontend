@@ -3,10 +3,26 @@ package studio.acmenra.control.navigation
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+sealed interface AppRoute
+
 @Serializable
 @SerialName("login")
-data object LoginRoute
+data object LoginRoute : AppRoute
+
+@Serializable
+@SerialName("companies_dashboard")
+data object CompaniesDashboardRoute : AppRoute
+
+sealed interface TenantRoute : AppRoute {
+    val companyId: String?
+}
 
 @Serializable
 @SerialName("events")
-data object EventsRoute
+data class EventsRoute(
+    override val companyId: String? = null,
+    val queryHash: String? = null,
+) : TenantRoute {
+    val cleanCompanyId: String?
+        get() = companyId?.takeUnless { it.isBlank() || it == "null" }
+}

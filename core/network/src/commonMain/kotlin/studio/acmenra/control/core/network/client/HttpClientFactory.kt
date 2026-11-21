@@ -13,6 +13,7 @@ import io.ktor.client.plugins.defaultRequest
 import io.ktor.client.plugins.logging.LogLevel
 import io.ktor.client.plugins.logging.Logger
 import io.ktor.client.plugins.logging.Logging
+import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -26,10 +27,12 @@ import io.ktor.http.Url
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
+import kotlinx.coroutines.Job
 import kotlinx.serialization.json.Json
 import studio.acmenra.control.NetworkConfig
 import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.auth.SessionManager
+import studio.acmenra.control.core.network.auth.SessionSnapshot
 import studio.acmenra.control.core.network.engine.createHttpEngineFactory
 import studio.acmenra.control.core.network.model.OAuthErrorResponse
 import studio.acmenra.control.core.network.model.RefreshTokenRequest
@@ -72,106 +75,149 @@ object HttpClientFactory {
                 }
             }
 
-        return buildClient(engine) {
-            installNetworkTimeouts()
+        val refreshClient = createExternalClient(enableLogs = enableLogs, customLogger = customLogger, engine = engine)
+        val client =
+            try {
+                buildClient(engine) {
+                    installNetworkTimeouts()
 
-            defaultRequest {
-                url(apiBaseUrl.trimEnd('/') + "/")
-                header(HttpHeaders.Accept, ContentType.Application.Json.toString())
-            }
-
-            install(originGuardPlugin)
-
-            install(ContentNegotiation) {
-                json(
-                    Json {
-                        prettyPrint = debugMode
-                        isLenient = true
-                        ignoreUnknownKeys = true
-                        encodeDefaults = false
-                    },
-                )
-            }
-
-            install(Auth) {
-                bearer {
-                    cacheTokens = false
-                    nonCancellableRefresh = true
-
-                    loadTokens {
-                        val snapshot = sessionManager.getSnapshot()
-                        if (snapshot == null || !snapshot.tokens.isValid()) {
-                            null
-                        } else {
-                            BearerTokens(
-                                accessToken = snapshot.tokens.accessToken,
-                                refreshToken = snapshot.tokens.refreshToken,
-                            )
-                        }
+                    defaultRequest {
+                        url(apiBaseUrl.trimEnd('/') + "/")
+                        header(HttpHeaders.Accept, ContentType.Application.Json.toString())
                     }
 
-                    refreshTokens {
-                        if (!isSameOrigin(this.response.request.url, expectedOrigin)) {
-                            return@refreshTokens null
-                        }
-                        val refreshSnapshot =
-                            sessionManager.refreshSession(failedAccessToken = oldTokens?.accessToken) { current ->
-                                val refreshUrl =
-                                    URLBuilder(expectedOrigin)
-                                        .apply {
-                                            val existing = pathSegments.filter { it.isNotEmpty() }
-                                            val newSegments =
-                                                refreshPath
-                                                    .trim('/')
-                                                    .split('/')
-                                                    .filter { it.isNotEmpty() }
-                                            pathSegments = existing + newSegments
-                                        }.buildString()
+                    install(originGuardPlugin)
 
-                                val response =
-                                    this@refreshTokens.client.post(refreshUrl) {
-                                        with(this@refreshTokens) {
-                                            markAsRefreshTokenRequest()
-                                        }
-                                        contentType(ContentType.Application.Json)
-                                        setBody(RefreshTokenRequest(refreshToken = current.tokens.refreshToken))
-                                    }
+                    install(ContentNegotiation) {
+                        json(
+                            Json {
+                                prettyPrint = debugMode
+                                isLenient = true
+                                ignoreUnknownKeys = true
+                                encodeDefaults = false
+                            },
+                        )
+                    }
 
-                                response.toRefreshedTokens(current.tokens.refreshToken)
+                    install(Auth) {
+                        bearer {
+                            cacheTokens = false
+                            nonCancellableRefresh = true
+
+                            loadTokens {
+                                val snapshot = sessionManager.getSnapshot()
+                                if (snapshot == null || !snapshot.tokens.isValid()) {
+                                    null
+                                } else {
+                                    BearerTokens(
+                                        accessToken = snapshot.tokens.accessToken,
+                                        refreshToken = snapshot.tokens.refreshToken,
+                                    )
+                                }
                             }
 
-                        refreshSnapshot?.tokens?.let {
-                            BearerTokens(
-                                accessToken = it.accessToken,
-                                refreshToken = it.refreshToken,
-                            )
+                            refreshTokens {
+                                if (!isSameOrigin(this.response.request.url, expectedOrigin)) {
+                                    return@refreshTokens null
+                                }
+                                val refreshSnapshot =
+                                    sessionManager.refreshSession(
+                                        failedAccessToken = oldTokens?.accessToken,
+                                    ) { current ->
+                                        val refreshUrl =
+                                            URLBuilder(expectedOrigin)
+                                                .apply {
+                                                    val existing = pathSegments.filter { it.isNotEmpty() }
+                                                    val newSegments =
+                                                        refreshPath
+                                                            .trim('/')
+                                                            .split('/')
+                                                            .filter { it.isNotEmpty() }
+                                                    pathSegments = existing + newSegments
+                                                }.buildString()
+
+                                        val response =
+                                            this@refreshTokens.client.post(refreshUrl) {
+                                                with(this@refreshTokens) {
+                                                    markAsRefreshTokenRequest()
+                                                }
+                                                contentType(ContentType.Application.Json)
+                                                setBody(RefreshTokenRequest(refreshToken = current.tokens.refreshToken))
+                                            }
+
+                                        response.toRefreshedTokens(current.tokens.refreshToken)
+                                    }
+
+                                refreshSnapshot?.tokens?.let {
+                                    BearerTokens(
+                                        accessToken = it.accessToken,
+                                        refreshToken = it.refreshToken,
+                                    )
+                                }
+                            }
+
+                            sendWithoutRequest { request ->
+                                isSameOrigin(request.url.build(), expectedOrigin)
+                            }
                         }
                     }
 
-                    sendWithoutRequest { request ->
-                        isSameOrigin(request.url.build(), expectedOrigin)
+                    if (enableLogs) {
+                        install(Logging) {
+                            if (customLogger != null) {
+                                logger = customLogger
+                            }
+                            level = LogLevel.HEADERS
+                            sanitizeHeader { header ->
+                                header.equals(HttpHeaders.Authorization, ignoreCase = true) ||
+                                    header.equals(HttpHeaders.Cookie, ignoreCase = true) ||
+                                    header.equals(HttpHeaders.SetCookie, ignoreCase = true)
+                            }
+                        }
                     }
                 }
+            } catch (e: Throwable) {
+                refreshClient.close()
+                throw e
             }
 
-            if (enableLogs) {
-                install(Logging) {
-                    if (customLogger != null) {
-                        logger = customLogger
+        if (accessInvalidationListener != null) {
+            client.attributes.put(AccessInvalidationAttributeKey, accessInvalidationListener)
+        }
+
+        val delegate: suspend (String?) -> SessionSnapshot? = { failedToken ->
+            val current = sessionManager.getSnapshot()
+            val targetToken = failedToken ?: current?.tokens?.accessToken
+            sessionManager.refreshSession(failedAccessToken = targetToken) { cur ->
+                val refreshUrl =
+                    URLBuilder(expectedOrigin)
+                        .apply {
+                            val existing = pathSegments.filter { it.isNotEmpty() }
+                            val newSegments =
+                                refreshPath
+                                    .trim('/')
+                                    .split('/')
+                                    .filter { it.isNotEmpty() }
+                            pathSegments = existing + newSegments
+                        }.buildString()
+
+                val response =
+                    refreshClient.post(refreshUrl) {
+                        contentType(ContentType.Application.Json)
+                        setBody(RefreshTokenRequest(refreshToken = cur.tokens.refreshToken))
                     }
-                    level = LogLevel.HEADERS
-                    sanitizeHeader { header ->
-                        header.equals(HttpHeaders.Authorization, ignoreCase = true) ||
-                            header.equals(HttpHeaders.Cookie, ignoreCase = true) ||
-                            header.equals(HttpHeaders.SetCookie, ignoreCase = true)
-                    }
-                }
-            }
-        }.also { client ->
-            if (accessInvalidationListener != null) {
-                client.attributes.put(AccessInvalidationAttributeKey, accessInvalidationListener)
+
+                response.toRefreshedTokens(cur.tokens.refreshToken)
             }
         }
+
+        sessionManager.setRefreshDelegate(delegate)
+        client.coroutineContext[Job]?.invokeOnCompletion {
+            refreshClient.close()
+            sessionManager.clearRefreshDelegate(delegate)
+        }
+
+        return client
     }
 
     /**
@@ -205,6 +251,101 @@ object HttpClientFactory {
                 }
             }
         }
+
+    /**
+     * Creates an [HttpClient] intended for WebSocket realtime connections.
+     * WebSockets plugin is installed. Auth plugin is NOT installed on handshake
+     * to prevent Bearer token or cookie leakage during HTTP upgrade.
+     * Authentication is performed via first-frame AUTH message.
+     */
+    fun createRealtimeClient(
+        apiBaseUrl: String = NetworkConfig.BASE_URL,
+        enableLogs: Boolean = NetworkConfig.ENABLE_LOGS,
+        debugMode: Boolean = NetworkConfig.DEBUG_MODE,
+        allowInsecureTransport: Boolean = NetworkConfig.ALLOW_INSECURE_TRANSPORT,
+        customLogger: Logger? = null,
+        engine: HttpClientEngine? = null,
+    ): HttpClient {
+        require(apiBaseUrl.isNotBlank()) { "API base URL must not be blank" }
+        val expectedOrigin =
+            requireNotNull(runCatching { Url(apiBaseUrl) }.getOrNull()) {
+                "Invalid API base URL: $apiBaseUrl"
+            }
+        if (!allowInsecureTransport) {
+            val proto = expectedOrigin.protocol.name
+            require(proto.equals("https", ignoreCase = true) || proto.equals("wss", ignoreCase = true)) {
+                "HTTPS/WSS is required for Realtime client in production"
+            }
+        }
+
+        val originGuardPlugin =
+            createClientPlugin("RealtimeOriginGuard") {
+                onRequest { request, _ ->
+                    val requestUrl = request.url.build()
+                    val reqPort =
+                        if (requestUrl.port == 0) {
+                            requestUrl.protocol.defaultPort
+                        } else {
+                            requestUrl.port
+                        }
+                    val expPort =
+                        if (expectedOrigin.port == 0) {
+                            expectedOrigin.protocol.defaultPort
+                        } else {
+                            expectedOrigin.port
+                        }
+                    val sameHost = requestUrl.host.equals(expectedOrigin.host, ignoreCase = true)
+                    val sameHostAndPort = sameHost && reqPort == expPort
+                    val reqProto = requestUrl.protocol.name.lowercase()
+                    val validProto =
+                        if (!allowInsecureTransport) {
+                            reqProto == "wss" || reqProto == "https"
+                        } else {
+                            reqProto in setOf("wss", "ws", "https", "http")
+                        }
+                    if (!sameHostAndPort || !validProto) {
+                        throw IllegalArgumentException(
+                            "Realtime client must only connect to $expectedOrigin, got $requestUrl",
+                        )
+                    }
+                }
+            }
+
+        return buildClient(engine) {
+            installNetworkTimeouts()
+
+            install(WebSockets) {
+                pingIntervalMillis = 0
+            }
+
+            install(originGuardPlugin)
+
+            install(ContentNegotiation) {
+                json(
+                    Json {
+                        prettyPrint = debugMode
+                        isLenient = true
+                        ignoreUnknownKeys = true
+                        encodeDefaults = false
+                    },
+                )
+            }
+
+            if (enableLogs) {
+                install(Logging) {
+                    if (customLogger != null) {
+                        logger = customLogger
+                    }
+                    level = LogLevel.HEADERS
+                    sanitizeHeader { header ->
+                        header.equals(HttpHeaders.Authorization, ignoreCase = true) ||
+                            header.equals(HttpHeaders.Cookie, ignoreCase = true) ||
+                            header.equals(HttpHeaders.SetCookie, ignoreCase = true)
+                    }
+                }
+            }
+        }
+    }
 
     private fun buildClient(
         engine: HttpClientEngine?,

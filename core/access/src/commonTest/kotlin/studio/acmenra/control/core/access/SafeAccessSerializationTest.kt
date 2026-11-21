@@ -149,6 +149,25 @@ class SafeAccessSerializationTest {
     }
 
     @Test
+    fun eventsReviewPermissionDeserializationAndRoundTrip() {
+        val payload =
+            json.decodeFromString<Payload>(
+                """{"tenantPermissions":["EVENTS_READ","EVENTS_REVIEW"]}""",
+            )
+        assertEquals(
+            setOf(TenantPermission.EVENTS_READ, TenantPermission.EVENTS_REVIEW),
+            payload.tenantPermissions,
+        )
+        assertEquals(
+            PermissionKey.Tenant(TenantPermission.EVENTS_REVIEW),
+            PermissionKey.fromRawName("EVENTS_REVIEW"),
+        )
+        val encoded = json.encodeToString(payload)
+        val roundTrip = json.decodeFromString<Payload>(encoded)
+        assertEquals(payload.tenantPermissions, roundTrip.tenantPermissions)
+    }
+
+    @Test
     fun permissionKeyReturnsNullForUnknown() {
         assertEquals(PermissionKey.Tenant(TenantPermission.DEVICES_READ), PermissionKey.fromRawName("DEVICES_READ"))
         assertEquals(

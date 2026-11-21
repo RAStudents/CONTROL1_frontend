@@ -1,21 +1,25 @@
 package studio.acmenra.control.navigation
 
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.toRoute
+import studio.acmenra.control.core.access.domain.model.AccessStatus
+import studio.acmenra.control.core.access.domain.model.RoutePermissionRequirement
+import studio.acmenra.control.core.access.domain.model.TenantPermission
 import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.feature.auth.presentation.LoginRouteContent
+import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
 import studio.acmenra.control.feature.events.presentation.EventsRouteContent
+import studio.acmenra.control.navigation.components.LoadingPlaceholder
+import studio.acmenra.control.navigation.screen.CompaniesDashboardScreen
 
 @Composable
 fun AppNavHost(
@@ -35,7 +39,8 @@ fun AppNavHost(
             }
 
             sessionState != SessionState.Authenticated &&
-                destination?.hasRoute<EventsRoute>() == true -> {
+                destination != null &&
+                !destination.hasRoute<LoginRoute>() -> {
                 navController.navigateToLogin()
             }
         }
@@ -50,16 +55,71 @@ fun AppNavHost(
             LoginRouteContent()
         }
 
-        composable<EventsRoute> {
+        composable<EventsRoute> { entry ->
+            val route = entry.toRoute<EventsRoute>()
             if (sessionState == SessionState.Authenticated) {
-                EventsRouteContent()
-            } else {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CircularProgressIndicator()
+                TenantRouteGuard(
+                    requestedCompanyId = route.cleanCompanyId,
+                    requirement = RoutePermissionRequirement.Tenant(TenantPermission.EVENTS_READ),
+                    onNavigateToCompany = { newCompanyId ->
+                        navController.navigateToEvents(newCompanyId)
+                    },
+                    onNavigateToCompaniesDashboard = {
+                        navController.navigateToCompaniesDashboard()
+                    },
+                ) { tenantContext ->
+                    val perms = tenantContext.effectiveTenantPermissions
+                    val isSupportOverride = tenantContext.accessStatus == AccessStatus.ACTIVE_SUPPORT_OVERRIDE
+                    val accessCapabilities =
+                        EventsAccessCapabilities(
+                            eventsRead = perms.contains(TenantPermission.EVENTS_READ),
+                            eventsReview =
+                                !isSupportOverride &&
+                                    perms.contains(TenantPermission.EVENTS_READ) &&
+                                    perms.contains(TenantPermission.EVENTS_REVIEW),
+                            reportsExport =
+                                !isSupportOverride &&
+                                    perms.contains(TenantPermission.EVENTS_READ) &&
+                                    perms.contains(TenantPermission.REPORTS_EXPORT),
+                        )
+                    EventsRouteContent(
+                        companyId = tenantContext.companyId,
+                        accessCapabilities = accessCapabilities,
+                        queryHash = route.queryHash,
+                        onQueryHashChanged = { newHash ->
+                            if (newHash != route.queryHash) {
+                                navController.navigate(
+                                    EventsRoute(
+                                        companyId = tenantContext.companyId,
+                                        queryHash = newHash,
+                                    ),
+                                ) {
+                                    launchSingleTop = true
+                                }
+                            }
+                        },
+                    )
                 }
+            } else {
+                LoadingPlaceholder(modifier = Modifier.fillMaxSize())
+            }
+        }
+
+        composable<CompaniesDashboardRoute> {
+            if (sessionState == SessionState.Authenticated) {
+                VendorRouteGuard(
+                    onAccessDenied = {
+                        navController.navigateToEvents()
+                    },
+                ) {
+                    CompaniesDashboardScreen(
+                        onSelectCompany = { companyId ->
+                            navController.navigateToEvents(companyId)
+                        },
+                    )
+                }
+            } else {
+                LoadingPlaceholder(modifier = Modifier.fillMaxSize())
             }
         }
     }

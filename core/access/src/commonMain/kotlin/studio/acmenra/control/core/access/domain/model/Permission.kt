@@ -20,6 +20,9 @@ enum class TenantPermission {
     @SerialName("EVENTS_READ")
     EVENTS_READ,
 
+    @SerialName("EVENTS_REVIEW")
+    EVENTS_REVIEW,
+
     @SerialName("DEVICES_READ")
     DEVICES_READ,
 

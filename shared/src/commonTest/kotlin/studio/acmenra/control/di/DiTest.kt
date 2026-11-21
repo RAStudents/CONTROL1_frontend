@@ -1,6 +1,7 @@
 package studio.acmenra.control.di
 
 import io.ktor.client.HttpClient
+import kotlinx.coroutines.flow.flowOf
 import org.koin.core.KoinApplication
 import org.koin.core.qualifier.named
 import org.koin.dsl.koinApplication
@@ -9,8 +10,10 @@ import studio.acmenra.control.core.access.domain.AccessInvalidationCoordinator
 import studio.acmenra.control.core.access.domain.AccessManager
 import studio.acmenra.control.core.access.domain.TenantContextCoordinator
 import studio.acmenra.control.core.access.domain.usecase.CheckPermissionUseCase
+import studio.acmenra.control.core.access.domain.usecase.EnsureTenantContextUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveGlobalAccessUseCase
 import studio.acmenra.control.core.access.domain.usecase.ObserveTenantContextUseCase
+import studio.acmenra.control.core.access.domain.usecase.RefreshGlobalAccessUseCase
 import studio.acmenra.control.core.access.domain.usecase.RefreshTenantUseCase
 import studio.acmenra.control.core.access.domain.usecase.SelectTenantUseCase
 import studio.acmenra.control.core.network.auth.AccessInvalidationDispatcher
@@ -18,6 +21,7 @@ import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.auth.TokenStorage
 import studio.acmenra.control.core.network.client.ApiConfig
 import studio.acmenra.control.core.network.model.TokenPair
+import studio.acmenra.control.core.ui.notice.ConnectivityMonitor
 import studio.acmenra.control.feature.auth.presentation.LoginViewModel
 import studio.acmenra.control.feature.events.presentation.EventsViewModel
 import kotlin.test.AfterTest
@@ -54,6 +58,11 @@ class DiTest {
                     appModule,
                     module {
                         single<TokenStorage> { FakeTokenStorage() }
+                        single<ConnectivityMonitor> {
+                            object : ConnectivityMonitor {
+                                override val isOnline = flowOf(true)
+                            }
+                        }
                         single {
                             ApiConfig(
                                 apiBaseUrl = "https://api.example.com",
@@ -111,6 +120,9 @@ class DiTest {
         val selectTenant: SelectTenantUseCase = koin.get()
         assertNotNull(selectTenant)
 
+        val ensureTenantContext: EnsureTenantContextUseCase = koin.get()
+        assertNotNull(ensureTenantContext)
+
         val refreshTenant: RefreshTenantUseCase = koin.get()
         assertNotNull(refreshTenant)
 
@@ -119,6 +131,9 @@ class DiTest {
 
         val observeTenantContext: ObserveTenantContextUseCase = koin.get()
         assertNotNull(observeTenantContext)
+
+        val refreshGlobalAccess: RefreshGlobalAccessUseCase = koin.get()
+        assertNotNull(refreshGlobalAccess)
     }
 
     @Test

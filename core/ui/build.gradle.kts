@@ -5,6 +5,10 @@ plugins {
 kotlin {
     android {
         namespace = "studio.acmenra.control.core.ui"
+
+        withHostTest {
+            isIncludeAndroidResources = true
+        }
     }
 
     sourceSets {

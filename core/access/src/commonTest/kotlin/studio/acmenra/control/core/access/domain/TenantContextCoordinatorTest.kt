@@ -16,6 +16,7 @@ import studio.acmenra.control.core.access.domain.model.AccessStatus
 import studio.acmenra.control.core.access.domain.model.CompanyAccessDomain
 import studio.acmenra.control.core.access.domain.model.CompanyBrief
 import studio.acmenra.control.core.access.domain.model.CompanyStatus
+import studio.acmenra.control.core.access.domain.model.GlobalPermission
 import studio.acmenra.control.core.access.domain.model.GlobalUserContext
 import studio.acmenra.control.core.access.domain.model.PermissionKey
 import studio.acmenra.control.core.access.domain.model.RestrictionType
@@ -1416,6 +1417,320 @@ class TenantContextCoordinatorTest {
             // ensureTenantContext("c1") must NOT retain User A's Restricted state; it must refresh and authorize User B
             coordinator.ensureTenantContext("c1")
             val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Authorized)
+            assertEquals("c1", state.context.companyId)
+        }
+
+    @Test
+    fun testEnsureTenantContextWhenAlreadySelectedCompanyDoesNotReload() =
+        runTest {
+            var callCount = 0
+            repository.handler = { _ ->
+                callCount++
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = "c1",
+                        companyName = "Company 1",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_1",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.DIRECT_MEMBERSHIP),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            coordinator.ensureTenantContext("c1")
+            assertEquals(1, callCount)
+            assertTrue(coordinator.tenantState.value is TenantContextState.Authorized)
+
+            // Second call with same company id should not re-query repository
+            coordinator.ensureTenantContext("c1")
+            assertEquals(1, callCount)
+            assertTrue(coordinator.tenantState.value is TenantContextState.Authorized)
+        }
+
+    @Test
+    fun testEnsureTenantContextWhenRepositoryFailsSetsErrorState() =
+        runTest {
+            val expectedError = NetworkError.Connectivity("Network connection failed")
+            repository.handler = { _ ->
+                NetworkResult.Failure(expectedError)
+            }
+
+            coordinator.ensureTenantContext("c_fail")
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Error)
+            assertEquals("c_fail", state.companyId)
+            assertEquals(expectedError, state.error)
+        }
+
+    @Test
+    fun testRogueVendorOriginRejectionSetsAccessDenied() =
+        runTest {
+            accessManager.refreshGlobalContext(force = true)
+
+            repository.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Rogue Target Co",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_rogue",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.VENDOR_GLOBAL),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            coordinator.ensureTenantContext("rogue_c")
+            val state = coordinator.tenantState.value
+            assertTrue(state is TenantContextState.Restricted.AccessDenied)
+            assertEquals("rogue_c", state.companyId)
+            assertEquals("Rogue Target Co", state.companyName)
+        }
+
+    @Test
+    fun testTransientGlobalContextResolvesLoadingToAuthorizedWhenGlobalReady() =
+        runTest {
+            val uninitializedStorage = FakeTokenStorage()
+            val uninitSession = SessionManager(tokenStorage = uninitializedStorage)
+            val testRepo = FakeAccessRepository()
+            testRepo.globalResult =
+                NetworkResult.Success(
+                    GlobalUserContext(
+                        userId = "user_vendor",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        globalPermissions = setOf(GlobalPermission.COMPANIES_MANAGE),
+                        defaultCompanyId = "c1",
+                        canBrowseAllCompanies = true,
+                        memberCompanies = emptyList(),
+                    ),
+                )
+            testRepo.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Platform Company",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_vendor",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.VENDOR_GLOBAL),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            val testAccessManager =
+                AccessManager(
+                    accessRepository = testRepo,
+                    sessionManager = uninitSession,
+                    errorParser = errorParser,
+                )
+            val testCoordinator =
+                TenantContextCoordinator(
+                    accessRepository = testRepo,
+                    accessManager = testAccessManager,
+                    sessionManager = uninitSession,
+                    errorParser = errorParser,
+                    singleFlight = TenantSingleFlight(),
+                )
+
+            testCoordinator.selectTenant("c1")
+
+            assertTrue(testCoordinator.tenantState.value is TenantContextState.Authorized)
+            val auth = testCoordinator.tenantState.value as TenantContextState.Authorized
+            assertEquals("c1", auth.context.companyId)
+            assertEquals("Platform Company", auth.context.companyName)
+        }
+
+    @Test
+    fun testTransientGlobalContextRejectsRogueVendorWhenGlobalContextLacksManage() =
+        runTest {
+            val uninitializedStorage = FakeTokenStorage()
+            val uninitSession = SessionManager(tokenStorage = uninitializedStorage)
+            val testRepo = FakeAccessRepository()
+            testRepo.globalResult =
+                NetworkResult.Success(
+                    GlobalUserContext(
+                        userId = "user_support",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        globalPermissions = setOf(GlobalPermission.COMPANIES_MONITOR),
+                        defaultCompanyId = "c1",
+                        canBrowseAllCompanies = true,
+                        memberCompanies = emptyList(),
+                    ),
+                )
+            testRepo.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Forbidden Co",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_rogue",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.VENDOR_GLOBAL),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            val testAccessManager =
+                AccessManager(
+                    accessRepository = testRepo,
+                    sessionManager = uninitSession,
+                    errorParser = errorParser,
+                )
+            val testCoordinator =
+                TenantContextCoordinator(
+                    accessRepository = testRepo,
+                    accessManager = testAccessManager,
+                    sessionManager = uninitSession,
+                    errorParser = errorParser,
+                    singleFlight = TenantSingleFlight(),
+                )
+
+            testCoordinator.selectTenant("c1")
+
+            val state = testCoordinator.tenantState.value
+            assertTrue(state is TenantContextState.Restricted.AccessDenied)
+            assertEquals("c1", state.companyId)
+            assertEquals("Forbidden Co", state.companyName)
+        }
+
+    @Test
+    fun testTransientGlobalContextSetsErrorWhenGlobalRefreshFails() =
+        runTest {
+            val uninitializedStorage = FakeTokenStorage()
+            val uninitSession = SessionManager(tokenStorage = uninitializedStorage)
+            val testRepo = FakeAccessRepository()
+            val expectedError = NetworkError.Connectivity("Network failure")
+            testRepo.globalResult = NetworkResult.Failure(expectedError)
+            testRepo.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Some Co",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_test",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.VENDOR_GLOBAL),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            val testAccessManager =
+                AccessManager(
+                    accessRepository = testRepo,
+                    sessionManager = uninitSession,
+                    errorParser = errorParser,
+                )
+            val testCoordinator =
+                TenantContextCoordinator(
+                    accessRepository = testRepo,
+                    accessManager = testAccessManager,
+                    sessionManager = uninitSession,
+                    errorParser = errorParser,
+                    singleFlight = TenantSingleFlight(),
+                )
+
+            testCoordinator.selectTenant("c1")
+
+            val state = testCoordinator.tenantState.value
+            assertTrue(state is TenantContextState.Error)
+            assertEquals("c1", state.companyId)
+            assertEquals(expectedError, state.error)
+        }
+
+    @Test
+    fun testStaleGlobalContextWithoutManageRefreshesAndAuthorizesWhenUpdated() =
+        runTest {
+            val nonVendorContext =
+                GlobalUserContext(
+                    userId = "user_vendor",
+                    serverTime = Instant.fromEpochMilliseconds(0),
+                    globalPermissions = emptySet(),
+                    defaultCompanyId = "c1",
+                    canBrowseAllCompanies = false,
+                    memberCompanies = emptyList(),
+                )
+            val updatedVendorContext =
+                nonVendorContext.copy(
+                    globalPermissions = setOf(GlobalPermission.COMPANIES_MANAGE),
+                    canBrowseAllCompanies = true,
+                )
+
+            val testRepo = FakeAccessRepository()
+            testRepo.globalResult = NetworkResult.Success(nonVendorContext)
+            testRepo.handler = { companyId ->
+                NetworkResult.Success(
+                    CompanyAccessDomain(
+                        companyId = companyId,
+                        companyName = "Platform Company",
+                        serverTime = Instant.fromEpochMilliseconds(0),
+                        revision = "rev_vendor",
+                        companyStatus = CompanyStatus.ACTIVE,
+                        accessStatus = AccessStatus.ACTIVE,
+                        activeOrigins = setOf(AccessOrigin.VENDOR_GLOBAL),
+                        restriction = null,
+                        tenantPermissions = setOf(TenantPermission.EVENTS_READ),
+                        supportPermissions = emptySet(),
+                        permissionSources = emptyMap(),
+                        supportGrant = null,
+                    ),
+                )
+            }
+
+            val testSession = SessionManager(tokenStorage = FakeTokenStorage())
+            val testAccessManager =
+                AccessManager(
+                    accessRepository = testRepo,
+                    sessionManager = testSession,
+                    errorParser = errorParser,
+                )
+            testAccessManager.refreshGlobalContext(force = true)
+
+            testRepo.globalResult = NetworkResult.Success(updatedVendorContext)
+
+            val testCoordinator =
+                TenantContextCoordinator(
+                    accessRepository = testRepo,
+                    accessManager = testAccessManager,
+                    sessionManager = testSession,
+                    errorParser = errorParser,
+                    singleFlight = TenantSingleFlight(),
+                )
+
+            testCoordinator.selectTenant("c1")
+
+            val state = testCoordinator.tenantState.value
             assertTrue(state is TenantContextState.Authorized)
             assertEquals("c1", state.context.companyId)
         }

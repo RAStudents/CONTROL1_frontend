@@ -6,4 +6,215 @@
     <string name="password_show">Show password</string>
     <string name="password_hide">Hide password</string>
     <string name="nav_item_events">Events</string>
+
+    <!-- Support Override Banner -->
+    <string name="support_banner_title">Technical Support Override</string>
+    <string name="support_ticket_label">Ticket: %1$s</string>
+    <string name="support_mode_readonly">Read-only</string>
+    <string name="support_mode_engineering">Engineering</string>
+    <string name="support_mode_unknown">Support</string>
+    <string name="support_banner_details_format">%1$s • %2$s</string>
+    <string name="support_remaining_time">Remaining: %1$s</string>
+    <string name="support_grant_expired">Override expired</string>
+
+    <!-- Company Switcher -->
+    <string name="company_switcher_select">Select company</string>
+    <string name="company_switcher_open">Open company selector</string>
+    <string name="company_switcher_all_vendor">All companies (Vendor)</string>
+    <string name="company_switcher_dialog_title">Select Company</string>
+    <string name="company_switcher_search_placeholder">Search company...</string>
+    <string name="company_search_no_results">No companies found</string>
+    <string name="company_status_active">Active</string>
+    <string name="company_status_restricted">Restricted</string>
+    <string name="company_status_unknown">Unknown</string>
+
+    <!-- Events Screen Top Bar Actions -->
+    <string name="events_export_csv">Export CSV</string>
+    <string name="events_show_statistics">Show statistics</string>
+    <string name="events_filter_tune">Filters</string>
+
+    <!-- Events Screen -->
+    <!-- Filters -->
+    <string name="events_search_id_label">Search by ID</string>
+    <string name="events_search_id_placeholder">Event ID...</string>
+    <string name="events_filter_date_label">Date</string>
+    <string name="events_filter_date_all">All dates</string>
+    <string name="events_filter_date_today">Today</string>
+    <string name="events_filter_date_yesterday">Yesterday</string>
+    <string name="events_filter_date_last_7_days">7 days</string>
+    <string name="events_date_picker_title">Select date</string>
+    <string name="events_date_mode_single">Single day</string>
+    <string name="events_date_mode_range">Period</string>
+    <string name="events_date_apply">Apply</string>
+    <string name="events_date_reset">Reset</string>
+    <string name="events_date_cancel">Cancel</string>
+    <string name="events_filter_types_label">Event types</string>
+    <string name="events_filter_types_all">All event types</string>
+    <string name="events_filter_types_selected">Selected: %1$d</string>
+    <string name="events_filter_locations_label">Locations and cameras</string>
+    <string name="events_filter_locations_all">All locations and cameras</string>
+    <string name="events_filter_locations_selected">Cameras selected: %1$d</string>
+    <string name="events_validity_all">All events</string>
+    <string name="events_validity_valid_only">Only valid</string>
+    <string name="events_validity_erroneous_only">Only erroneous</string>
+    <string name="events_filters_reset">Reset filters</string>
+    <string name="events_filters_collapse">Collapse filters</string>
+    <string name="events_filters_expand">Expand filters</string>
+    <string name="events_filters_active_count">Active: %1$d</string>
+
+    <!-- Summary & Stats -->
+    <string name="events_summary_today_label">Events today</string>
+    <string name="events_summary_devices_title">Devices</string>
+    <string name="events_summary_devices_ok">OK</string>
+    <string name="events_summary_devices_unknown">Unknown</string>
+    <string name="events_summary_devices_error">Error</string>
+    <string name="events_summary_devices_total">Total</string>
+    <string name="events_trend_improving">Improving</string>
+    <string name="events_trend_worsening">Worsening</string>
+    <string name="events_trend_stable">Stable</string>
+    <string name="events_trend_unknown">Unknown trend</string>
+    <string name="events_summary_empty">No stats available</string>
+    <string name="events_summary_loading">Loading stats...</string>
+
+    <!-- Feed & List -->
+    <string name="events_empty_no_events">No events recorded</string>
+    <string name="events_empty_period_no_events">No events recorded for the selected period</string>
+    <string name="events_empty_no_events_filtered">No events found matching current filters</string>
+    <string name="events_list_loading">Loading events...</string>
+    <string name="events_list_load_more">Loading more...</string>
+    <string name="events_list_pending_new_events">+%1$d new events</string>
+    <string name="events_list_requires_refresh">New events available. Click to refresh.</string>
+    <string name="events_refresh">Refresh</string>
+
+    <!-- Card Statuses -->
+    <string name="events_status_new">New</string>
+    <string name="events_status_acknowledged">Acknowledged</string>
+    <string name="events_status_erroneous">Erroneous</string>
+    <string name="events_status_legacy">Historical</string>
+
+    <!-- Viewer & Details -->
+    <string name="events_viewer_placeholder">Select an event in the list to view details and video</string>
+    <string name="events_viewer_details_title">Event Details</string>
+    <string name="events_viewer_occurred_at">Occurred at</string>
+    <string name="events_viewer_location">Location</string>
+    <string name="events_viewer_device">Camera / Device</string>
+    <string name="events_viewer_category">Category</string>
+    <string name="events_viewer_id_label">Event ID</string>
+    <string name="events_viewer_copy_id">Copy ID</string>
+    <string name="events_viewer_id_copied">Event ID copied to clipboard</string>
+    <string name="events_viewer_mark_erroneous">Mark erroneous</string>
+    <string name="events_viewer_mark_erroneous_title">Confirm Erroneous Mark</string>
+    <string name="events_viewer_mark_erroneous_warning">Use this mark only for actual recognition errors. It is prohibited to mark real events to manipulate metrics. This action will be logged in the audit trail linked to your account. Abuse will be shown in the management dashboard and statistics will be recalculated.</string>
+    <string name="events_viewer_mark_erroneous_confirm">Yes, event is erroneous</string>
+    <string name="events_viewer_mark_erroneous_cancel">Cancel</string>
+    <string name="events_viewer_mark_erroneous_success">Event marked as erroneous</string>
+    <string name="events_viewer_mark_erroneous_conflict">Event version conflict. Please review the updated event.</string>
+    <string name="events_viewer_mark_erroneous_error">Failed to mark event as erroneous</string>
+    <string name="events_viewer_close">Close details</string>
+    <string name="events_mutation_permission_denied">Permission denied</string>
+    <string name="events_mutation_conflict">Event version conflict. Please review the updated event.</string>
+    <string name="events_mutation_payload_mismatch">Request error (idempotency mismatch)</string>
+    <string name="events_mutation_network_error">Network error</string>
+    <string name="events_mutation_generic_error">Failed to complete action</string>
+
+    <!-- Video & Media -->
+    <string name="events_video_play">Play video</string>
+    <string name="events_video_pause">Pause video</string>
+    <string name="events_video_fullscreen">Fullscreen</string>
+    <string name="events_video_loading">Loading video...</string>
+    <string name="events_video_unavailable">Video unavailable</string>
+    <string name="events_video_retry">Retry video</string>
+    <string name="events_video_open">Open video</string>
+    <string name="events_video_download">Download video</string>
+    <string name="events_video_download_starting">Starting download...</string>
+    <string name="events_video_download_success">Video download completed</string>
+    <string name="events_video_download_error">Failed to download video</string>
+    <string name="events_media_preview_desc">Event preview</string>
+
+    <!-- Export Panel -->
+    <string name="events_export_panel_title">CSV Export Settings</string>
+    <string name="events_export_format_label">Format</string>
+    <string name="events_export_format_excel">Excel (CSV, Semicolon, UTF-8 BOM)</string>
+    <string name="events_export_format_standard">Standard (CSV, Comma, UTF-8)</string>
+    <string name="events_export_include_media_links">Include media links</string>
+    <string name="events_export_media_links_warning">Warning: Links to JPG/MP4 are permanent public URLs. CONTROL cannot revoke access to a link once exported.</string>
+    <string name="events_export_rows_count">Records to export: %1$d</string>
+    <string name="events_export_rows_count_server">Record count will be calculated by server</string>
+    <string name="events_export_start_btn">Export CSV</string>
+    <string name="events_export_status_queued">Export queued...</string>
+    <string name="events_export_status_processing">Preparing CSV file (%1$d%%)...</string>
+    <string name="events_export_status_completed">Export ready for download</string>
+    <string name="events_export_status_failed">Export preparation failed</string>
+    <string name="events_export_status_expired">Export expired</string>
+    <string name="events_export_download_btn">Download CSV</string>
+    <string name="events_export_expired_msg">The exported file has expired. Please create a new export.</string>
+    <string name="events_export_error_generic">Failed to prepare export</string>
+    <string name="events_export_error_limit_exceeded">Export record limit exceeded (maximum 250,000)</string>
+    <string name="events_export_error_queue_ttl">Export request expired in queue</string>
+    <string name="events_export_error_abandoned">Export abandoned due to timeout</string>
+    <string name="events_export_error_storage_failed">Storage error while saving export</string>
+    <string name="events_export_error_worker_failed">Worker encountered an internal error</string>
+    <string name="events_export_error_access_revoked">Export access was revoked</string>
+    <string name="events_export_downloading">Downloading export file...</string>
+    <string name="events_export_download_success">Export saved successfully</string>
+    <string name="events_export_download_error">Failed to download export file</string>
+
+    <!-- Error States -->
+    <string name="events_error_snapshot_expired">Snapshot expired. Refreshing data...</string>
+    <string name="events_error_snapshot_too_large">Too many events found. Please narrow down your search or date range.</string>
+    <string name="events_error_apply_suggested">Apply suggested range</string>
+    <string name="events_error_filter_invalid">Invalid filter criteria. Resetting invalid filters.</string>
+    <string name="events_connection_failed_title">Connection error</string>
+    <string name="events_connection_failed_3_attempts">Failed to connect to real-time server.</string>
+    <string name="events_http_failed_title">Request failed</string>
+    <string name="events_http_failed_3_attempts">Failed to load data after 3 attempts. Please try again later.</string>
+    <string name="events_export_polling_timeout">Export preparation timed out. Please try again later.</string>
+
+    <!-- Realtime Connection State -->
+    <string name="events_ws_connecting">Connecting...</string>
+    <string name="events_ws_reconnecting">Reconnecting...</string>
+    <string name="events_ws_offline">Offline</string>
+    <string name="events_ws_connected">Live updates active</string>
+
+    <!-- Restricted Screens -->
+    <string name="restricted_company_frozen_title">Company is suspended</string>
+    <string name="restriction_billing_debt">Billing debt</string>
+    <string name="restriction_maintenance">Maintenance in progress</string>
+    <string name="restriction_admin_blocked">Blocked by administrator</string>
+    <string name="restriction_terms_violation">Terms of service violation</string>
+    <string name="restriction_unknown">Access restricted</string>
+    <string name="restriction_reason_label">Reason: %1$s</string>
+    <string name="restriction_until_label">Active until: %1$s</string>
+    <string name="restriction_contact_label">Support contact: %1$s</string>
+    <string name="restricted_access_denied_title">Access to company denied</string>
+    <string name="restricted_access_denied_desc">You do not have permission to access this company.</string>
+    <string name="restricted_no_permissions_title">Insufficient permissions</string>
+    <string name="restricted_no_permissions_desc">Your account does not have the required permissions to view this section.</string>
+    <string name="restricted_account_frozen_title">Account is suspended</string>
+    <string name="restricted_account_frozen_desc">Your account has been temporarily suspended.</string>
+    <string name="restricted_no_companies_title">No companies available</string>
+    <string name="restricted_no_companies_desc">You are not a member of any company.</string>
+    <string name="tenant_error_title">Failed to load company data</string>
+    <string name="action_switch_company">Switch company</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_logout">Log out</string>
+    <string name="action_copy">Copy</string>
+    <string name="notice_copied_to_clipboard">Copied to clipboard</string>
+    <string name="dialog_close">Close</string>
+
+    <string name="error_network_connection">No internet connection</string>
+    <string name="error_server_unavailable">Server is temporarily unavailable</string>
+    <string name="error_unknown_occurred">An unexpected error occurred</string>
+    <string name="error_access_denied">Access denied</string>
+    <string name="error_company_not_found">Company not found</string>
+    <string name="error_session_expired">Session expired. Please log in again.</string>
+
+    <!-- Vendor Dashboard -->
+    <string name="vendor_dashboard_title">Companies Dashboard</string>
+    <string name="vendor_dashboard_subtitle">Vendor administration and company management</string>
+    <string name="vendor_dashboard_companies_header">Managed Companies</string>
+    <string name="vendor_dashboard_empty">No companies associated</string>
+    <string name="vendor_dashboard_empty_hint">There are currently no companies assigned to your account. Please contact an administrator to request company access.</string>
+    <string name="vendor_dashboard_badge">Vendor Mode</string>
+    <string name="vendor_dashboard_search_placeholder">Search companies...</string>
 </resources>

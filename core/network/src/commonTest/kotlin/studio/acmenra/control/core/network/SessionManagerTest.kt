@@ -400,4 +400,38 @@ class SessionManagerTest {
         assertFalse(resp.toString().contains("super_secret_refresh_789"))
         assertTrue(resp.toString().contains("REDACTED"))
     }
+
+    @Test
+    fun testClearRefreshDelegateOnlyClearsExpectedDelegate() =
+        runTest {
+            val storage = FakeTokenStorage()
+            val manager = SessionManager(storage)
+            manager.saveSession(TokenPair("access_1", "refresh_1"))
+
+            val delegateA: suspend (String?) -> studio.acmenra.control.core.network.auth.SessionSnapshot? = {
+                studio.acmenra.control.core.network.auth
+                    .SessionSnapshot(TokenPair("acc_a", "ref_a"), 10L)
+            }
+            val delegateB: suspend (String?) -> studio.acmenra.control.core.network.auth.SessionSnapshot? = {
+                studio.acmenra.control.core.network.auth
+                    .SessionSnapshot(TokenPair("acc_b", "ref_b"), 20L)
+            }
+
+            manager.setRefreshDelegate(delegateA)
+            assertEquals("acc_a", manager.refreshActiveSession()?.tokens?.accessToken)
+
+            // Client B sets delegate B
+            manager.setRefreshDelegate(delegateB)
+            assertEquals("acc_b", manager.refreshActiveSession()?.tokens?.accessToken)
+
+            // Client A closes and attempts to clear with delegateA
+            manager.clearRefreshDelegate(delegateA)
+            // delegateB must still be active!
+            assertEquals("acc_b", manager.refreshActiveSession()?.tokens?.accessToken)
+
+            // Client B closes and clears with delegateB
+            manager.clearRefreshDelegate(delegateB)
+            // Now fallback to snapshot from storage
+            assertEquals("access_1", manager.refreshActiveSession()?.tokens?.accessToken)
+        }
 }

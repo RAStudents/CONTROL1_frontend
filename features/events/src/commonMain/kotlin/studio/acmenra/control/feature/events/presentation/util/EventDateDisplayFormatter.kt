@@ -26,7 +26,13 @@ object EventDateDisplayFormatter {
         val y = dateTime.year
         val h = dateTime.hour.toString().padStart(2, '0')
         val min = dateTime.minute.toString().padStart(2, '0')
-        return "$d.$m.$y $h:$min"
+        val sec = dateTime.second
+        return if (sec > 0) {
+            val s = sec.toString().padStart(2, '0')
+            "$d.$m.$y $h:$min:$s"
+        } else {
+            "$d.$m.$y $h:$min"
+        }
     }
 
     fun formatMskOffset(
@@ -54,6 +60,8 @@ object EventDateDisplayFormatter {
         dateFrom: Instant?,
         dateTo: Instant?,
         businessTimeZone: TimeZone?,
+        fromPrefix: String = "от",
+        toPrefix: String = "до",
         customIntervalPrefix: String? = null,
     ): String? {
         if (businessTimeZone == null || (dateFrom == null && dateTo == null)) return null
@@ -82,9 +90,9 @@ object EventDateDisplayFormatter {
             val startDate = fromDateTime.date
             val isFromMidnight = dateFrom == startDate.atStartOfDayIn(businessTimeZone)
             return if (isFromMidnight) {
-                "от ${formatLocalDate(startDate)}"
+                "$fromPrefix ${formatLocalDate(startDate)}"
             } else {
-                val formatted = "от ${formatLocalDateTime(fromDateTime)}"
+                val formatted = "$fromPrefix ${formatLocalDateTime(fromDateTime)}"
                 if (customIntervalPrefix != null) "$customIntervalPrefix: $formatted" else formatted
             }
         } else if (dateTo != null) {
@@ -93,9 +101,9 @@ object EventDateDisplayFormatter {
             val isToMidnight = dateTo == endExclusiveDate.atStartOfDayIn(businessTimeZone)
             return if (isToMidnight) {
                 val endDisplayDate = endExclusiveDate.minus(1, DateTimeUnit.DAY)
-                "до ${formatLocalDate(endDisplayDate)}"
+                "$toPrefix ${formatLocalDate(endDisplayDate)}"
             } else {
-                val formatted = "до ${formatLocalDateTime(toDateTime)}"
+                val formatted = "$toPrefix ${formatLocalDateTime(toDateTime)}"
                 if (customIntervalPrefix != null) "$customIntervalPrefix: $formatted" else formatted
             }
         }

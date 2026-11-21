@@ -28,6 +28,8 @@ import org.jetbrains.compose.resources.stringResource
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.events_date_apply
 import studio.acmenra.control.core.ui.generated.resources.events_date_custom_interval
+import studio.acmenra.control.core.ui.generated.resources.events_date_from_prefix
+import studio.acmenra.control.core.ui.generated.resources.events_date_to_prefix
 import studio.acmenra.control.core.ui.generated.resources.events_filter_clear_search_tooltip
 import studio.acmenra.control.core.ui.generated.resources.events_filter_date_all
 import studio.acmenra.control.core.ui.generated.resources.events_filter_date_label
@@ -69,12 +71,16 @@ fun EventsFilters(
     var searchIdInput by remember(filter.searchId) { mutableStateOf(filter.searchId ?: "") }
 
     val customIntervalLabel = stringResource(Res.string.events_date_custom_interval)
+    val fromPrefix = stringResource(Res.string.events_date_from_prefix)
+    val toPrefix = stringResource(Res.string.events_date_to_prefix)
     val formattedDate =
-        remember(filter.dateFrom, filter.dateTo, businessTimeZone, customIntervalLabel) {
+        remember(filter.dateFrom, filter.dateTo, businessTimeZone, customIntervalLabel, fromPrefix, toPrefix) {
             EventDateDisplayFormatter.formatFilterDisplayDate(
                 dateFrom = filter.dateFrom,
                 dateTo = filter.dateTo,
                 businessTimeZone = businessTimeZone,
+                fromPrefix = fromPrefix,
+                toPrefix = toPrefix,
                 customIntervalPrefix = customIntervalLabel,
             )
         }

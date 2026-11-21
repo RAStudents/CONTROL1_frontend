@@ -175,6 +175,8 @@
     <string name="events_export_download_success">Export saved successfully</string>
     <string name="events_export_download_initiated">Export download initiated</string>
     <string name="events_date_custom_interval">Custom interval</string>
+    <string name="events_date_from_prefix">from</string>
+    <string name="events_date_to_prefix">to</string>
     <string name="events_export_download_error">Failed to download export file</string>
 
     <!-- Error States -->

@@ -378,32 +378,55 @@ class EventsViewModel(
             }
     }
 
+    private var pendingSearchId: String? = null
+
     fun onSearchIdChanged(newSearchId: String) {
         val trimmed = newSearchId.trim()
         val current = _state.value.filter.searchId ?: ""
-        if (trimmed == current) return
+        if (trimmed == current && pendingSearchId == null) return
 
-        _state.update {
-            it.copy(filter = it.filter.copy(searchId = trimmed.ifBlank { null }))
-        }
-
+        pendingSearchId = newSearchId
         searchDebounceJob?.cancel()
         searchDebounceJob =
             viewModelScope.launch {
                 delay(400L)
-                restartFeedSession()
-                syncFilterToUrl(_state.value.filter)
+                commitPendingSearch()
             }
+    }
+
+    private fun commitPendingSearch() {
+        val pending = pendingSearchId ?: return
+        pendingSearchId = null
+        val trimmed = pending.trim().ifBlank { null }
+        if (_state.value.filter.searchId == trimmed) return
+        val newFilter = _state.value.filter.copy(searchId = trimmed)
+        _state.update { it.copy(filter = newFilter) }
+        restartFeedSession()
+        syncFilterToUrl(newFilter)
     }
 
     fun onSearchIdCommitted(newSearchId: String) {
         searchDebounceJob?.cancel()
+        pendingSearchId = null
         val trimmed = newSearchId.trim().ifBlank { null }
         if (_state.value.filter.searchId == trimmed) return
         val newFilter = _state.value.filter.copy(searchId = trimmed)
         _state.update { it.copy(filter = newFilter) }
         restartFeedSession()
         syncFilterToUrl(newFilter)
+    }
+
+    private fun flushPendingSearch() {
+        searchDebounceJob?.cancel()
+        val pending = pendingSearchId ?: return
+        pendingSearchId = null
+        val trimmed = pending.trim().ifBlank { null }
+        if (_state.value.filter.searchId != trimmed) {
+            val newFilter = _state.value.filter.copy(searchId = trimmed)
+            _state.update { it.copy(filter = newFilter) }
+            restartFeedSession()
+            syncFilterToUrl(newFilter)
+        }
     }
 
     fun onResetDate() {
@@ -521,8 +544,14 @@ class EventsViewModel(
 
     fun resetFilters() {
         searchDebounceJob?.cancel()
+        pendingSearchId = null
         val newFilter = EventsFilter()
-        _state.update { it.copy(filter = newFilter) }
+        _state.update {
+            it.copy(
+                filter = newFilter,
+                isDatePickerOpen = false,
+            )
+        }
         restartFeedSession()
         syncFilterToUrl(newFilter)
     }
@@ -789,7 +818,7 @@ class EventsViewModel(
         if (requestCompanyId.isBlank()) return
         val currentCompanyGen = companyGeneration
 
-        searchDebounceJob?.cancel()
+        flushPendingSearch()
         autoDownloadAttemptedExportId = null
         _state.update { it.copy(isExportSubmitting = true, exportError = null) }
 
@@ -1014,12 +1043,18 @@ class EventsViewModel(
             }
     }
 
+    private fun canDownloadExport(exportId: String): Boolean {
+        val status = _state.value.exportJobStatus ?: return false
+        return status.exportId == exportId && status.isDownloadable
+    }
+
     private fun triggerAutoDownload(
         exportId: String,
         requestCompanyId: String,
         currentCompanyGen: Long,
     ) {
         if (!_state.value.access.canExport) return
+        if (!canDownloadExport(exportId)) return
         val currentDownloadGen = ++downloadGeneration
         downloadExportJob?.cancel()
         downloadExportJob =
@@ -1095,16 +1130,16 @@ class EventsViewModel(
     fun downloadExport(exportId: String) {
         if (!_state.value.access.canExport) return
         if (_state.value.isExportDownloading) return
-        val jobStatus = _state.value.exportJobStatus
-        val expiresAt = jobStatus?.expiresAt
+        val jobStatus = _state.value.exportJobStatus ?: return
+        val expiresAt = jobStatus.expiresAt
         val now = Clock.System.now()
-        if (jobStatus?.status == EventsExportStatusCode.EXPIRED ||
+        if (jobStatus.status == EventsExportStatusCode.EXPIRED ||
             (expiresAt != null && now >= expiresAt)
         ) {
             _state.update {
                 it.copy(
                     exportJobStatus =
-                        jobStatus?.copy(
+                        jobStatus.copy(
                             status = EventsExportStatusCode.EXPIRED,
                         ),
                     exportError = Res.string.events_export_expired_msg,
@@ -1117,7 +1152,7 @@ class EventsViewModel(
             }
             return
         }
-        if (jobStatus != null && !jobStatus.isDownloadable) return
+        if (!canDownloadExport(exportId)) return
 
         val requestCompanyId = _state.value.companyId
         val currentCompanyGen = companyGeneration

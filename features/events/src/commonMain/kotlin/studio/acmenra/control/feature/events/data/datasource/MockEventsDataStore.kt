@@ -18,6 +18,7 @@ import studio.acmenra.control.feature.events.data.model.EventsSummaryDto
 import studio.acmenra.control.feature.events.data.model.LocationFilterGroupDto
 import studio.acmenra.control.feature.events.data.model.TenantCommitFrameDto
 import studio.acmenra.control.feature.events.domain.model.EventValidityFilter
+import studio.acmenra.control.feature.events.domain.model.EventsDomainException
 import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
 import kotlin.time.Clock
@@ -34,7 +35,22 @@ const val MOCK_PREVIEW_URL =
 class MockEventsDataStore {
     private val mutex = Mutex()
     private var exportIdCounter = 0
-    private val exportRequests = mutableMapOf<String, CreateExportRequestDto>()
+
+    private data class MockExportRecord(
+        val exportId: String,
+        val companyId: String,
+        val idempotencyKey: String,
+        val request: CreateExportRequestDto,
+        val createdAt: Instant,
+        val finishedAt: Instant,
+        val expiresAt: Instant,
+        val processedRecords: Long,
+        val totalRecords: Long,
+        val downloadUrl: String,
+    )
+
+    private val exportsById = mutableMapOf<String, MockExportRecord>()
+    private val exportIdsByIdempotencyKey = mutableMapOf<Pair<String, String>, String>()
 
     private data class CompanyMockState(
         val events: MutableList<EventDto>,
@@ -392,102 +408,143 @@ class MockEventsDataStore {
             updated
         }
 
-    fun createExport(
+    suspend fun createExport(
         companyId: String,
         request: CreateExportRequestDto,
         idempotencyKey: String,
-    ): EventsExportStatusDto {
-        val state = getOrCreateCompanyStateLocked(companyId)
-        val exportId = "mock-export-${++exportIdCounter}"
-        exportRequests[exportId] = request
-        val now = Clock.System.now()
-        val expiresAt = now + 1.hours
-        val query =
-            EventsQuery(
-                filter =
-                    studio.acmenra.control.feature.events.domain.model.EventsFilter(
-                        searchId = request.filters.searchId,
-                        dateFrom = request.filters.from?.let { runCatching { Instant.parse(it) }.getOrNull() },
-                        dateTo = request.filters.to?.let { runCatching { Instant.parse(it) }.getOrNull() },
-                        eventTypeIds = request.filters.eventTypeIds.toSet(),
-                        deviceIds = request.filters.deviceIds.toSet(),
-                        validity =
-                            when (request.filters.validity.uppercase()) {
-                                "VALID" -> EventValidityFilter.VALID
-                                "ERRONEOUS" -> EventValidityFilter.ERRONEOUS
-                                else -> EventValidityFilter.ALL
-                            },
-                    ),
-            )
-        val matchingEvents = filterEventsLocked(state.events, query)
-        return EventsExportStatusDto(
-            exportId = exportId,
-            status = "COMPLETED",
-            createdAt = now.toString(),
-            finishedAt = now.toString(),
-            expiresAt = expiresAt.toString(),
-            processedRecords = matchingEvents.size.toLong(),
-            totalRecords = matchingEvents.size.toLong(),
-            progressPercent = 100,
-            downloadUrl = "https://example.com/$exportId.csv",
-        )
-    }
-
-    fun getExportStatus(
-        companyId: String,
-        exportId: String,
-    ): EventsExportStatusDto {
-        val state = getOrCreateCompanyStateLocked(companyId)
-        val now = Clock.System.now()
-        val expiresAt = now + 1.hours
-        val req = exportRequests[exportId]
-        val total =
-            if (req != null) {
-                val query =
-                    EventsQuery(
-                        filter =
-                            studio.acmenra.control.feature.events.domain.model.EventsFilter(
-                                searchId = req.filters.searchId,
-                                dateFrom = req.filters.from?.let { runCatching { Instant.parse(it) }.getOrNull() },
-                                dateTo = req.filters.to?.let { runCatching { Instant.parse(it) }.getOrNull() },
-                                eventTypeIds = req.filters.eventTypeIds.toSet(),
-                                deviceIds = req.filters.deviceIds.toSet(),
-                                validity =
-                                    when (req.filters.validity.uppercase()) {
-                                        "VALID" -> EventValidityFilter.VALID
-                                        "ERRONEOUS" -> EventValidityFilter.ERRONEOUS
-                                        else -> EventValidityFilter.ALL
-                                    },
-                            ),
+    ): EventsExportStatusDto =
+        mutex.withLock {
+            val key = companyId to idempotencyKey
+            val existingId = exportIdsByIdempotencyKey[key]
+            if (existingId != null) {
+                val existingRecord = exportsById[existingId]
+                if (existingRecord != null) {
+                    val now = Clock.System.now()
+                    val isExpired = now >= existingRecord.expiresAt
+                    return@withLock EventsExportStatusDto(
+                        exportId = existingRecord.exportId,
+                        status = if (isExpired) "EXPIRED" else "COMPLETED",
+                        createdAt = existingRecord.createdAt.toString(),
+                        finishedAt = existingRecord.finishedAt.toString(),
+                        expiresAt = existingRecord.expiresAt.toString(),
+                        processedRecords = existingRecord.processedRecords,
+                        totalRecords = existingRecord.totalRecords,
+                        progressPercent = 100,
+                        downloadUrl = if (isExpired) null else existingRecord.downloadUrl,
                     )
-                filterEventsLocked(state.events, query).size.toLong()
-            } else {
-                state.events.size.toLong()
+                }
             }
-        return EventsExportStatusDto(
-            exportId = exportId,
-            status = "COMPLETED",
-            createdAt = now.toString(),
-            finishedAt = now.toString(),
-            expiresAt = expiresAt.toString(),
-            processedRecords = total,
-            totalRecords = total,
-            progressPercent = 100,
-            downloadUrl = "https://example.com/$exportId.csv",
-        )
-    }
 
-    fun downloadExport(
+            val state = getOrCreateCompanyStateLocked(companyId)
+            val exportId = "mock-export-${++exportIdCounter}"
+            val now = Clock.System.now()
+            val expiresAt = now + 1.hours
+            val query =
+                EventsQuery(
+                    filter =
+                        studio.acmenra.control.feature.events.domain.model.EventsFilter(
+                            searchId = request.filters.searchId,
+                            dateFrom = request.filters.from?.let { runCatching { Instant.parse(it) }.getOrNull() },
+                            dateTo = request.filters.to?.let { runCatching { Instant.parse(it) }.getOrNull() },
+                            eventTypeIds = request.filters.eventTypeIds.toSet(),
+                            deviceIds = request.filters.deviceIds.toSet(),
+                            validity =
+                                when (request.filters.validity.uppercase()) {
+                                    "VALID" -> EventValidityFilter.VALID
+                                    "ERRONEOUS" -> EventValidityFilter.ERRONEOUS
+                                    else -> EventValidityFilter.ALL
+                                },
+                        ),
+                )
+            val matchingEvents = filterEventsLocked(state.events, query)
+            val total = matchingEvents.size.toLong()
+            val downloadUrl = "https://example.com/$exportId.csv"
+
+            val record =
+                MockExportRecord(
+                    exportId = exportId,
+                    companyId = companyId,
+                    idempotencyKey = idempotencyKey,
+                    request = request,
+                    createdAt = now,
+                    finishedAt = now,
+                    expiresAt = expiresAt,
+                    processedRecords = total,
+                    totalRecords = total,
+                    downloadUrl = downloadUrl,
+                )
+            exportsById[exportId] = record
+            exportIdsByIdempotencyKey[key] = exportId
+
+            EventsExportStatusDto(
+                exportId = exportId,
+                status = "COMPLETED",
+                createdAt = now.toString(),
+                finishedAt = now.toString(),
+                expiresAt = expiresAt.toString(),
+                processedRecords = total,
+                totalRecords = total,
+                progressPercent = 100,
+                downloadUrl = downloadUrl,
+            )
+        }
+
+    suspend fun getExportStatus(
         companyId: String,
         exportId: String,
-    ): EventsExportDownload {
-        val state = getOrCreateCompanyStateLocked(companyId)
-        val req = exportRequests[exportId]
-        val includeMedia = req?.includeMediaLinks ?: false
-        val isSemicolon = req?.formatPreset != "STANDARD_COMMA_UTF8"
-        val sep = if (isSemicolon) ";" else ","
-        val query =
-            if (req != null) {
+    ): EventsExportStatusDto =
+        mutex.withLock {
+            val record =
+                exportsById[exportId]
+                    ?: throw EventsDomainException.Generic(
+                        code = "NOT_FOUND",
+                        serverMessage = "Export not found: $exportId",
+                        retryable = false,
+                    )
+            if (record.companyId != companyId) {
+                throw EventsDomainException.PermissionDenied("Export does not belong to company: $companyId")
+            }
+            val now = Clock.System.now()
+            val isExpired = now >= record.expiresAt
+            EventsExportStatusDto(
+                exportId = record.exportId,
+                status = if (isExpired) "EXPIRED" else "COMPLETED",
+                createdAt = record.createdAt.toString(),
+                finishedAt = record.finishedAt.toString(),
+                expiresAt = record.expiresAt.toString(),
+                processedRecords = record.processedRecords,
+                totalRecords = record.totalRecords,
+                progressPercent = 100,
+                downloadUrl = if (isExpired) null else record.downloadUrl,
+            )
+        }
+
+    suspend fun downloadExport(
+        companyId: String,
+        exportId: String,
+    ): EventsExportDownload =
+        mutex.withLock {
+            val record =
+                exportsById[exportId]
+                    ?: throw EventsDomainException.Generic(
+                        code = "NOT_FOUND",
+                        serverMessage = "Export not found: $exportId",
+                        retryable = false,
+                    )
+            if (record.companyId != companyId) {
+                throw EventsDomainException.PermissionDenied("Export does not belong to company: $companyId")
+            }
+            val now = Clock.System.now()
+            if (now >= record.expiresAt) {
+                throw EventsDomainException.ExportExpired("Export expired at ${record.expiresAt}")
+            }
+
+            val state = getOrCreateCompanyStateLocked(companyId)
+            val req = record.request
+            val includeMedia = req.includeMediaLinks
+            val isSemicolon = req.formatPreset != "STANDARD_COMMA_UTF8"
+            val sep = if (isSemicolon) ";" else ","
+            val query =
                 EventsQuery(
                     filter =
                         studio.acmenra.control.feature.events.domain.model.EventsFilter(
@@ -504,49 +561,82 @@ class MockEventsDataStore {
                                 },
                         ),
                 )
-            } else {
-                EventsQuery()
-            }
-        val targetEvents = filterEventsLocked(state.events, query)
+            val targetEvents = filterEventsLocked(state.events, query)
 
-        val bytes =
-            buildString {
-                if (isSemicolon) {
-                    append("\uFEFF")
-                }
-                if (includeMedia) {
-                    appendLine(
-                        "ID${sep}Type${sep}Location${sep}Device${sep}OccurredAt${sep}Status${sep}IsErroneous${sep}PreviewUrl${sep}VideoUrl",
-                    )
-                    for (e in targetEvents) {
-                        appendLine(
-                            "${e.id}${sep}${e.eventTypeName}${sep}${e.locationName}${sep}${e.deviceName}${sep}${e.occurredAt}${sep}${e.status}${sep}${e.isErroneous}${sep}${e.previewUrl.orEmpty()}${sep}${e.videoUrl.orEmpty()}",
-                        )
-                    }
+            fun escapeCsv(value: String): String {
+                val needsQuotes =
+                    value.contains(sep) || value.contains('"') || value.contains('\n') || value.contains('\r')
+                return if (needsQuotes) {
+                    "\"${value.replace("\"", "\"\"")}\""
                 } else {
-                    appendLine("ID${sep}Type${sep}Location${sep}Device${sep}OccurredAt${sep}Status${sep}IsErroneous")
-                    for (e in targetEvents) {
-                        appendLine(
-                            "${e.id}${sep}${e.eventTypeName}${sep}${e.locationName}${sep}${e.deviceName}${sep}${e.occurredAt}${sep}${e.status}${sep}${e.isErroneous}",
-                        )
-                    }
+                    value
                 }
-            }.encodeToByteArray()
-        val handle = "mock-export-$exportId"
-        ExportPayloadRegistry.register(
-            handle = handle,
-            payload =
-                ExportPayload(
-                    bytes = bytes,
-                    contentType = if (isSemicolon) "text/csv; charset=utf-8" else "text/csv",
-                ),
-        )
-        return EventsExportDownload(
-            fileName = "events_export.csv",
-            contentLength = bytes.size.toLong(),
-            downloadHandle = handle,
-        )
-    }
+            }
+
+            val bytes =
+                buildString {
+                    if (isSemicolon) {
+                        append("\uFEFF")
+                    }
+                    if (includeMedia) {
+                        appendLine(
+                            "ID${sep}Type${sep}Location${sep}Device${sep}OccurredAt${sep}Status${sep}IsErroneous${sep}PreviewUrl${sep}VideoUrl",
+                        )
+                        for (e in targetEvents) {
+                            appendLine(
+                                "${escapeCsv(
+                                    e.id,
+                                )}${sep}${escapeCsv(
+                                    e.eventTypeName,
+                                )}${sep}${escapeCsv(
+                                    e.locationName,
+                                )}${sep}${escapeCsv(
+                                    e.deviceName,
+                                )}${sep}${escapeCsv(
+                                    e.occurredAt,
+                                )}${sep}${escapeCsv(
+                                    e.status,
+                                )}${sep}${escapeCsv(
+                                    e.isErroneous.toString(),
+                                )}${sep}${escapeCsv(e.previewUrl.orEmpty())}${sep}${escapeCsv(e.videoUrl.orEmpty())}",
+                            )
+                        }
+                    } else {
+                        appendLine(
+                            "ID${sep}Type${sep}Location${sep}Device${sep}OccurredAt${sep}Status${sep}IsErroneous",
+                        )
+                        for (e in targetEvents) {
+                            appendLine(
+                                "${escapeCsv(
+                                    e.id,
+                                )}${sep}${escapeCsv(
+                                    e.eventTypeName,
+                                )}${sep}${escapeCsv(
+                                    e.locationName,
+                                )}${sep}${escapeCsv(
+                                    e.deviceName,
+                                )}${sep}${escapeCsv(
+                                    e.occurredAt,
+                                )}${sep}${escapeCsv(e.status)}${sep}${escapeCsv(e.isErroneous.toString())}",
+                            )
+                        }
+                    }
+                }.encodeToByteArray()
+            val handle = "mock-export-$exportId"
+            ExportPayloadRegistry.register(
+                handle = handle,
+                payload =
+                    ExportPayload(
+                        bytes = bytes,
+                        contentType = if (isSemicolon) "text/csv; charset=utf-8" else "text/csv",
+                    ),
+            )
+            return@withLock EventsExportDownload(
+                fileName = "events_export.csv",
+                contentLength = bytes.size.toLong(),
+                downloadHandle = handle,
+            )
+        }
 
     suspend fun generateAndAddRealtimeCommit(
         companyId: String = "comp-001",

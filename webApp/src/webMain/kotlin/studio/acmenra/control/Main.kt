@@ -1,6 +1,10 @@
 package studio.acmenra.control
 
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.window.ComposeViewport
 import androidx.navigation.ExperimentalBrowserHistoryApi
@@ -9,12 +13,17 @@ import androidx.navigation.bindToBrowserNavigation
 import androidx.navigation.toRoute
 import kotlinx.browser.document
 import kotlinx.browser.window
+import org.w3c.dom.events.Event
 import studio.acmenra.control.di.initKoin
 import studio.acmenra.control.navigation.CompaniesDashboardRoute
 import studio.acmenra.control.navigation.EventsRoute
 import studio.acmenra.control.navigation.LoginRoute
 
-@OptIn(ExperimentalComposeUiApi::class, ExperimentalBrowserHistoryApi::class)
+@OptIn(
+    ExperimentalComposeUiApi::class,
+    ExperimentalBrowserHistoryApi::class,
+    kotlin.js.ExperimentalWasmJsInterop::class,
+)
 fun main() {
     initKoin()
 
@@ -23,10 +32,27 @@ fun main() {
             ?: error("Unable to initialize application: document.body is null")
 
     ComposeViewport(body) {
-        val initialHash = remember { window.location.hash }
+        var currentHash by remember { mutableStateOf(window.location.hash) }
+
+        DisposableEffect(Unit) {
+            val handleHashChange: (Event) -> Unit = {
+                currentHash = window.location.hash
+            }
+            window.addEventListener("popstate", handleHashChange)
+            window.addEventListener("hashchange", handleHashChange)
+            onDispose {
+                window.removeEventListener("popstate", handleHashChange)
+                window.removeEventListener("hashchange", handleHashChange)
+            }
+        }
+
+        fun updateBrowserHash(hash: String) {
+            window.history.replaceState(null, "", hash)
+            currentHash = hash
+        }
 
         App(
-            urlHash = initialHash,
+            urlHash = currentHash,
             onNavHostReady = { navController ->
                 navController.bindToBrowserNavigation { entry ->
                     if (entry.destination.hasRoute<EventsRoute>()) {
@@ -66,7 +92,7 @@ fun main() {
                         val cleanCompany = companyId.takeUnless { it.isBlank() || it == "null" }
                         "#events?companyId=${cleanCompany ?: "null"}&$queryHash"
                     }
-                window.history.replaceState(null, "", hash)
+                updateBrowserHash(hash)
             },
         )
     }

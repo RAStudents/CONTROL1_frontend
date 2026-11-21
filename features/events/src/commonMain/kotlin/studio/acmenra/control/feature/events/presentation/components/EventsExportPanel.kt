@@ -36,10 +36,12 @@ import studio.acmenra.control.core.ui.generated.resources.events_export_download
 import studio.acmenra.control.core.ui.generated.resources.events_export_format_excel_short
 import studio.acmenra.control.core.ui.generated.resources.events_export_format_standard_short
 import studio.acmenra.control.core.ui.generated.resources.events_export_media_links_chip
+import studio.acmenra.control.core.ui.generated.resources.events_export_panel_title
 import studio.acmenra.control.core.ui.generated.resources.events_export_redownload_tooltip
 import studio.acmenra.control.core.ui.generated.resources.events_export_rows_count
 import studio.acmenra.control.core.ui.generated.resources.events_export_rows_count_server
 import studio.acmenra.control.core.ui.generated.resources.events_export_start_btn
+import studio.acmenra.control.core.ui.generated.resources.events_export_status_processing
 import studio.acmenra.control.core.ui.generated.resources.events_export_status_queued
 import studio.acmenra.control.core.ui.generated.resources.ic_download
 import studio.acmenra.control.core.ui.theme.AmberDimens
@@ -79,7 +81,7 @@ fun EventsExportPanel(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = stringResource(Res.string.events_export_start_btn),
+                text = stringResource(Res.string.events_export_panel_title),
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
@@ -216,6 +218,8 @@ fun EventsExportPanel(
                                     isDownloading -> stringResource(Res.string.events_export_downloading)
                                     jobStatus?.status == EventsExportStatusCode.QUEUED ->
                                         stringResource(Res.string.events_export_status_queued)
+                                    jobStatus?.status == EventsExportStatusCode.PROCESSING ->
+                                        stringResource(Res.string.events_export_status_processing)
                                     else -> stringResource(Res.string.events_export_start_btn)
                                 }
                             Text(

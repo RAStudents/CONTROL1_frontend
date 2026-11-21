@@ -175,6 +175,8 @@
     <string name="events_export_download_success">Файл экспорта успешно сохранён</string>
     <string name="events_export_download_initiated">Загрузка файла инициирована</string>
     <string name="events_date_custom_interval">Точный интервал</string>
+    <string name="events_date_from_prefix">от</string>
+    <string name="events_date_to_prefix">до</string>
     <string name="events_export_download_error">Не удалось скачать файл экспорта</string>
 
     <!-- Error States -->

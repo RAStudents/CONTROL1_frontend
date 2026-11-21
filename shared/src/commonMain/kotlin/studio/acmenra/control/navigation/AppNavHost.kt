@@ -55,16 +55,17 @@ fun AppNavHost(
         navController = navController,
         startDestination = startDestination,
         modifier = modifier.fillMaxSize(),
-        enterTransition = { EnterTransition.None },
-        exitTransition = { ExitTransition.None },
-        popEnterTransition = { EnterTransition.None },
-        popExitTransition = { ExitTransition.None },
     ) {
         composable<LoginRoute> {
             LoginRouteContent()
         }
 
-        composable<EventsRoute> { entry ->
+        composable<EventsRoute>(
+            enterTransition = { EnterTransition.None },
+            exitTransition = { ExitTransition.None },
+            popEnterTransition = { EnterTransition.None },
+            popExitTransition = { ExitTransition.None },
+        ) { entry ->
             val route = entry.toRoute<EventsRoute>()
             val rawUrlHash =
                 if (!urlHash.isNullOrBlank() && (urlHash.startsWith("#events") || urlHash.startsWith("events"))) {
@@ -82,8 +83,8 @@ fun AppNavHost(
 
             val effectiveQueryHash =
                 when {
-                    !route.queryHash.isNullOrBlank() -> route.queryHash
                     rawUrlHash != null && isCompanyMatching -> rawUrlHash
+                    !route.queryHash.isNullOrBlank() -> route.queryHash
                     else -> null
                 }
 

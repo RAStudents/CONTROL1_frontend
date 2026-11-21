@@ -61,14 +61,26 @@
     <string name="events_filters_collapse">Collapse filters</string>
     <string name="events_filters_expand">Expand filters</string>
     <string name="events_filters_active_count">Active: %1$d</string>
+    <string name="events_filter_reset_tooltip">Reset filter</string>
+    <string name="events_filter_clear_search_tooltip">Clear search</string>
+    <string name="events_filter_clear_input_tooltip">Clear input</string>
+    <string name="events_filter_nothing_found">Nothing found</string>
+    <string name="events_timezone_msk_prefix">MSK</string>
+    <string name="events_filters_title">Filters</string>
 
     <!-- Summary & Stats -->
+    <string name="events_summary_title">Events</string>
+    <string name="events_summary_today_format">Today: %1$d</string>
+    <string name="events_summary_compact_title_format">Events: %1$d</string>
     <string name="events_summary_today_label">Events today</string>
     <string name="events_summary_devices_title">Devices</string>
     <string name="events_summary_devices_ok">OK</string>
     <string name="events_summary_devices_unknown">Unknown</string>
     <string name="events_summary_devices_error">Error</string>
     <string name="events_summary_devices_total">Total</string>
+    <string name="events_summary_devices_total_format">Total: %1$d</string>
+    <string name="events_filter_search_placeholder">Search...</string>
+    <string name="events_filter_options_loading">Loading filter options...</string>
     <string name="events_trend_improving">Improving</string>
     <string name="events_trend_worsening">Worsening</string>
     <string name="events_trend_stable">Stable</string>
@@ -136,7 +148,11 @@
     <string name="events_export_format_label">Format</string>
     <string name="events_export_format_excel">Excel (CSV, Semicolon, UTF-8 BOM)</string>
     <string name="events_export_format_standard">Standard (CSV, Comma, UTF-8)</string>
+    <string name="events_export_format_excel_short">Excel</string>
+    <string name="events_export_format_standard_short">Standard</string>
     <string name="events_export_include_media_links">Include media links</string>
+    <string name="events_export_media_links_chip">Media links</string>
+    <string name="events_export_redownload_tooltip">Download CSV</string>
     <string name="events_export_media_links_warning">Warning: Links to JPG/MP4 are permanent public URLs. CONTROL cannot revoke access to a link once exported.</string>
     <string name="events_export_rows_count">Records to export: %1$d</string>
     <string name="events_export_rows_count_server">Record count will be calculated by server</string>

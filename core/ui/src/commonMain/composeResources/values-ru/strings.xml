@@ -61,14 +61,26 @@
     <string name="events_filters_collapse">Свернуть фильтры</string>
     <string name="events_filters_expand">Развернуть фильтры</string>
     <string name="events_filters_active_count">Активно: %1$d</string>
+    <string name="events_filter_reset_tooltip">Сбросить фильтр</string>
+    <string name="events_filter_clear_search_tooltip">Очистить поиск</string>
+    <string name="events_filter_clear_input_tooltip">Очистить ввод</string>
+    <string name="events_filter_nothing_found">Ничего не найдено</string>
+    <string name="events_timezone_msk_prefix">MSK</string>
+    <string name="events_filters_title">Фильтры</string>
 
     <!-- Summary & Stats -->
+    <string name="events_summary_title">События</string>
+    <string name="events_summary_today_format">Сегодня: %1$d</string>
+    <string name="events_summary_compact_title_format">События: %1$d</string>
     <string name="events_summary_today_label">Событий за сегодня</string>
     <string name="events_summary_devices_title">Устройства</string>
     <string name="events_summary_devices_ok">В норме</string>
     <string name="events_summary_devices_unknown">Неизвестно</string>
     <string name="events_summary_devices_error">Ошибка</string>
     <string name="events_summary_devices_total">Всего</string>
+    <string name="events_summary_devices_total_format">Всего: %1$d</string>
+    <string name="events_filter_search_placeholder">Поиск...</string>
+    <string name="events_filter_options_loading">Загрузка параметров фильтра...</string>
     <string name="events_trend_improving">Улучшение</string>
     <string name="events_trend_worsening">Ухудшение</string>
     <string name="events_trend_stable">Стабильно</string>
@@ -136,7 +148,11 @@
     <string name="events_export_format_label">Формат файла</string>
     <string name="events_export_format_excel">Excel (CSV, точка с запятой, UTF-8 с BOM)</string>
     <string name="events_export_format_standard">Стандартный (CSV, запятая, UTF-8)</string>
+    <string name="events_export_format_excel_short">Excel</string>
+    <string name="events_export_format_standard_short">Стандартный</string>
     <string name="events_export_include_media_links">Включить ссылки на медиафайлы</string>
+    <string name="events_export_media_links_chip">Медиа-ссылки</string>
+    <string name="events_export_redownload_tooltip">Скачать CSV</string>
     <string name="events_export_media_links_warning">Внимание: ссылки на JPG/MP4 являются постоянными публичными URL. Платформа CONTROL не отзывает доступ к ссылкам после их экспорта.</string>
     <string name="events_export_rows_count">Записей к выгрузке: %1$d</string>
     <string name="events_export_rows_count_server">Количество будет рассчитано сервером</string>

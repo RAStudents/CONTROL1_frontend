@@ -173,7 +173,8 @@ object AmberDimens {
     val ListItemHeight = 72.dp
     val ListIconCircle = 40.dp
     val ListIcon = 24.dp
-    val TextFieldHeight = 56.dp
+    val TextFieldHeight = 64.dp
+    val EventsFilterFieldHeight = 64.dp
     val ButtonHeight = 56.dp
     val TopBarHeight = 64.dp
     val NavBarHeight = 80.dp
@@ -193,6 +194,21 @@ object AmberDimens {
     val EventsListWide = 360.dp
     val EventsListMedium = 320.dp
     val EventsDetailMin = 424.dp
+    val EventsSummaryExportHeight = 144.dp
+    val EventsSummaryPadding = 12.dp
+    val EventsDevicesCardPadding = 8.dp
+    val EventsDevicesBoxMinWidth = 120.dp
+    val EventsDevicesBoxCompactWidth = 90.dp
+    val EventsCompactButtonHeight = 40.dp
+    val EventsCompactFilterBarHeight = 44.dp
+    val EventsFieldActionSlot = 48.dp
+    val EventsDropdownMaxHeight = 280.dp
+    val EventsDropdownIndent = 16.dp
+    val EventsSmallIcon = 16.dp
+    val EventsGapTiny = 4.dp
+    val EventsSkeletonWidthWide = 100.dp
+    val EventsSkeletonWidthNarrow = 80.dp
+    val EventsSkeletonHeight = 12.dp
 
     // Width at which the layout switches from phone to tablet/desktop
     val TabletBreakpoint = 840.dp

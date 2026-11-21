@@ -24,6 +24,7 @@ import studio.acmenra.control.feature.events.domain.model.EventsPage
 import studio.acmenra.control.feature.events.domain.model.EventsPaginationError
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
 import studio.acmenra.control.feature.events.domain.model.EventsSummary
+import studio.acmenra.control.feature.events.domain.model.OverlayMembership
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
@@ -181,6 +182,7 @@ class EventsSessionProcessor(
     private var activeAuthGenerationId: Long = 1L
     private var activeConnectionId: Long = 0L
     private var nextCursor: String? = null
+    private var currentTotalCount: Int = 0
     private val earlyFramesBuffer = mutableMapOf<Long, MutableList<IncomingWsFrame>>()
 
     private data class AccessFence(
@@ -307,6 +309,7 @@ class EventsSessionProcessor(
                     setImmediateEventsReadDenied(denied = true, generation = Long.MAX_VALUE)
                     isAccessInvalidated = true
                     val wasRead = _state.value.access.eventsRead
+                    currentTotalCount = 0
                     _state.update {
                         it.copy(
                             access = it.access.copy(eventsRead = false),
@@ -608,6 +611,7 @@ class EventsSessionProcessor(
                     isRebootstrapping = false
                     bufferReplayId = null
                     nextCursor = null
+                    currentTotalCount = 0
                     _state.update {
                         it.copy(
                             access = command.access.copy(eventsRead = false),
@@ -685,6 +689,7 @@ class EventsSessionProcessor(
                     it.copy(
                         visibleEvents = visible,
                         realtimeOverlay = currentOverlay,
+                        snapshotTotalCount = currentTotalCount,
                         pendingNewerCount = newerCount,
                         pendingHistoryCount = historyCount,
                     )
@@ -895,6 +900,18 @@ class EventsSessionProcessor(
                 }
             }
 
+        currentTotalCount = bootstrap.page.totalCount
+        if (isRebootstrapping && deduplicatedCommits.isNotEmpty()) {
+            for (commit in deduplicatedCommits) {
+                commit.eventCreated?.let { createdDto ->
+                    val event = EventsDtoMapper.mapEvent(createdDto)
+                    if (RealtimeOverlayReducer.matchesFilter(event, query.filter)) {
+                        currentTotalCount++
+                    }
+                }
+            }
+        }
+
         val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
         val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
         _state.update {
@@ -904,7 +921,7 @@ class EventsSessionProcessor(
                 snapshotId = bootstrap.page.snapshotId,
                 asOfSequence = sequenceProcessor.currentSequence,
                 replayId = newReplayId,
-                snapshotTotalCount = bootstrap.page.totalCount,
+                snapshotTotalCount = currentTotalCount,
                 hasMore = bootstrap.page.hasMore,
                 isInitialLoading = false,
                 initialLoadError = null,
@@ -1095,6 +1112,7 @@ class EventsSessionProcessor(
             snapshotItems.clear()
             rebootstrapBuffer.clear()
             currentOverlay = RealtimeOverlay()
+            currentTotalCount = 0
             onAccessInvalidated(frame.frame.reason ?: "UNKNOWN", frame.frame.companyId)
             _state.update {
                 it.copy(
@@ -1283,7 +1301,7 @@ class EventsSessionProcessor(
 
         if (createdDto != null) {
             val event = EventsDtoMapper.mapEvent(createdDto)
-            val (newOverlay, _) =
+            val (newOverlay, membership) =
                 RealtimeOverlayReducer.applyEventCommit(
                     currentOverlay = tentativeOverlay,
                     event = event,
@@ -1293,6 +1311,9 @@ class EventsSessionProcessor(
                     hasMore = currentHasMore,
                 )
             tentativeOverlay = newOverlay
+            if (membership != OverlayMembership.REMOVED && RealtimeOverlayReducer.matchesFilter(event, query.filter)) {
+                currentTotalCount++
+            }
         }
 
         if (updatedDto != null) {
@@ -1350,6 +1371,7 @@ class EventsSessionProcessor(
                 visibleEvents = visible,
                 realtimeOverlay = currentOverlay,
                 summary = updatedSummary,
+                snapshotTotalCount = currentTotalCount,
                 asOfSequence = sequenceProcessor.currentSequence,
                 replayId = sequenceProcessor.currentReplayId,
                 pendingNewerCount = newerCount,

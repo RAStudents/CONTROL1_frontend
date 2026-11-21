@@ -9,6 +9,9 @@ import studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSou
 import studio.acmenra.control.feature.events.data.datasource.EventsWebSocketDataSource
 import studio.acmenra.control.feature.events.data.datasource.KtorEventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.KtorEventsWebSocketDataSource
+import studio.acmenra.control.feature.events.data.datasource.MockEventsDataStore
+import studio.acmenra.control.feature.events.data.datasource.MockEventsRemoteDataSource
+import studio.acmenra.control.feature.events.data.datasource.MockEventsWebSocketDataSource
 import studio.acmenra.control.feature.events.data.repository.EventsRepositoryImpl
 import studio.acmenra.control.feature.events.domain.repository.EventsConnectivityProvider
 import studio.acmenra.control.feature.events.domain.repository.EventsRepository
@@ -38,13 +41,29 @@ val eventsModule =
     module {
         includes(exportFileSaverModule, externalMediaOpenerModule)
 
+        single {
+            MockEventsDataStore()
+        }
+
         single<EventsRemoteDataSource> {
+            MockEventsRemoteDataSource(
+                dataStore = get(),
+            )
+        }
+
+        factory<EventsWebSocketDataSource> {
+            MockEventsWebSocketDataSource(
+                dataStore = get(),
+            )
+        }
+
+        single<EventsRemoteDataSource>(named("ktor")) {
             KtorEventsRemoteDataSource(
                 apiClient = get(named("api")),
             )
         }
 
-        factory<EventsWebSocketDataSource> {
+        factory<EventsWebSocketDataSource>(named("ktor")) {
             val config = get<ApiConfig>()
             KtorEventsWebSocketDataSource(
                 realtimeClient = get(named("realtime")),

@@ -21,27 +21,25 @@ import studio.acmenra.control.feature.events.domain.model.EventsExportDownload
 @OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
 @JsFun(
     """(filename, contentType, int8Array) => {
-    var url = null;
-    var a = null;
     try {
         var blob = new Blob([int8Array], { type: contentType });
-        url = URL.createObjectURL(blob);
-        a = document.createElement('a');
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.style.display = 'none';
         a.href = url;
         a.download = filename;
         document.body.appendChild(a);
         a.click();
+        setTimeout(function() {
+            if (a.parentNode) {
+                a.parentNode.removeChild(a);
+            }
+            URL.revokeObjectURL(url);
+        }, 1500);
         return true;
     } catch (e) {
         console.error('Failed to trigger download:', e);
         return false;
-    } finally {
-        if (a && a.parentNode) {
-            a.parentNode.removeChild(a);
-        }
-        if (url) {
-            setTimeout(function() { URL.revokeObjectURL(url); }, 2000);
-        }
     }
 }""",
 )

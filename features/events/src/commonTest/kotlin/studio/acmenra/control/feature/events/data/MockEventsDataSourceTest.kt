@@ -109,15 +109,22 @@ class MockEventsDataSourceTest {
             val store = MockEventsDataStore()
             val remoteDataSource = MockEventsRemoteDataSource(store)
 
-            val acked = remoteDataSource.acknowledgeEvent("comp_1", "ev_mock_1")
+            val acked = remoteDataSource.acknowledgeEvent("comp_1", "ev_mock_comp_1_1")
             assertEquals("ACKNOWLEDGED", acked.status)
             assertNotNull(acked.acknowledgedAt)
             assertEquals(2L, acked.eventVersion)
 
-            val marked = remoteDataSource.markEventErroneous("comp_1", "ev_mock_2", 1L, "idem_1")
+            val marked = remoteDataSource.markEventErroneous("comp_1", "ev_mock_comp_1_2", 1L, "idem_1")
             assertTrue(marked.isErroneous)
             assertNotNull(marked.erroneousMarkedAt)
             assertEquals(2L, marked.eventVersion)
+
+            // Verify mutations persisted in store
+            val bootstrap = store.getBootstrap("comp_1", EventsQuery())
+            val ackedInStore = bootstrap.events.items.first { it.id == "ev_mock_comp_1_1" }
+            assertEquals("ACKNOWLEDGED", ackedInStore.status)
+            val markedInStore = bootstrap.events.items.first { it.id == "ev_mock_comp_1_2" }
+            assertTrue(markedInStore.isErroneous)
         }
 
     @Test

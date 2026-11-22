@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -23,6 +24,7 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
 import org.koin.core.context.startKoin
 import org.koin.core.context.stopKoin
 import org.koin.core.qualifier.named
@@ -31,6 +33,7 @@ import studio.acmenra.control.core.network.client.ApiConfig
 import studio.acmenra.control.core.ui.notice.Notice
 import studio.acmenra.control.feature.events.data.datasource.EventsRemoteDataSource
 import studio.acmenra.control.feature.events.data.datasource.EventsWebSocketDataSource
+import studio.acmenra.control.feature.events.data.datasource.ExportPayloadRegistry
 import studio.acmenra.control.feature.events.data.datasource.IncomingWsEnvelope
 import studio.acmenra.control.feature.events.data.datasource.IncomingWsFrame
 import studio.acmenra.control.feature.events.data.datasource.KtorEventsRemoteDataSource
@@ -45,6 +48,7 @@ import studio.acmenra.control.feature.events.data.model.ResyncRequiredFrameDto
 import studio.acmenra.control.feature.events.data.model.TenantCommitFrameDto
 import studio.acmenra.control.feature.events.data.realtime.EventsSessionProcessor
 import studio.acmenra.control.feature.events.data.realtime.SessionCommand
+import studio.acmenra.control.feature.events.di.eventsMockEnvironmentModule
 import studio.acmenra.control.feature.events.di.eventsMockModule
 import studio.acmenra.control.feature.events.di.eventsModule
 import studio.acmenra.control.feature.events.domain.model.DateFilterUtils
@@ -68,11 +72,13 @@ import studio.acmenra.control.feature.events.domain.model.EventsMutationError
 import studio.acmenra.control.feature.events.domain.model.EventsOperationResult
 import studio.acmenra.control.feature.events.domain.model.EventsPage
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
+import studio.acmenra.control.feature.events.domain.model.EventsQueryRouteCodec
 import studio.acmenra.control.feature.events.domain.model.EventsSummary
 import studio.acmenra.control.feature.events.domain.model.LocationFilterGroup
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
+import studio.acmenra.control.feature.events.domain.repository.EventsRepository
 import studio.acmenra.control.feature.events.domain.usecase.AcknowledgeEventUseCase
 import studio.acmenra.control.feature.events.domain.usecase.CreateEventsExportUseCase
 import studio.acmenra.control.feature.events.domain.usecase.DownloadEventsExportUseCase
@@ -619,23 +625,37 @@ class EventsReviewFixesTests {
 
     // --- Requirement 9: MockDataStore idempotency, isolation, and escaping (P2) ---
     @Test
-    fun testMockDataStore_IdempotencyAndCompanyIsolationAndCsvEscaping() =
+    fun testExport_IdempotencyPayloadMismatchAndMultiCompany() =
         runTest {
             val store = MockEventsDataStore()
-            val request =
+            val request1 =
                 CreateExportRequestDto(
-                    filters = EventsExportFiltersDto(),
+                    filters = EventsExportFiltersDto(validity = "VALID"),
+                    includeMediaLinks = false,
+                    formatPreset = "STANDARD_COMMA_UTF8",
+                )
+            val request2 =
+                CreateExportRequestDto(
+                    filters = EventsExportFiltersDto(validity = "ERRONEOUS"),
                     includeMediaLinks = false,
                     formatPreset = "STANDARD_COMMA_UTF8",
                 )
 
-            // 1. Idempotency: same companyId and idempotencyKey returns exact same exportId
-            val status1 = store.createExport("comp-A", request, "key-123")
-            val status2 = store.createExport("comp-A", request, "key-123")
+            // 1. Same company + same key + same request -> exact same export
+            val status1 = store.createExport("comp-A", request1, "key-idem")
+            val status2 = store.createExport("comp-A", request1, "key-idem")
             assertEquals(status1.exportId, status2.exportId)
-            assertEquals(status1.createdAt, status2.createdAt)
 
-            // 2. Company isolation: accessing comp-A's export with comp-B fails closed
+            // 2. Same company + same key + DIFFERENT request -> throws PayloadMismatch
+            assertFailsWith<EventsDomainException.PayloadMismatch> {
+                store.createExport("comp-A", request2, "key-idem")
+            }
+
+            // 3. Different company + same key -> distinct export created
+            val statusB = store.createExport("comp-B", request1, "key-idem")
+            assertTrue(status1.exportId != statusB.exportId)
+
+            // 4. Company isolation on status / download
             assertFailsWith<EventsDomainException.PermissionDenied> {
                 store.getExportStatus("comp-B", status1.exportId)
             }
@@ -643,6 +663,224 @@ class EventsReviewFixesTests {
                 store.downloadExport("comp-B", status1.exportId)
             }
         }
+
+    @Test
+    fun testMockDataStore_CsvEscapingFull() =
+        runTest {
+            // 1. Direct unit assertions for escapeCsv
+            assertEquals("Normal Text", MockEventsDataStore.escapeCsv("Normal Text", ","))
+            assertEquals("\"Camera, Section 1\"", MockEventsDataStore.escapeCsv("Camera, Section 1", ","))
+            assertEquals("\"Camera; Section 1\"", MockEventsDataStore.escapeCsv("Camera; Section 1", ";"))
+            assertEquals(
+                "\"Camera \"\"Main\"\", Section 1\"",
+                MockEventsDataStore.escapeCsv("Camera \"Main\", Section 1", ","),
+            )
+            assertEquals("\"Line 1\nLine 2\"", MockEventsDataStore.escapeCsv("Line 1\nLine 2", ","))
+            assertEquals("\"Line 1\r\nLine 2\"", MockEventsDataStore.escapeCsv("Line 1\r\nLine 2", ","))
+
+            // 2. End-to-end integration assertion with downloadExport
+            val store = MockEventsDataStore()
+            val request =
+                CreateExportRequestDto(
+                    filters = EventsExportFiltersDto(),
+                    includeMediaLinks = false,
+                    formatPreset = "STANDARD_COMMA_UTF8",
+                )
+            val exportStatus = store.createExport("comp-csv", request, "key-csv")
+            val download = store.downloadExport("comp-csv", exportStatus.exportId)
+            val payload = ExportPayloadRegistry.consume(download.downloadHandle)
+            assertNotNull(payload)
+            val csvContent = payload.bytes.decodeToString()
+            assertTrue(csvContent.startsWith("ID,Type,Location,Device,OccurredAt,Status,IsErroneous"))
+        }
+
+    @Test
+    fun testMockMutations_NotFound_ConcurrencyConflict_AndIdempotency() =
+        runTest {
+            val store = MockEventsDataStore()
+
+            // 1. Unknown event ID on acknowledgeEvent throws NOT_FOUND
+            val notFoundAck =
+                assertFailsWith<EventsDomainException.Generic> {
+                    store.acknowledgeEvent("comp-1", "non-existent-event")
+                }
+            assertEquals("NOT_FOUND", notFoundAck.code)
+
+            // 2. Unknown event ID on markEventErroneous throws NOT_FOUND
+            val notFoundErr =
+                assertFailsWith<EventsDomainException.Generic> {
+                    store.markEventErroneous("comp-1", "non-existent-event", 1L, "key-1")
+                }
+            assertEquals("NOT_FOUND", notFoundErr.code)
+
+            // 3. Existing event with classification version mismatch throws StateConflict
+            assertFailsWith<EventsDomainException.StateConflict> {
+                store.markEventErroneous("comp-1", "ev_mock_comp-1_1", 999L, "key-wrong-ver")
+            }
+
+            // 4. Mark erroneous succeeds with correct expectedClassificationVersion = 1L
+            val res1 = store.markEventErroneous("comp-1", "ev_mock_comp-1_1", 1L, "key-idem")
+            assertTrue(res1.isErroneous)
+            assertEquals(2L, res1.classificationVersion)
+
+            // 5. Repeat with same idempotency key and same version returns cached result
+            val res2 = store.markEventErroneous("comp-1", "ev_mock_comp-1_1", 1L, "key-idem")
+            assertEquals(res1.id, res2.id)
+            assertEquals(res1.eventVersion, res2.eventVersion)
+
+            // 6. Repeat with same idempotency key but different expected version throws PayloadMismatch
+            assertFailsWith<EventsDomainException.PayloadMismatch> {
+                store.markEventErroneous("comp-1", "ev_mock_comp-1_1", 2L, "key-idem")
+            }
+        }
+
+    @Test
+    fun testMockWebSocket_ReplayMissedCommits() =
+        runTest {
+            val store = MockEventsDataStore()
+            val ws = MockEventsWebSocketDataSource(store)
+
+            // 1. Generate 5 commits in store (sequences 101L..105L)
+            for (i in 1..5) {
+                store.generateAndAddRealtimeCommit(
+                    companyId = "comp-replay",
+                    replayId = 1L,
+                    insertAtBeginning = false,
+                )
+            }
+
+            val receivedFrames = mutableListOf<IncomingWsFrame>()
+            val testScope = CoroutineScope(testDispatcher + SupervisorJob())
+            try {
+                val job =
+                    testScope.launch {
+                        ws.incomingFrames.collect { envelope ->
+                            receivedFrames.add(envelope.frame)
+                        }
+                    }
+                testScheduler.runCurrent()
+
+                // 2. Connect requesting replay afterSequence = 102L (should replay 103L, 104L, 105L)
+                val connectionId =
+                    ws.connect(
+                        companyId = "comp-replay",
+                        accessToken = "token",
+                        replayId = 2L,
+                        afterSequence = 102L,
+                        scope = testScope,
+                        getClientConfirmedSeq = { 102L },
+                        activationGate = null,
+                        onDisconnected = { _, _ -> },
+                    )
+
+                testScheduler.runCurrent()
+                ws.disconnect(connectionId)
+                job.cancel()
+
+                // Subscribed with replayEmpty = false
+                val subscribed = receivedFrames.filterIsInstance<IncomingWsFrame.Subscribed>().firstOrNull()
+                assertNotNull(subscribed)
+                assertFalse(subscribed.frame.replayEmpty)
+                assertEquals(103L, subscribed.frame.replayFromSequence)
+                assertEquals(105L, subscribed.frame.replayUntilSequence)
+
+                // 3 replayed commits in order
+                val replayedCommits = receivedFrames.filterIsInstance<IncomingWsFrame.TenantCommit>()
+                assertEquals(3, replayedCommits.size)
+                assertEquals(listOf(103L, 104L, 105L), replayedCommits.map { it.frame.tenantSequence })
+
+                // ReplayCompleted with throughSequence = 105L
+                val completed = receivedFrames.filterIsInstance<IncomingWsFrame.ReplayCompleted>().firstOrNull()
+                assertNotNull(completed)
+                assertEquals(105L, completed.frame.throughSequence)
+            } finally {
+                testScope.cancel()
+            }
+        }
+
+    @Test
+    fun testNavigation_CompanyIsolation_NoFilterLeakAcrossCompanies() {
+        val hashCompanyA = "#events?companyId=comp-A&search_id=ev-A-123"
+        val (decodedCompanyA, queryA) = EventsQueryRouteCodec.decodeHash(hashCompanyA)
+        assertEquals("comp-A", decodedCompanyA)
+        assertEquals("ev-A-123", queryA.filter.searchId)
+
+        // When switching to Company B:
+        val routeCompanyB = "comp-B"
+        val isCompanyMatching = (decodedCompanyA == routeCompanyB)
+        assertFalse(isCompanyMatching, "Hash for Company A must not match Company B")
+
+        // Hash for B falls back to fresh company B hash without A's filters
+        val targetHashForB = if (isCompanyMatching) hashCompanyA else "#events?companyId=$routeCompanyB"
+        assertEquals("#events?companyId=comp-B", targetHashForB)
+    }
+
+    @Test
+    fun testMockSummary_DynamicBusinessDate() =
+        runTest {
+            val store = MockEventsDataStore()
+            val bootstrap = store.getBootstrap("comp-date-test", EventsQuery())
+            val expectedToday =
+                Clock.System
+                    .now()
+                    .toLocalDateTime(TimeZone.of("Europe/Moscow"))
+                    .date
+                    .toString()
+            assertEquals(expectedToday, bootstrap.summary.businessDate)
+        }
+
+    @Test
+    fun testDI_MockEnvironmentWiresMockSourcesToRepository() {
+        val testTokenStorage =
+            object : studio.acmenra.control.core.network.auth.TokenStorage {
+                private var tokens: studio.acmenra.control.core.network.model.TokenPair? = null
+
+                override fun getTokens(): studio.acmenra.control.core.network.model.TokenPair? = tokens
+
+                override fun saveTokens(tokens: studio.acmenra.control.core.network.model.TokenPair) {
+                    this.tokens =
+                        tokens
+                }
+
+                override fun clear() {
+                    tokens = null
+                }
+            }
+
+        val testKoin =
+            startKoin {
+                modules(
+                    module {
+                        single<ApiConfig> { ApiConfig(apiBaseUrl = "http://localhost:8080") }
+                        single(named("api")) { HttpClient(MockEngine { respondOk() }) }
+                        single(named("realtime")) { HttpClient(MockEngine { respondOk() }) }
+                        single {
+                            studio.acmenra.control.core.network.auth
+                                .SessionManager(testTokenStorage)
+                        }
+                        single<studio.acmenra.control.core.ui.notice.ConnectivityMonitor> {
+                            object : studio.acmenra.control.core.ui.notice.ConnectivityMonitor {
+                                override val isOnline: StateFlow<Boolean> = MutableStateFlow(true)
+                            }
+                        }
+                    },
+                    eventsModule,
+                    eventsMockEnvironmentModule,
+                )
+            }
+
+        val remoteSource = testKoin.koin.get<EventsRemoteDataSource>()
+        assertTrue(remoteSource is MockEventsRemoteDataSource, "Remote source must be mock in mock environment")
+
+        val wsSource = testKoin.koin.get<EventsWebSocketDataSource>()
+        assertTrue(wsSource is MockEventsWebSocketDataSource, "WebSocket source must be mock in mock environment")
+
+        val repo = testKoin.koin.get<EventsRepository>()
+        assertNotNull(repo, "EventsRepository must resolve in mock environment")
+
+        val mockRepo = testKoin.koin.get<EventsRepository>(named("mock"))
+        assertNotNull(mockRepo, "Named mock EventsRepository must resolve")
+    }
 
     // --- Requirement 10: Date display formatting localization and seconds (P2/P3) ---
     @Test

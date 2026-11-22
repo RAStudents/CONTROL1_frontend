@@ -37,37 +37,13 @@ import studio.acmenra.control.feature.events.presentation.EventsViewModel
 import studio.acmenra.control.feature.events.presentation.platform.exportFileSaverModule
 import studio.acmenra.control.feature.events.presentation.platform.externalMediaOpenerModule
 
-val eventsModule =
+val eventsCommonModule =
     module {
         includes(exportFileSaverModule, externalMediaOpenerModule)
-
-        single<EventsRemoteDataSource> {
-            KtorEventsRemoteDataSource(
-                apiClient = get(named("api")),
-            )
-        }
-
-        factory<EventsWebSocketDataSource> {
-            val config = get<ApiConfig>()
-            KtorEventsWebSocketDataSource(
-                realtimeClient = get(named("realtime")),
-                wsEndpointBase = config.apiBaseUrl,
-            )
-        }
 
         single<EventsConnectivityProvider> {
             CoreUiEventsConnectivityAdapter(
                 monitor = get(),
-            )
-        }
-
-        single<EventsRepository> {
-            EventsRepositoryImpl(
-                remoteDataSource = get(),
-                webSocketDataSourceFactory = { get() },
-                sessionManager = get(),
-                connectivityProvider = get(),
-                accessInvalidationListener = getOrNull<AccessInvalidationDispatcher>(),
             )
         }
 
@@ -121,6 +97,38 @@ val eventsModule =
         }
     }
 
+val eventsKtorModule =
+    module {
+        single<EventsRemoteDataSource> {
+            KtorEventsRemoteDataSource(
+                apiClient = get(named("api")),
+            )
+        }
+
+        factory<EventsWebSocketDataSource> {
+            val config = get<ApiConfig>()
+            KtorEventsWebSocketDataSource(
+                realtimeClient = get(named("realtime")),
+                wsEndpointBase = config.apiBaseUrl,
+            )
+        }
+
+        single<EventsRepository> {
+            EventsRepositoryImpl(
+                remoteDataSource = get(),
+                webSocketDataSourceFactory = { get() },
+                sessionManager = get(),
+                connectivityProvider = get(),
+                accessInvalidationListener = getOrNull<AccessInvalidationDispatcher>(),
+            )
+        }
+    }
+
+val eventsModule =
+    module {
+        includes(eventsCommonModule, eventsKtorModule)
+    }
+
 val eventsMockModule =
     module {
         single {
@@ -152,7 +160,7 @@ val eventsMockModule =
 
 val eventsMockEnvironmentModule =
     module {
-        includes(eventsModule, eventsMockModule)
+        includes(eventsCommonModule, eventsMockModule)
 
         single<EventsRemoteDataSource> {
             get<EventsRemoteDataSource>(named("mock"))
@@ -163,12 +171,6 @@ val eventsMockEnvironmentModule =
         }
 
         single<EventsRepository> {
-            EventsRepositoryImpl(
-                remoteDataSource = get(named("mock")),
-                webSocketDataSourceFactory = { get(named("mock")) },
-                sessionManager = get(),
-                connectivityProvider = get(),
-                accessInvalidationListener = getOrNull<AccessInvalidationDispatcher>(),
-            )
+            get<EventsRepository>(named("mock"))
         }
     }

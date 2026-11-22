@@ -79,6 +79,7 @@ import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionStat
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
 import studio.acmenra.control.feature.events.domain.repository.EventsRepository
+import studio.acmenra.control.feature.events.domain.usecase.LoadEventsBootstrapUseCase
 import studio.acmenra.control.feature.events.domain.usecase.AcknowledgeEventUseCase
 import studio.acmenra.control.feature.events.domain.usecase.CreateEventsExportUseCase
 import studio.acmenra.control.feature.events.domain.usecase.DownloadEventsExportUseCase
@@ -889,7 +890,6 @@ class EventsReviewFixesTests {
                             }
                         }
                     },
-                    eventsModule,
                     eventsMockEnvironmentModule,
                 )
             }
@@ -905,6 +905,12 @@ class EventsReviewFixesTests {
 
         val mockRepo = testKoin.koin.get<EventsRepository>(named("mock"))
         assertNotNull(mockRepo, "Named mock EventsRepository must resolve")
+
+        val observeFeedUseCase = testKoin.koin.getOrNull<ObserveEventsFeedUseCase>()
+        assertNotNull(observeFeedUseCase, "ObserveEventsFeedUseCase must resolve in mock environment")
+
+        val loadBootstrapUseCase = testKoin.koin.getOrNull<LoadEventsBootstrapUseCase>()
+        assertNotNull(loadBootstrapUseCase, "LoadEventsBootstrapUseCase must resolve in mock environment")
 
         val vm = testKoin.koin.getOrNull<EventsViewModel>()
         assertNotNull(vm, "EventsViewModel must resolve in mock environment")

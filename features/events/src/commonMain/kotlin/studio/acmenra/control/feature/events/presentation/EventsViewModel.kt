@@ -341,20 +341,43 @@ class EventsViewModel(
                             DateFilterUtils.resolveBusinessTimeZone(it)
                         }
                     _state.update { current ->
+                        val hasLoadedContent = current.summary != null || current.visibleEvents.isNotEmpty()
+                        val isSessionInitial = feedState.isInitialLoading
                         current.copy(
-                            visibleEvents = if (canRead) feedState.visibleEvents else emptyList(),
+                            visibleEvents =
+                                if (canRead) {
+                                    if (isSessionInitial && feedState.visibleEvents.isEmpty() && hasLoadedContent) {
+                                        current.visibleEvents
+                                    } else {
+                                        feedState.visibleEvents
+                                    }
+                                } else {
+                                    emptyList()
+                                },
                             realtimeOverlay = if (canRead) feedState.realtimeOverlay else RealtimeOverlay(),
                             asOfSequence = if (canRead) feedState.asOfSequence else 0L,
-                            snapshotTotalCount = if (canRead) feedState.snapshotTotalCount else null,
+                            snapshotTotalCount =
+                                if (canRead) {
+                                    if (isSessionInitial &&
+                                        feedState.snapshotTotalCount == 0 &&
+                                        current.snapshotTotalCount != null
+                                    ) {
+                                        current.snapshotTotalCount
+                                    } else {
+                                        feedState.snapshotTotalCount
+                                    }
+                                } else {
+                                    null
+                                },
                             hasMore = if (canRead) feedState.hasMore else false,
-                            isInitialLoading = if (canRead) feedState.isInitialLoading else false,
+                            isInitialLoading = if (canRead) (isSessionInitial && !hasLoadedContent) else false,
                             initialLoadError = if (canRead) feedState.initialLoadError else null,
                             isLoadingNextPage = if (canRead) feedState.isLoadingNextPage else false,
                             paginationError = if (canRead) feedState.paginationError else null,
                             connectionState = feedState.connectionState,
                             pendingNewerCount = if (canRead) feedState.pendingNewerCount else 0,
                             pendingHistoryCount = if (canRead) feedState.pendingHistoryCount else 0,
-                            summary = if (canRead) feedState.summary else null,
+                            summary = if (canRead) (feedState.summary ?: current.summary) else null,
                             access = current.access,
                         )
                     }

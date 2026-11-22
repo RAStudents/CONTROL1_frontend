@@ -49,7 +49,6 @@ fun main() {
 
         fun updateBrowserHash(hash: String) {
             window.history.replaceState(null, "", hash)
-            currentHash = hash
         }
 
         App(
@@ -94,7 +93,6 @@ fun main() {
                             val route = entry.destination.route?.substringBefore("?") ?: ""
                             "#$route"
                         }
-                    currentHash = targetHash
                     targetHash
                 }
             },

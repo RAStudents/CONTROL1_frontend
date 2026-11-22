@@ -79,11 +79,11 @@ import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionStat
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
 import studio.acmenra.control.feature.events.domain.repository.EventsRepository
-import studio.acmenra.control.feature.events.domain.usecase.LoadEventsBootstrapUseCase
 import studio.acmenra.control.feature.events.domain.usecase.AcknowledgeEventUseCase
 import studio.acmenra.control.feature.events.domain.usecase.CreateEventsExportUseCase
 import studio.acmenra.control.feature.events.domain.usecase.DownloadEventsExportUseCase
 import studio.acmenra.control.feature.events.domain.usecase.LoadEventFilterOptionsUseCase
+import studio.acmenra.control.feature.events.domain.usecase.LoadEventsBootstrapUseCase
 import studio.acmenra.control.feature.events.domain.usecase.MarkEventErroneousUseCase
 import studio.acmenra.control.feature.events.domain.usecase.ObserveEventsExportStatusUseCase
 import studio.acmenra.control.feature.events.domain.usecase.ObserveEventsFeedUseCase
@@ -915,6 +915,182 @@ class EventsReviewFixesTests {
         val vm = testKoin.koin.getOrNull<EventsViewModel>()
         assertNotNull(vm, "EventsViewModel must resolve in mock environment")
     }
+
+    @Test
+    fun testFilterChange_DoesNotTriggerFullPageReloadOrWipeSummaryAndEvents() =
+        runTest {
+            val initialSummary =
+                EventsSummary(
+                    businessTimezone = "Europe/Moscow",
+                    businessDate = "2026-11-22",
+                    summaryAsOfSequence = 100L,
+                    todayEventsCount = 10,
+                )
+            val session1 =
+                TestFeedSession(
+                    initialFeedState =
+                        EventsFeedState(
+                            isInitialLoading = false,
+                            visibleEvents = listOf(sampleEvent("ev-1")),
+                            summary = initialSummary,
+                            snapshotTotalCount = 1,
+                            access = EventsAccessCapabilities(eventsRead = true),
+                        ),
+                )
+            var currentSession = session1
+
+            val observeFeed =
+                object : ObserveEventsFeedUseCase {
+                    override fun invoke(
+                        companyId: String,
+                        query: EventsQuery,
+                        accessCapabilities: EventsAccessCapabilities,
+                    ): EventsFeedSession = currentSession
+                }
+
+            val vm =
+                EventsViewModel(
+                    observeEventsFeedUseCase = observeFeed,
+                    loadEventFilterOptionsUseCase =
+                        object : LoadEventFilterOptionsUseCase {
+                            override suspend fun invoke(companyId: String): EventsFilterOptions = EventsFilterOptions()
+                        },
+                    acknowledgeEventUseCase =
+                        object : AcknowledgeEventUseCase {
+                            override suspend fun invoke(
+                                companyId: String,
+                                eventId: String,
+                            ) = EventsOperationResult.Failure(EventsMutationError.Server("stub"))
+                        },
+                    markEventErroneousUseCase =
+                        object : MarkEventErroneousUseCase {
+                            override suspend fun invoke(
+                                companyId: String,
+                                eventId: String,
+                                v: Long,
+                                k: String,
+                            ) = EventsOperationResult.Failure(EventsMutationError.Server("stub"))
+                        },
+                    createEventsExportUseCase =
+                        object : CreateEventsExportUseCase {
+                            override suspend fun invoke(
+                                companyId: String,
+                                r: EventsExportRequest,
+                                k: String,
+                            ) = EventsExportStatus(
+                                exportId = "exp-1",
+                                status = EventsExportStatusCode.QUEUED,
+                                createdAt = Clock.System.now(),
+                            )
+                        },
+                    observeEventsExportStatusUseCase =
+                        object : ObserveEventsExportStatusUseCase {
+                            override suspend fun invoke(
+                                companyId: String,
+                                exportId: String,
+                            ) = EventsExportStatus(
+                                exportId = "exp-1",
+                                status = EventsExportStatusCode.COMPLETED,
+                                createdAt = Clock.System.now(),
+                            )
+                        },
+                    downloadEventsExportUseCase =
+                        object : DownloadEventsExportUseCase {
+                            override suspend fun invoke(
+                                companyId: String,
+                                exportId: String,
+                            ) = EventsExportDownload("file.csv", 100L, "h")
+                        },
+                    exportFileSaver =
+                        object : ExportFileSaver {
+                            override suspend fun saveExportFile(download: EventsExportDownload) = true
+                        },
+                )
+
+            vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true))
+            advanceUntilIdle()
+
+            // Verify initial state has events and summary
+            assertEquals(1, vm.state.value.visibleEvents.size)
+            assertEquals(
+                "ev-1",
+                vm.state.value.visibleEvents
+                    .first()
+                    .id,
+            )
+            assertNotNull(vm.state.value.summary)
+            assertFalse(vm.state.value.isInitialLoading, "Initial load must be completed")
+
+            // Prepare session2 with in-flight initial state (isInitialLoading = true)
+            val session2 =
+                TestFeedSession(
+                    initialFeedState =
+                        EventsFeedState(
+                            isInitialLoading = true,
+                            visibleEvents = emptyList(),
+                            summary = null,
+                            snapshotTotalCount = 0,
+                            access = EventsAccessCapabilities(eventsRead = true),
+                        ),
+                )
+            currentSession = session2
+
+            // Apply a filter: session restarts
+            vm.onEventTypeToggled("type_helmet")
+            advanceUntilIdle()
+
+            // In-flight state during filter change MUST NOT wipe visibleEvents or summary, and must NOT set isInitialLoading to true
+            assertFalse(vm.state.value.isInitialLoading, "Filter change must not reset isInitialLoading to true")
+            assertNotNull(
+                vm.state.value.summary,
+                "Filter change must not wipe existing summary to null while in flight",
+            )
+            assertEquals(
+                "Europe/Moscow",
+                vm.state.value.summary
+                    ?.businessTimezone,
+                "Timezone must be preserved",
+            )
+            assertEquals(
+                1,
+                vm.state.value.visibleEvents.size,
+                "Previous visible events must not be wiped while in flight",
+            )
+            assertEquals(
+                "ev-1",
+                vm.state.value.visibleEvents
+                    .first()
+                    .id,
+            )
+
+            // When new session's bootstrap finishes:
+            val updatedSummary = initialSummary.copy(todayEventsCount = 15)
+            session2.emitState(
+                EventsFeedState(
+                    isInitialLoading = false,
+                    visibleEvents = listOf(sampleEvent("ev-2")),
+                    summary = updatedSummary,
+                    snapshotTotalCount = 1,
+                    access = EventsAccessCapabilities(eventsRead = true),
+                ),
+            )
+            advanceUntilIdle()
+
+            // Verify smooth transition to new filtered data
+            assertEquals(1, vm.state.value.visibleEvents.size)
+            assertEquals(
+                "ev-2",
+                vm.state.value.visibleEvents
+                    .first()
+                    .id,
+            )
+            assertEquals(
+                15,
+                vm.state.value.summary
+                    ?.todayEventsCount,
+            )
+            assertFalse(vm.state.value.isInitialLoading)
+        }
 
     // --- Requirement 10: Date display formatting localization and seconds (P2/P3) ---
     @Test

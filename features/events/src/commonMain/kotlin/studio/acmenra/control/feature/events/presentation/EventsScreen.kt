@@ -107,9 +107,6 @@ fun EventsRouteContent(
 
     LaunchedEffect(companyId, accessCapabilities, queryHash) {
         viewModel.initialize(companyId, accessCapabilities, queryHash)
-        if (!queryHash.isNullOrBlank() && onQueryHashChanged != null) {
-            onQueryHashChanged(queryHash)
-        }
     }
 
     val state by viewModel.state.collectAsState()

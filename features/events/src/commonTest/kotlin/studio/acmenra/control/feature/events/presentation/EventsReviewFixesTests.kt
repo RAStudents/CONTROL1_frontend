@@ -829,8 +829,10 @@ class EventsReviewFixesTests {
             routeCleanCompany == null || decodedCompany == null || routeCleanCompany == decodedCompany
         assertTrue(isSameCompany, "Fresh page load with null routeCleanCompany must match decoded company")
 
+        val isEventsHash =
+            initialBrowserHash.startsWith("#events") || initialBrowserHash.startsWith("events")
         val targetHash =
-            if (isSameCompany && (initialBrowserHash.startsWith("#events") || initialBrowserHash.startsWith("events"))) {
+            if (isSameCompany && isEventsHash) {
                 initialBrowserHash
             } else {
                 "#events?companyId=${routeCleanCompany ?: "null"}"
@@ -903,6 +905,9 @@ class EventsReviewFixesTests {
 
         val mockRepo = testKoin.koin.get<EventsRepository>(named("mock"))
         assertNotNull(mockRepo, "Named mock EventsRepository must resolve")
+
+        val vm = testKoin.koin.getOrNull<EventsViewModel>()
+        assertNotNull(vm, "EventsViewModel must resolve in mock environment")
     }
 
     // --- Requirement 10: Date display formatting localization and seconds (P2/P3) ---

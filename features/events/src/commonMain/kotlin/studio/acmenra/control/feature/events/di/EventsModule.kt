@@ -152,7 +152,7 @@ val eventsMockModule =
 
 val eventsMockEnvironmentModule =
     module {
-        includes(eventsMockModule)
+        includes(eventsModule, eventsMockModule)
 
         single<EventsRemoteDataSource> {
             get<EventsRemoteDataSource>(named("mock"))

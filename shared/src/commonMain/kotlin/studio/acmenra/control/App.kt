@@ -19,6 +19,7 @@ import studio.acmenra.control.core.network.auth.SessionState
 import studio.acmenra.control.core.ui.notice.ConnectivityNotices
 import studio.acmenra.control.core.ui.notice.NoticeHost
 import studio.acmenra.control.core.ui.theme.AmberTheme
+import studio.acmenra.control.feature.events.domain.model.EventsQueryRouteCodec
 import studio.acmenra.control.navigation.AppNavHost
 import studio.acmenra.control.navigation.AppScaffold
 import studio.acmenra.control.navigation.EventsRoute
@@ -57,7 +58,15 @@ fun AppContent(
         val startDestination =
             remember {
                 if (sessionState == SessionState.Authenticated) {
-                    EventsRoute()
+                    val isEventsUrl =
+                        !urlHash.isNullOrBlank() &&
+                            (urlHash.startsWith("#events") || urlHash.startsWith("events"))
+                    if (isEventsUrl) {
+                        val (company, _) = EventsQueryRouteCodec.decodeHash(urlHash)
+                        EventsRoute(companyId = company, queryHash = urlHash)
+                    } else {
+                        EventsRoute()
+                    }
                 } else {
                     LoginRoute
                 }

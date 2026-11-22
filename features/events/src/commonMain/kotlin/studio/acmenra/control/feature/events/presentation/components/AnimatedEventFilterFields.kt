@@ -11,6 +11,7 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -49,6 +50,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,6 +64,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import org.jetbrains.compose.resources.painterResource
 import studio.acmenra.control.core.ui.generated.resources.Res
 import studio.acmenra.control.core.ui.generated.resources.ic_calendar
@@ -344,8 +348,25 @@ internal fun AnimatedExposedFilterField(
 
     val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
+    val coroutineScope = rememberCoroutineScope()
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
+
+    fun refocusInput() {
+        coroutineScope.launch {
+            focusManager.clearFocus(force = true)
+            yield()
+            focusRequester.requestFocus()
+        }
+    }
+
+    LaunchedEffect(interactionSource) {
+        interactionSource.interactions.collect { interaction ->
+            if (interaction is PressInteraction.Release) {
+                refocusInput()
+            }
+        }
+    }
 
     val leadingTint by animateColorAsState(
         targetValue =
@@ -488,7 +509,7 @@ internal fun AnimatedExposedFilterField(
                                         icon = Res.drawable.ic_close,
                                         onClick = {
                                             searchQuery = ""
-                                            focusRequester.requestFocus()
+                                            refocusInput()
                                         },
                                     )
 
@@ -496,7 +517,10 @@ internal fun AnimatedExposedFilterField(
                                     FilterActionButton(
                                         tooltip = resetTooltip,
                                         icon = Res.drawable.ic_refresh,
-                                        onClick = { draftIds = emptySet() },
+                                        onClick = {
+                                            draftIds = emptySet()
+                                            refocusInput()
+                                        },
                                     )
 
                                 FilterFieldTrailingAction.ResetApplied ->
@@ -584,7 +608,7 @@ internal fun AnimatedExposedFilterField(
                             draftIds,
                         ) { updatedIds: Set<String> ->
                             draftIds = updatedIds.toSet()
-                            focusRequester.requestFocus()
+                            refocusInput()
                         }
                     }
                 }

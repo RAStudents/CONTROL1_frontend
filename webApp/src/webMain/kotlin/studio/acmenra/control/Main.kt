@@ -68,7 +68,7 @@ fun main() {
                                     null
                                 }
                             val isSameCompany =
-                                cleanCompany != null && decodedCompany == cleanCompany
+                                cleanCompany == null || decodedCompany == null || cleanCompany == decodedCompany
 
                             val isEventsHash =
                                 browserHash.startsWith("#events") || browserHash.startsWith("events")

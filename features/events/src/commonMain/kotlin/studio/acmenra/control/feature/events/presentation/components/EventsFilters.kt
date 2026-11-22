@@ -20,6 +20,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -200,6 +201,7 @@ fun EventsFilters(
                                 )
                             },
                             leadingIcon = { Checkbox(checked = selected, onCheckedChange = null) },
+                            modifier = Modifier.focusProperties { canFocus = false },
                             onClick = {
                                 onDraftIdsChange(
                                     if (selected) draftIds - option.id else draftIds + option.id,
@@ -290,6 +292,7 @@ fun EventsFilters(
                                 )
                             },
                             enabled = selectableIds.isNotEmpty(),
+                            modifier = Modifier.focusProperties { canFocus = false },
                             onClick = {
                                 val updated =
                                     if (triState == ToggleableState.On) {
@@ -318,7 +321,10 @@ fun EventsFilters(
                                         onCheckedChange = null,
                                     )
                                 },
-                                modifier = Modifier.padding(start = AmberDimens.EventsDropdownIndent),
+                                modifier =
+                                    Modifier
+                                        .padding(start = AmberDimens.EventsDropdownIndent)
+                                        .focusProperties { canFocus = false },
                                 onClick = {
                                     val updated =
                                         if (isDevSelected) {

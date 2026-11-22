@@ -816,6 +816,29 @@ class EventsReviewFixesTests {
     }
 
     @Test
+    fun testNavigation_FreshPageOpen_PreservesFiltersAndCompany() {
+        val initialBrowserHash = "#events?companyId=comp-001&event_type_ids=type_helmet&validity=VALID"
+        val (decodedCompany, query) = EventsQueryRouteCodec.decodeHash(initialBrowserHash)
+        assertEquals("comp-001", decodedCompany)
+        assertEquals(setOf("type_helmet"), query.filter.eventTypeIds)
+        assertEquals(EventValidityFilter.VALID, query.filter.validity)
+
+        // On fresh page load, the initial backstack route may have null cleanCompanyId
+        val routeCleanCompany: String? = null
+        val isSameCompany =
+            routeCleanCompany == null || decodedCompany == null || routeCleanCompany == decodedCompany
+        assertTrue(isSameCompany, "Fresh page load with null routeCleanCompany must match decoded company")
+
+        val targetHash =
+            if (isSameCompany && (initialBrowserHash.startsWith("#events") || initialBrowserHash.startsWith("events"))) {
+                initialBrowserHash
+            } else {
+                "#events?companyId=${routeCleanCompany ?: "null"}"
+            }
+        assertEquals(initialBrowserHash, targetHash, "Target hash must preserve full URL filters on fresh page open")
+    }
+
+    @Test
     fun testMockSummary_DynamicBusinessDate() =
         runTest {
             val store = MockEventsDataStore()

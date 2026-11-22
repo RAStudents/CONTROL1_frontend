@@ -40,7 +40,15 @@ fun AppNavHost(
         when {
             sessionState == SessionState.Authenticated &&
                 destination?.hasRoute<LoginRoute>() == true -> {
-                navController.navigateToEvents()
+                val isEventsUrl =
+                    !urlHash.isNullOrBlank() &&
+                        (urlHash.startsWith("#events") || urlHash.startsWith("events"))
+                if (isEventsUrl) {
+                    val (company, _) = EventsQueryRouteCodec.decodeHash(urlHash)
+                    navController.navigateToEvents(companyId = company, queryHash = urlHash)
+                } else {
+                    navController.navigateToEvents()
+                }
             }
 
             sessionState != SessionState.Authenticated &&

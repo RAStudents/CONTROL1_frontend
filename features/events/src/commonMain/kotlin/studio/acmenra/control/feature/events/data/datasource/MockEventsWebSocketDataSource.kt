@@ -23,6 +23,7 @@ class MockEventsWebSocketDataSource(
     private var activeJob: Job? = null
     private var activeConnectionId: Long = 0L
     private var activeReplayId: Long = 1L
+    private var activeCompanyId: String = "comp-001"
 
     override fun connect(
         companyId: String,
@@ -37,25 +38,66 @@ class MockEventsWebSocketDataSource(
         val connectionId = nextConnectionId++
         activeConnectionId = connectionId
         activeReplayId = replayId
+        activeCompanyId = companyId
         activeJob?.cancel()
 
         activeJob =
             scope.launch {
                 activationGate?.await()
 
-                // 1. Send Subscribed frame
-                _incomingFrames.emit(
-                    IncomingWsEnvelope(
-                        connectionId = connectionId,
-                        frame =
-                            IncomingWsFrame.Subscribed(
-                                SubscribedFrameDto(
-                                    replayId = replayId,
-                                    replayEmpty = true,
+                val missedCommits = dataStore.getCommitsAfterSequence(companyId, afterSequence)
+
+                if (missedCommits.isEmpty()) {
+                    // 1. Send Subscribed frame (empty replay)
+                    _incomingFrames.emit(
+                        IncomingWsEnvelope(
+                            connectionId = connectionId,
+                            frame =
+                                IncomingWsFrame.Subscribed(
+                                    SubscribedFrameDto(
+                                        replayId = replayId,
+                                        replayEmpty = true,
+                                    ),
                                 ),
+                        ),
+                    )
+                } else {
+                    // Replay missed commits
+                    _incomingFrames.emit(
+                        IncomingWsEnvelope(
+                            connectionId = connectionId,
+                            frame =
+                                IncomingWsFrame.Subscribed(
+                                    SubscribedFrameDto(
+                                        replayId = replayId,
+                                        replayEmpty = false,
+                                        replayFromSequence = afterSequence + 1,
+                                        replayUntilSequence = missedCommits.last().tenantSequence,
+                                    ),
+                                ),
+                        ),
+                    )
+                    for (commit in missedCommits) {
+                        _incomingFrames.emit(
+                            IncomingWsEnvelope(
+                                connectionId = connectionId,
+                                frame = IncomingWsFrame.TenantCommit(commit.copy(replayId = replayId)),
                             ),
-                    ),
-                )
+                        )
+                    }
+                    _incomingFrames.emit(
+                        IncomingWsEnvelope(
+                            connectionId = connectionId,
+                            frame =
+                                IncomingWsFrame.ReplayCompleted(
+                                    ReplayCompletedFrameDto(
+                                        replayId = replayId,
+                                        throughSequence = missedCommits.last().tenantSequence,
+                                    ),
+                                ),
+                        ),
+                    )
+                }
 
                 // 2. Wait 3 seconds after opening screen
                 delay(3000)
@@ -90,6 +132,21 @@ class MockEventsWebSocketDataSource(
         afterSequence: Long,
     ) {
         activeReplayId = replayId
+        val missedCommits = dataStore.getCommitsAfterSequence(activeCompanyId, afterSequence)
+        for (commit in missedCommits) {
+            _incomingFrames.emit(
+                IncomingWsEnvelope(
+                    connectionId = activeConnectionId,
+                    frame = IncomingWsFrame.TenantCommit(commit.copy(replayId = replayId)),
+                ),
+            )
+        }
+        val throughSeq =
+            if (missedCommits.isNotEmpty()) {
+                missedCommits.last().tenantSequence
+            } else {
+                afterSequence
+            }
         _incomingFrames.emit(
             IncomingWsEnvelope(
                 connectionId = activeConnectionId,
@@ -97,7 +154,7 @@ class MockEventsWebSocketDataSource(
                     IncomingWsFrame.ReplayCompleted(
                         ReplayCompletedFrameDto(
                             replayId = replayId,
-                            throughSequence = afterSequence,
+                            throughSequence = throughSeq,
                         ),
                     ),
             ),

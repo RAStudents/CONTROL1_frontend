@@ -15,6 +15,7 @@ import kotlinx.browser.document
 import kotlinx.browser.window
 import org.w3c.dom.events.Event
 import studio.acmenra.control.di.initKoin
+import studio.acmenra.control.feature.events.domain.model.EventsQueryRouteCodec
 import studio.acmenra.control.navigation.CompaniesDashboardRoute
 import studio.acmenra.control.navigation.EventsRoute
 import studio.acmenra.control.navigation.LoginRoute
@@ -55,28 +56,46 @@ fun main() {
             urlHash = currentHash,
             onNavHostReady = { navController ->
                 navController.bindToBrowserNavigation { entry ->
-                    if (entry.destination.hasRoute<EventsRoute>()) {
-                        val hash = window.location.hash
-                        if (hash.startsWith("#events") || hash.startsWith("events")) {
-                            if (hash.startsWith("#")) hash else "#$hash"
-                        } else {
+                    val targetHash =
+                        if (entry.destination.hasRoute<EventsRoute>()) {
                             val route = entry.toRoute<EventsRoute>()
                             val cleanCompany = route.cleanCompanyId
-                            val q = route.queryHash
-                            if (!q.isNullOrBlank()) {
-                                if (q.startsWith("#")) q else "#$q"
+                            val browserHash = window.location.hash
+                            val decodedCompany =
+                                if (browserHash.isNotBlank()) {
+                                    EventsQueryRouteCodec.decodeHash(browserHash).first
+                                } else {
+                                    null
+                                }
+                            val isSameCompany =
+                                cleanCompany != null && decodedCompany == cleanCompany
+
+                            val isEventsHash =
+                                browserHash.startsWith("#events") || browserHash.startsWith("events")
+                            if (isSameCompany && isEventsHash) {
+                                if (browserHash.startsWith("#")) browserHash else "#$browserHash"
                             } else {
-                                "#events?companyId=${cleanCompany ?: "null"}"
+                                val validRouteHash =
+                                    route.queryHash?.takeIf { q ->
+                                        val qCompany = EventsQueryRouteCodec.decodeHash(q).first
+                                        cleanCompany == null || qCompany == cleanCompany
+                                    }
+                                if (!validRouteHash.isNullOrBlank()) {
+                                    if (validRouteHash.startsWith("#")) validRouteHash else "#$validRouteHash"
+                                } else {
+                                    "#events?companyId=${cleanCompany ?: "null"}"
+                                }
                             }
+                        } else if (entry.destination.hasRoute<LoginRoute>()) {
+                            "#login"
+                        } else if (entry.destination.hasRoute<CompaniesDashboardRoute>()) {
+                            "#companies_dashboard"
+                        } else {
+                            val route = entry.destination.route?.substringBefore("?") ?: ""
+                            "#$route"
                         }
-                    } else if (entry.destination.hasRoute<LoginRoute>()) {
-                        "#login"
-                    } else if (entry.destination.hasRoute<CompaniesDashboardRoute>()) {
-                        "#companies_dashboard"
-                    } else {
-                        val route = entry.destination.route?.substringBefore("?") ?: ""
-                        "#$route"
-                    }
+                    currentHash = targetHash
+                    targetHash
                 }
             },
             onUpdateUrlHash = { companyId, queryHash ->

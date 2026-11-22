@@ -43,6 +43,7 @@ import studio.acmenra.control.core.ui.generated.resources.events_date_reset
 import studio.acmenra.control.core.ui.generated.resources.events_filter_date_last_7_days
 import studio.acmenra.control.core.ui.generated.resources.events_filter_date_today
 import studio.acmenra.control.core.ui.generated.resources.events_filter_date_yesterday
+import studio.acmenra.control.core.ui.generated.resources.events_timezone_msk_prefix
 import studio.acmenra.control.core.ui.theme.AmberCorners
 import studio.acmenra.control.core.ui.theme.AmberDimens
 import studio.acmenra.control.feature.events.domain.model.DateSelection
@@ -109,13 +110,14 @@ fun EventsDatePickerDialog(
 
     val tz = timeZone ?: TimeZone.UTC
     val now = remember { Clock.System.now() }
+    val mskPrefix = stringResource(Res.string.events_timezone_msk_prefix)
     val mskLabel =
-        remember(timeZone, now) {
+        remember(timeZone, now, mskPrefix) {
             timeZone?.let {
                 EventDateDisplayFormatter.formatMskOffset(
                     at = now,
                     businessTimeZone = it,
-                    mskPrefix = "MSK",
+                    mskPrefix = mskPrefix,
                 )
             }
         }

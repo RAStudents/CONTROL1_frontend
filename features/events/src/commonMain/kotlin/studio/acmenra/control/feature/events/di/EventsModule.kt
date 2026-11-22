@@ -138,4 +138,37 @@ val eventsMockModule =
                 dataStore = get(),
             )
         }
+
+        single<EventsRepository>(named("mock")) {
+            EventsRepositoryImpl(
+                remoteDataSource = get(named("mock")),
+                webSocketDataSourceFactory = { get(named("mock")) },
+                sessionManager = get(),
+                connectivityProvider = get(),
+                accessInvalidationListener = getOrNull<AccessInvalidationDispatcher>(),
+            )
+        }
+    }
+
+val eventsMockEnvironmentModule =
+    module {
+        includes(eventsMockModule)
+
+        single<EventsRemoteDataSource> {
+            get<EventsRemoteDataSource>(named("mock"))
+        }
+
+        factory<EventsWebSocketDataSource> {
+            get<EventsWebSocketDataSource>(named("mock"))
+        }
+
+        single<EventsRepository> {
+            EventsRepositoryImpl(
+                remoteDataSource = get(named("mock")),
+                webSocketDataSourceFactory = { get(named("mock")) },
+                sessionManager = get(),
+                connectivityProvider = get(),
+                accessInvalidationListener = getOrNull<AccessInvalidationDispatcher>(),
+            )
+        }
     }

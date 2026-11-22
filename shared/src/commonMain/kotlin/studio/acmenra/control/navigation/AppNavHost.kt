@@ -81,10 +81,16 @@ fun AppNavHost(
             val isCompanyMatching =
                 route.cleanCompanyId == null || route.cleanCompanyId == decodedFromUrlHash
 
+            val validRouteHash =
+                route.queryHash?.takeIf { hash ->
+                    val decodedCompany = EventsQueryRouteCodec.decodeHash(hash).first
+                    route.cleanCompanyId == null || decodedCompany == route.cleanCompanyId
+                }
+
             val effectiveQueryHash =
                 when {
                     rawUrlHash != null && isCompanyMatching -> rawUrlHash
-                    !route.queryHash.isNullOrBlank() -> route.queryHash
+                    validRouteHash != null -> validRouteHash
                     else -> null
                 }
 
@@ -101,7 +107,7 @@ fun AppNavHost(
                     requestedCompanyId = effectiveCompanyId,
                     requirement = RoutePermissionRequirement.Tenant(TenantPermission.EVENTS_READ),
                     onNavigateToCompany = { newCompanyId ->
-                        navController.navigateToEvents(newCompanyId, effectiveQueryHash)
+                        navController.navigateToEvents(newCompanyId, null)
                     },
                     onNavigateToCompaniesDashboard = {
                         navController.navigateToCompaniesDashboard()
@@ -121,6 +127,12 @@ fun AppNavHost(
                                     perms.contains(TenantPermission.EVENTS_READ) &&
                                     perms.contains(TenantPermission.REPORTS_EXPORT),
                         )
+                    LaunchedEffect(tenantContext.companyId, effectiveQueryHash, isCompanyMatching) {
+                        if (onUpdateUrlHash != null && !isCompanyMatching) {
+                            onUpdateUrlHash(tenantContext.companyId, effectiveQueryHash)
+                        }
+                    }
+
                     EventsRouteContent(
                         companyId = tenantContext.companyId,
                         accessCapabilities = accessCapabilities,

@@ -2,6 +2,11 @@ package studio.acmenra.control.feature.events.data.datasource
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.datetime.LocalDateTime
+import kotlinx.datetime.LocalTime
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toInstant
+import kotlinx.datetime.toLocalDateTime
 import studio.acmenra.control.feature.events.data.model.BootstrapEventsDto
 import studio.acmenra.control.feature.events.data.model.CategoryScoreDto
 import studio.acmenra.control.feature.events.data.model.CreateExportRequestDto
@@ -52,8 +57,22 @@ class MockEventsDataStore {
     private val exportsById = mutableMapOf<String, MockExportRecord>()
     private val exportIdsByIdempotencyKey = mutableMapOf<Pair<String, String>, String>()
 
+    private data class MutationKey(
+        val companyId: String,
+        val eventId: String,
+        val idempotencyKey: String,
+    )
+
+    private data class MutationRecord(
+        val expectedClassificationVersion: Long,
+        val result: EventDto,
+    )
+
+    private val mutationsByKey = mutableMapOf<MutationKey, MutationRecord>()
+
     private data class CompanyMockState(
         val events: MutableList<EventDto>,
+        val commits: MutableList<TenantCommitFrameDto> = mutableListOf(),
         var currentSequence: Long = 100L,
         var todayEventsCount: Int = 20,
         var generatedCount: Int = 0,
@@ -178,15 +197,27 @@ class MockEventsDataStore {
             CompanyMockState(events = createInitialEvents(companyId))
         }
 
-    private fun getSummaryDtoLocked(state: CompanyMockState): EventsSummaryDto =
-        EventsSummaryDto(
+    private fun getSummaryDtoLocked(state: CompanyMockState): EventsSummaryDto {
+        val tz = TimeZone.of("Europe/Moscow")
+        val now = Clock.System.now()
+        val localNow = now.toLocalDateTime(tz)
+        val businessDate = localNow.date.toString()
+        val startOfDay = LocalDateTime(localNow.date, LocalTime(0, 0, 0)).toInstant(tz)
+        val endOfDay = LocalDateTime(localNow.date, LocalTime(23, 59, 59, 999_999_999)).toInstant(tz)
+        val todayCount =
+            state.events.count {
+                val inst = runCatching { Instant.parse(it.occurredAt) }.getOrNull()
+                inst != null && inst in startOfDay..endOfDay
+            }
+        return EventsSummaryDto(
             businessTimezone = "Europe/Moscow",
-            businessDate = "2026-11-21",
+            businessDate = businessDate,
             summaryAsOfSequence = state.currentSequence,
-            todayEventsCount = state.todayEventsCount,
+            todayEventsCount = todayCount,
             categories = mockCategories,
             devices = mockDevicesSummary,
         )
+    }
 
     private fun filterEventsLocked(
         list: List<EventDto>,
@@ -297,55 +328,37 @@ class MockEventsDataStore {
         mutex.withLock {
             val state = getOrCreateCompanyStateLocked(companyId)
             val index = state.events.indexOfFirst { it.id == eventId }
+            if (index < 0) {
+                throw EventsDomainException.Generic(
+                    code = "NOT_FOUND",
+                    serverMessage = "Event not found: $eventId",
+                    retryable = false,
+                )
+            }
             val now = Clock.System.now().toString()
-            val updated =
-                if (index >= 0) {
-                    val cur = state.events[index]
-                    val up =
-                        cur.copy(
-                            status = "ACKNOWLEDGED",
-                            acknowledgedAt = now,
-                            acknowledgedBy = "Мок-оператор",
-                            eventVersion = cur.eventVersion + 1,
-                            acknowledgementVersion = cur.acknowledgementVersion + 1,
-                        )
-                    state.events[index] = up
-                    up
-                } else {
-                    EventDto(
-                        id = eventId,
-                        eventVersion = 2L,
-                        classificationVersion = 1L,
-                        acknowledgementVersion = 2L,
-                        eventTypeId = mockEventTypes.first().id,
-                        eventTypeName = mockEventTypes.first().name,
-                        categoryCode = "SAFETY",
-                        iconKey = "HELMET",
-                        locationId = mockLocations.first().id,
-                        locationName = mockLocations.first().name,
-                        deviceId =
-                            mockLocations
-                                .first()
-                                .devices
-                                .first()
-                                .id,
-                        deviceName =
-                            mockLocations
-                                .first()
-                                .devices
-                                .first()
-                                .name,
-                        occurredAt = now,
-                        receivedAt = now,
-                        status = "ACKNOWLEDGED",
-                        acknowledgedAt = now,
-                        acknowledgedBy = "Мок-оператор",
-                        isErroneous = false,
-                        previewUrl = MOCK_PREVIEW_URL,
-                        videoUrl = MOCK_VIDEO_URL,
-                    )
-                }
-            updated
+            val cur = state.events[index]
+            val up =
+                cur.copy(
+                    status = "ACKNOWLEDGED",
+                    acknowledgedAt = now,
+                    acknowledgedBy = "Мок-оператор",
+                    eventVersion = cur.eventVersion + 1,
+                    acknowledgementVersion = cur.acknowledgementVersion + 1,
+                )
+            state.events[index] = up
+            state.currentSequence++
+            state.commits.add(
+                TenantCommitFrameDto(
+                    schemaVersion = 1,
+                    type = "TENANT_COMMIT",
+                    replayId = 1L,
+                    tenantSequence = state.currentSequence,
+                    payloadSha256 = state.currentSequence.toString(16).padStart(64, '0'),
+                    eventUpdated = up,
+                    summaryUpdated = getSummaryDtoLocked(state),
+                ),
+            )
+            up
         }
 
     suspend fun markEventErroneous(
@@ -355,57 +368,58 @@ class MockEventsDataStore {
         idempotencyKey: String,
     ): EventDto =
         mutex.withLock {
-            val state = getOrCreateCompanyStateLocked(companyId)
-            val index = state.events.indexOfFirst { it.id == eventId }
-            val now = Clock.System.now().toString()
-            val updated =
-                if (index >= 0) {
-                    val cur = state.events[index]
-                    val up =
-                        cur.copy(
-                            isErroneous = true,
-                            erroneousMarkedAt = now,
-                            erroneousMarkedBy = "Мок-оператор",
-                            eventVersion = cur.eventVersion + 1,
-                            classificationVersion = cur.classificationVersion + 1,
-                        )
-                    state.events[index] = up
-                    up
-                } else {
-                    EventDto(
-                        id = eventId,
-                        eventVersion = 2L,
-                        classificationVersion = 2L,
-                        acknowledgementVersion = 1L,
-                        eventTypeId = mockEventTypes.first().id,
-                        eventTypeName = mockEventTypes.first().name,
-                        categoryCode = "SAFETY",
-                        iconKey = "HELMET",
-                        locationId = mockLocations.first().id,
-                        locationName = mockLocations.first().name,
-                        deviceId =
-                            mockLocations
-                                .first()
-                                .devices
-                                .first()
-                                .id,
-                        deviceName =
-                            mockLocations
-                                .first()
-                                .devices
-                                .first()
-                                .name,
-                        occurredAt = now,
-                        receivedAt = now,
-                        status = "NEW",
-                        isErroneous = true,
-                        erroneousMarkedAt = now,
-                        erroneousMarkedBy = "Мок-оператор",
-                        previewUrl = MOCK_PREVIEW_URL,
-                        videoUrl = MOCK_VIDEO_URL,
+            val key = MutationKey(companyId, eventId, idempotencyKey)
+            val existing = mutationsByKey[key]
+            if (existing != null) {
+                if (existing.expectedClassificationVersion != expectedClassificationVersion) {
+                    throw EventsDomainException.PayloadMismatch(
+                        "Idempotency key reused with different expectedClassificationVersion",
                     )
                 }
-            updated
+                return@withLock existing.result
+            }
+
+            val state = getOrCreateCompanyStateLocked(companyId)
+            val index = state.events.indexOfFirst { it.id == eventId }
+            if (index < 0) {
+                throw EventsDomainException.Generic(
+                    code = "NOT_FOUND",
+                    serverMessage = "Event not found: $eventId",
+                    retryable = false,
+                )
+            }
+            val cur = state.events[index]
+            if (cur.classificationVersion != expectedClassificationVersion) {
+                throw EventsDomainException.StateConflict(
+                    message =
+                        "Classification version mismatch: expected $expectedClassificationVersion, " +
+                            "got ${cur.classificationVersion}",
+                )
+            }
+            val now = Clock.System.now().toString()
+            val up =
+                cur.copy(
+                    isErroneous = true,
+                    erroneousMarkedAt = now,
+                    erroneousMarkedBy = "Мок-оператор",
+                    eventVersion = cur.eventVersion + 1,
+                    classificationVersion = cur.classificationVersion + 1,
+                )
+            state.events[index] = up
+            state.currentSequence++
+            mutationsByKey[key] = MutationRecord(expectedClassificationVersion, up)
+            state.commits.add(
+                TenantCommitFrameDto(
+                    schemaVersion = 1,
+                    type = "TENANT_COMMIT",
+                    replayId = 1L,
+                    tenantSequence = state.currentSequence,
+                    payloadSha256 = state.currentSequence.toString(16).padStart(64, '0'),
+                    eventUpdated = up,
+                    summaryUpdated = getSummaryDtoLocked(state),
+                ),
+            )
+            up
         }
 
     suspend fun createExport(
@@ -419,6 +433,11 @@ class MockEventsDataStore {
             if (existingId != null) {
                 val existingRecord = exportsById[existingId]
                 if (existingRecord != null) {
+                    if (existingRecord.request != request) {
+                        throw EventsDomainException.PayloadMismatch(
+                            "Idempotency key was reused with a different request",
+                        )
+                    }
                     val now = Clock.System.now()
                     val isExpired = now >= existingRecord.expiresAt
                     return@withLock EventsExportStatusDto(
@@ -563,16 +582,6 @@ class MockEventsDataStore {
                 )
             val targetEvents = filterEventsLocked(state.events, query)
 
-            fun escapeCsv(value: String): String {
-                val needsQuotes =
-                    value.contains(sep) || value.contains('"') || value.contains('\n') || value.contains('\r')
-                return if (needsQuotes) {
-                    "\"${value.replace("\"", "\"\"")}\""
-                } else {
-                    value
-                }
-            }
-
             val bytes =
                 buildString {
                     if (isSemicolon) {
@@ -586,19 +595,29 @@ class MockEventsDataStore {
                             appendLine(
                                 "${escapeCsv(
                                     e.id,
+                                    sep,
                                 )}${sep}${escapeCsv(
                                     e.eventTypeName,
+                                    sep,
                                 )}${sep}${escapeCsv(
                                     e.locationName,
+                                    sep,
                                 )}${sep}${escapeCsv(
                                     e.deviceName,
+                                    sep,
                                 )}${sep}${escapeCsv(
                                     e.occurredAt,
+                                    sep,
                                 )}${sep}${escapeCsv(
                                     e.status,
+                                    sep,
                                 )}${sep}${escapeCsv(
                                     e.isErroneous.toString(),
-                                )}${sep}${escapeCsv(e.previewUrl.orEmpty())}${sep}${escapeCsv(e.videoUrl.orEmpty())}",
+                                    sep,
+                                )}${sep}${escapeCsv(
+                                    e.previewUrl.orEmpty(),
+                                    sep,
+                                )}${sep}${escapeCsv(e.videoUrl.orEmpty(), sep)}",
                             )
                         }
                     } else {
@@ -609,15 +628,20 @@ class MockEventsDataStore {
                             appendLine(
                                 "${escapeCsv(
                                     e.id,
+                                    sep,
                                 )}${sep}${escapeCsv(
                                     e.eventTypeName,
+                                    sep,
                                 )}${sep}${escapeCsv(
                                     e.locationName,
+                                    sep,
                                 )}${sep}${escapeCsv(
                                     e.deviceName,
+                                    sep,
                                 )}${sep}${escapeCsv(
                                     e.occurredAt,
-                                )}${sep}${escapeCsv(e.status)}${sep}${escapeCsv(e.isErroneous.toString())}",
+                                    sep,
+                                )}${sep}${escapeCsv(e.status, sep)}${sep}${escapeCsv(e.isErroneous.toString(), sep)}",
                             )
                         }
                     }
@@ -647,7 +671,6 @@ class MockEventsDataStore {
             val state = getOrCreateCompanyStateLocked(companyId)
             state.currentSequence++
             state.generatedCount++
-            state.todayEventsCount++
 
             val typeIndex = (state.generatedCount - 1) % mockEventTypes.size
             val type = mockEventTypes[typeIndex]
@@ -657,13 +680,20 @@ class MockEventsDataStore {
             val now = Clock.System.now()
             val occurredAt =
                 if (insertAtBeginning || state.events.isEmpty()) {
-                    now + (state.generatedCount * 2).seconds
+                    now
                 } else {
-                    val sorted = state.events.sortedByDescending { Instant.parse(it.occurredAt) }
-                    val newestTime = Instant.parse(sorted.first().occurredAt).toEpochMilliseconds()
-                    val oldestTime = Instant.parse(sorted.last().occurredAt).toEpochMilliseconds()
-                    val midTime = (newestTime + oldestTime) / 2 + ((state.generatedCount % 5) * 1000L)
-                    Instant.fromEpochMilliseconds(midTime)
+                    val sorted =
+                        state.events
+                            .mapNotNull { runCatching { Instant.parse(it.occurredAt) }.getOrNull() }
+                            .sortedDescending()
+                    if (sorted.size >= 2) {
+                        val newestTime = sorted.first().toEpochMilliseconds()
+                        val oldestTime = sorted.last().toEpochMilliseconds()
+                        val midTime = (newestTime + oldestTime) / 2
+                        Instant.fromEpochMilliseconds(midTime)
+                    } else {
+                        now - 1.minutes
+                    }
                 }
 
             val categoryCode =
@@ -702,14 +732,44 @@ class MockEventsDataStore {
 
             state.events.add(eventDto)
 
-            TenantCommitFrameDto(
-                schemaVersion = 1,
-                type = "TENANT_COMMIT",
-                replayId = replayId,
-                tenantSequence = state.currentSequence,
-                payloadSha256 = state.currentSequence.toString(16).padStart(64, '0'),
-                eventCreated = eventDto,
-                summaryUpdated = getSummaryDtoLocked(state),
-            )
+            val commit =
+                TenantCommitFrameDto(
+                    schemaVersion = 1,
+                    type = "TENANT_COMMIT",
+                    replayId = replayId,
+                    tenantSequence = state.currentSequence,
+                    payloadSha256 = state.currentSequence.toString(16).padStart(64, '0'),
+                    eventCreated = eventDto,
+                    summaryUpdated = getSummaryDtoLocked(state),
+                )
+            state.commits.add(commit)
+            commit
         }
+
+    suspend fun getCommitsAfterSequence(
+        companyId: String,
+        afterSequence: Long,
+    ): List<TenantCommitFrameDto> =
+        mutex.withLock {
+            val state = getOrCreateCompanyStateLocked(companyId)
+            state.commits.filter { it.tenantSequence > afterSequence }
+        }
+
+    companion object {
+        fun escapeCsv(
+            value: String,
+            separator: String = ",",
+        ): String {
+            val needsQuotes =
+                value.contains(separator) ||
+                    value.contains('"') ||
+                    value.contains('\n') ||
+                    value.contains('\r')
+            return if (needsQuotes) {
+                "\"${value.replace("\"", "\"\"")}\""
+            } else {
+                value
+            }
+        }
+    }
 }

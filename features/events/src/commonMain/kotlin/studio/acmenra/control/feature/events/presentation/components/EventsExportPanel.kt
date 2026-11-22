@@ -2,15 +2,18 @@ package studio.acmenra.control.feature.events.presentation.components
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -32,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
 import studio.acmenra.control.core.ui.generated.resources.Res
+import studio.acmenra.control.core.ui.generated.resources.events_export_download_btn
 import studio.acmenra.control.core.ui.generated.resources.events_export_downloading
 import studio.acmenra.control.core.ui.generated.resources.events_export_format_excel_short
 import studio.acmenra.control.core.ui.generated.resources.events_export_format_standard_short
@@ -238,7 +242,7 @@ fun EventsExportPanel(
 
             if (canRedownload) {
                 TooltipBox(
-                    positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                    positionProvider = TooltipDefaults.rememberTooltipPositionProvider(),
                     tooltip = {
                         PlainTooltip {
                             Text(stringResource(Res.string.events_export_redownload_tooltip))
@@ -246,10 +250,11 @@ fun EventsExportPanel(
                     },
                     state = rememberTooltipState(),
                 ) {
-                    FilledTonalIconButton(
+                    FilledTonalButton(
                         onClick = { jobStatus?.exportId?.let(onDownload) },
                         enabled = !isDownloading && (jobStatus?.isDownloadable == true),
-                        modifier = Modifier.size(AmberDimens.EventsCompactButtonHeight),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                        modifier = Modifier.height(AmberDimens.EventsCompactButtonHeight),
                     ) {
                         if (isDownloading) {
                             CircularProgressIndicator(
@@ -263,6 +268,8 @@ fun EventsExportPanel(
                                     stringResource(Res.string.events_export_redownload_tooltip),
                                 modifier = Modifier.size(AmberDimens.EventsSmallIcon),
                             )
+                            Spacer(Modifier.width(AmberDimens.GapSmall))
+                            Text(stringResource(Res.string.events_export_download_btn))
                         }
                     }
                 }

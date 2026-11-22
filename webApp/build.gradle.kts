@@ -6,6 +6,7 @@ kotlin {
     sourceSets {
         commonMain.dependencies {
             implementation(project(":shared"))
+            implementation(project(":features:events"))
             implementation(libs.navigation.compose)
         }
         val wasmJsMain by getting {

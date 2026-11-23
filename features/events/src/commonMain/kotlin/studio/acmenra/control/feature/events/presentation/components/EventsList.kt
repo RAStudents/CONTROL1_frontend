@@ -45,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -137,6 +138,9 @@ internal class EventsListPresentationState(
     var lastProcessedBatchId by mutableStateOf(0L)
     val eventCache = mutableMapOf<String, Event>()
     val animatedEventIds = mutableSetOf<String>()
+    val completedEnterIds = mutableSetOf<String>()
+    val exitingGenerations = mutableMapOf<String, Long>()
+    var exitGenerationCounter by mutableStateOf(0L)
 }
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -166,7 +170,7 @@ internal fun EventsList(
     listState: LazyListState = rememberLazyListState(),
     feedScopeKey: String = "",
     snapshotId: String? = null,
-    liveCreatedIds: Set<String> = emptySet(),
+    liveCreatedIds: List<String> = emptyList(),
     liveRemovedIds: Set<String> = emptySet(),
     liveBatchId: Long = 0L,
     asOfSequence: Long = 0L,
@@ -226,6 +230,9 @@ internal fun EventsList(
             preRefreshSnapshotId = null
             exitingIds = emptySet()
             animatedEventIds.clear()
+            presentationState.completedEnterIds.clear()
+            presentationState.exitingGenerations.clear()
+            presentationState.exitGenerationCounter = 0L
             previousEventsSnapshot = emptyList()
             anchorEventId = null
             anchorOffsetPx = 0
@@ -371,14 +378,26 @@ internal fun EventsList(
 
     LaunchedEffect(events, liveRemovedIds) {
         val currentEventIds = events.map { it.id }.toSet()
+        val visibleKeys =
+            listState.layoutInfo.visibleItemsInfo
+                .mapNotNull { it.key as? String }
+                .filterNot { it.startsWith("header_") || it.startsWith("footer_") }
+                .toSet()
+
         val newExiting = mutableSetOf<String>()
         for (id in liveRemovedIds) {
-            if (id !in currentEventIds && eventCache.containsKey(id)) {
+            if (id !in currentEventIds && eventCache.containsKey(id) && id in visibleKeys) {
                 newExiting.add(id)
+                val gen = ++presentationState.exitGenerationCounter
+                presentationState.exitingGenerations[id] = gen
+            } else if (id !in currentEventIds && id !in visibleKeys) {
+                // Offscreen removed item: remove from cache directly, don't leak exit record (§1.5, P5.1)
+                eventCache.remove(id)
             }
         }
         // Cancel exit for any event that reappears in currentEventIds (P3.2)
         val cancelledExiting = exitingIds.filter { it in currentEventIds }.toSet()
+        cancelledExiting.forEach { presentationState.exitingGenerations.remove(it) }
         val updatedExiting = (exitingIds - cancelledExiting) + newExiting
         if (updatedExiting != exitingIds) {
             exitingIds = updatedExiting
@@ -388,8 +407,7 @@ internal fun EventsList(
     }
 
     val displayedEvents =
-        remember(events, exitingIds, eventCache) {
-            events.forEach { eventCache[it.id] = it }
+        remember(events, exitingIds) {
             if (exitingIds.isEmpty()) {
                 events
             } else {
@@ -411,10 +429,13 @@ internal fun EventsList(
             }
         }
 
-    val onExitAnimationFinished: (String) -> Unit = { finishedId ->
-        exitingIds = exitingIds - finishedId
-        if (currentEvents.none { it.id == finishedId }) {
-            eventCache.remove(finishedId)
+    val onExitAnimationFinished: (String, Long) -> Unit = { finishedId, finishedGen ->
+        if (presentationState.exitingGenerations[finishedId] == finishedGen) {
+            exitingIds = exitingIds - finishedId
+            presentationState.exitingGenerations.remove(finishedId)
+            if (currentEvents.none { it.id == finishedId }) {
+                eventCache.remove(finishedId)
+            }
         }
     }
 
@@ -459,54 +480,44 @@ internal fun EventsList(
     val allFeedEventIds = remember(events) { events.map { it.id }.toSet() }
 
     // Live Event Classification & offscreen queue detection (§1.5, §1.6, §7.1, §8, P1.1, P1.2, P1.6, P1.7, P3.1)
-    LaunchedEffect(liveBatchId, liveCreatedIds, events) {
-        val oldEvents = previousEventsSnapshot
-        previousEventsSnapshot = events
+    val oldEvents = previousEventsSnapshot
+    val isOldEmpty = oldEvents.isEmpty()
+    val isLiveCreatedInEmptyFeed = !isInitialLoading && isOldEmpty
+    val (minIdx, maxIdx) = minMaxVisibleEventLazyIndices.value
 
-        if (liveCreatedIds.isEmpty()) return@LaunchedEffect
-        if (oldEvents.isEmpty()) return@LaunchedEffect
-        if (liveBatchId != 0L && liveBatchId == lastProcessedBatchId) return@LaunchedEffect
-        if (liveBatchId != 0L) {
-            lastProcessedBatchId = liveBatchId
-        }
+    var offscreenToNotify by remember { mutableStateOf<List<String>>(emptyList()) }
+
+    if (liveBatchId != 0L && liveBatchId > lastProcessedBatchId && liveCreatedIds.isNotEmpty()) {
+        lastProcessedBatchId = liveBatchId
 
         val isAtTop = wasAtTopBeforeBatch
         val flush = activeFlushContext
-        val (minIdx, maxIdx) = minMaxVisibleEventLazyIndices.value
 
         val offscreenToEnqueue = mutableListOf<String>()
         val enterToAnimate = mutableListOf<String>()
 
         for (createdId in liveCreatedIds) {
-            val isLeadingEdge = events.firstOrNull()?.id == createdId
+            val isHeadCandidate = events.take(liveCreatedIds.size).any { it.id == createdId }
             val targetLazyIdx = eventIdToLazyIndex[createdId]
 
-            if (isLeadingEdge &&
-                isAtTop &&
-                (flush == null || flush.reason == PendingNewerFlushReason.TRANSIENT_AT_TOP)
+            if ((
+                    isHeadCandidate &&
+                        isAtTop &&
+                        (flush == null || flush.reason == PendingNewerFlushReason.TRANSIENT_AT_TOP)
+                ) ||
+                (isHeadCandidate && isLiveCreatedInEmptyFeed)
             ) {
-                // Leading edge LIVE insertion at top (§1.6): keep at top and animate placement
-                // Note: user explicitly specified NEVER to scroll the list automatically!
-                activeFlushContext = null
                 isLiveInserting = true
-                liveInsertJob?.cancel()
-                liveInsertJob =
-                    coroutineScope.launch {
-                        delay(450)
-                        isLiveInserting = false
-                    }
                 enterToAnimate.add(createdId)
             } else if (targetLazyIdx != null && minIdx != null && maxIdx != null && targetLazyIdx in minIdx..maxIdx) {
-                // Mid-list live insertion inside visible viewport (§1.5): animate inside viewport, do not enqueue
                 enterToAnimate.add(createdId)
             } else {
-                // Offscreen live insertion (above/below viewport or backdated) (§1.6, P1.2)
                 offscreenToEnqueue.add(createdId)
             }
         }
 
         if (enterToAnimate.isNotEmpty()) {
-            val unrecorded = enterToAnimate.filter { it !in animatedEventIds }
+            val unrecorded = enterToAnimate.filter { it !in presentationState.completedEnterIds }
             for (id in unrecorded) {
                 if (animatedEventIds.size >= 500) {
                     val oldest = animatedEventIds.first()
@@ -518,21 +529,33 @@ internal fun EventsList(
             val indicesMap = unrecorded.mapIndexed { idx, id -> id to idx }.toMap()
             liveEnterCascadeIndices = liveEnterCascadeIndices + indicesMap
             liveEnterIds = liveEnterIds + unrecorded.toSet()
-
-            coroutineScope.launch {
-                val maxDelay = if (unrecorded.size in 2..5) unrecorded.size * 45L else 0L
-                delay(600L + maxDelay)
-                liveEnterIds = liveEnterIds - unrecorded.toSet()
-                liveEnterCascadeIndices = liveEnterCascadeIndices - unrecorded.toSet()
-            }
         }
 
         if (offscreenToEnqueue.isNotEmpty()) {
             queueState = queueState.enqueue(offscreenToEnqueue)
-            val joinedIds = offscreenToEnqueue.joinToString("_")
+            offscreenToNotify = offscreenToEnqueue
+        }
+    }
+
+    SideEffect {
+        previousEventsSnapshot = events
+    }
+
+    LaunchedEffect(liveBatchId) {
+        if (isLiveInserting) {
+            val maxDelay = if (liveEnterBatchSize in 2..5) liveEnterBatchSize * 45L else 0L
+            delay(450L + maxDelay)
+            isLiveInserting = false
+        }
+    }
+
+    LaunchedEffect(offscreenToNotify) {
+        if (offscreenToNotify.isNotEmpty()) {
+            val joinedIds = offscreenToNotify.joinToString("_")
             val batchKey =
                 "live_batch_${currentFeedScopeKey}_${currentAsOfSequence}_${currentLiveBatchId}_$joinedIds"
-            currentOnOffscreenLiveEventsDetected?.invoke(offscreenToEnqueue.size, batchKey)
+            currentOnOffscreenLiveEventsDetected?.invoke(offscreenToNotify.size, batchKey)
+            offscreenToNotify = emptyList()
         }
     }
 
@@ -560,7 +583,7 @@ internal fun EventsList(
         }
     }
 
-    // Reconcile ACCUMULATED_WHILE_AWAY flush with new layout snapshot (§1.6, §8, P1.4, P1.5)
+    // Reconcile ACCUMULATED_WHILE_AWAY flush with new layout snapshot (§1.6, §8, P1.4, P1.5, P4.1, P4.2)
     LaunchedEffect(events, pendingNewerCount, activeFlushContext, feedScopeKey, snapshotId) {
         val flush = activeFlushContext
         if (flush != null &&
@@ -568,22 +591,25 @@ internal fun EventsList(
             flush.reason == PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY &&
             pendingNewerCount == 0
         ) {
-            // Materialized candidates include backdated events as well (§1.6, P1.4)
-            val flushCandidates = events.filter { it.id !in flush.preFlushEventIds }
-            val candidateIds = flushCandidates.take(flush.capturedCount).map { it.id }
+            val candidateIds =
+                if (flush.pendingEventIds.isNotEmpty()) {
+                    flush.pendingEventIds
+                } else if (liveCreatedIds.isNotEmpty()) {
+                    liveCreatedIds
+                } else {
+                    events.filter { it.id !in flush.preFlushEventIds }.take(flush.capturedCount).map { it.id }
+                }
             val candidateSet = candidateIds.toSet()
 
-            // Await layout remeasure with materialized items (§1.6, P1.5)
+            // Await layout remeasure with materialized items without premature clearing on timeout
             if (candidateSet.isNotEmpty()) {
-                withTimeoutOrNull(500L) {
-                    snapshotFlow {
-                        val visibleKeys =
-                            listState.layoutInfo.visibleItemsInfo
-                                .mapNotNull { it.key as? String }
-                                .toSet()
-                        visibleKeys.any { it in candidateSet } || listState.firstVisibleItemIndex == 0
-                    }.filter { it }.first()
-                }
+                snapshotFlow {
+                    !listState.isScrollInProgress &&
+                        (
+                            listState.firstVisibleItemIndex == 0 ||
+                                listState.layoutInfo.visibleItemsInfo.any { (it.key as? String) in candidateSet }
+                        )
+                }.filter { it }.first()
             }
 
             val newlyVisibleKeys =
@@ -881,14 +907,6 @@ internal fun EventsList(
                             AmberDimens.ListGap
                         }
 
-                    val isLiveInsertingNow =
-                        isLiveInserting ||
-                            (
-                                liveCreatedIds.isNotEmpty() &&
-                                    wasAtTopBeforeBatch &&
-                                    events.firstOrNull()?.id in liveCreatedIds
-                            )
-
                     val cascadeIndex = liveEnterCascadeIndices[event.id] ?: 0
                     val cascadeDelay = if (liveEnterBatchSize in 2..5) cascadeIndex * 45 else 0
 
@@ -906,7 +924,7 @@ internal fun EventsList(
                         }
 
                     val placementSpec: FiniteAnimationSpec<IntOffset>? =
-                        if (isLiveInsertingNow && !listState.isScrollInProgress) {
+                        if (isLiveInserting && !listState.isScrollInProgress) {
                             fastSpatial
                         } else {
                             null
@@ -915,11 +933,11 @@ internal fun EventsList(
                     val targetLazyIdx = eventIdToLazyIndex[event.id]
                     val (minIdx, maxIdx) = minMaxVisibleEventLazyIndices.value
                     // Guard enter-animation strictly by liveEnterIds, never raw liveCreatedIds (§1.5, P1.8)
-                    val isLiveTarget = event.id in liveEnterIds
+                    val isLiveTarget = event.id in liveEnterIds && event.id !in presentationState.completedEnterIds
                     val isGlobalHead =
                         isLiveTarget &&
-                            wasAtTopBeforeBatch &&
-                            event.id == events.firstOrNull()?.id
+                            (wasAtTopBeforeBatch || isLiveCreatedInEmptyFeed) &&
+                            events.take(liveEnterBatchSize.coerceAtLeast(1)).any { it.id == event.id }
                     val isMidListLive =
                         isLiveTarget &&
                             targetLazyIdx != null &&
@@ -971,14 +989,24 @@ internal fun EventsList(
                         transitionState.targetState = true
                     }
 
-                    LaunchedEffect(isExiting, transitionState) {
+                    LaunchedEffect(transitionState) {
+                        snapshotFlow { transitionState.isIdle && transitionState.currentState }
+                            .filter { it }
+                            .first()
+                        presentationState.completedEnterIds.add(event.id)
+                        liveEnterIds = liveEnterIds - event.id
+                        liveEnterCascadeIndices = liveEnterCascadeIndices - event.id
+                    }
+
+                    val exitGen = presentationState.exitingGenerations[event.id] ?: 0L
+                    LaunchedEffect(isExiting, transitionState, exitGen) {
                         if (isExiting) {
                             withTimeoutOrNull(600L) {
                                 snapshotFlow { transitionState.isIdle && !transitionState.currentState }
                                     .filter { it }
                                     .first()
                             }
-                            onExitAnimationFinished(event.id)
+                            onExitAnimationFinished(event.id, exitGen)
                         }
                     }
 
@@ -1169,7 +1197,8 @@ internal fun EventsList(
                             indication = null,
                             onClick = {
                                 if (isJumpInFlight ||
-                                    activeFlushContext?.reason == PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY
+                                    isHistoryRefreshInFlight ||
+                                    activeFlushContext != null
                                 ) {
                                     return@clickable
                                 }

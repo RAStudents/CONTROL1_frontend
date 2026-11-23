@@ -1446,6 +1446,12 @@ class EventsReviewFixesTests {
                     asOfSequence = 11L,
                     visibleEvents = listOf(event2, event1),
                     realtimeOverlay = overlayWithEvent2,
+                    feedDelta =
+                        EventsFeedDelta(
+                            batchId = 1L,
+                            tenantSequence = 11L,
+                            createdEventIds = listOf(event2.id),
+                        ),
                 ),
             )
             runCurrent()
@@ -1478,6 +1484,7 @@ class EventsReviewFixesTests {
                     visibleEvents = listOf(event2, event1),
                     realtimeOverlay = overlayWithEvent3Pending,
                     pendingNewerCount = 1,
+                    feedDelta = null,
                 ),
             )
             runCurrent()
@@ -1510,6 +1517,12 @@ class EventsReviewFixesTests {
                     visibleEvents = listOf(event3, event2, event1),
                     realtimeOverlay = overlayWithEvent3Integrated,
                     pendingNewerCount = 0,
+                    feedDelta =
+                        EventsFeedDelta(
+                            batchId = 2L,
+                            tenantSequence = 12L,
+                            createdEventIds = listOf(event3.id),
+                        ),
                 ),
             )
             runCurrent()
@@ -1563,37 +1576,44 @@ class EventsReviewFixesTests {
             )
             assertEquals(1L, vm.state.value.liveBatchId)
 
-            // 2. Direct live creation with eventVersion = 2L without explicit feed delta (fallback advance)
+            // 2. Unrelated feed emission with feedDelta = null must clear liveCreatedIds
             val event3 =
                 sampleEvent("ev-3").copy(
                     occurredAt = kotlinx.datetime.Instant.parse("2026-03-01T10:02:00Z"),
                     eventVersion = 2L,
                 )
-            val overlayWithEvent3 =
-                RealtimeOverlay(
-                    entries =
-                        mapOf(
-                            event3.id to
-                                OverlayEntry(
-                                    eventId = event3.id,
-                                    event = event3,
-                                    eventVersion = 2L,
-                                    membership = OverlayMembership.INCLUDED,
-                                ),
-                        ),
-                )
             session.emitState(
                 initialFeed.copy(
                     asOfSequence = 12L,
                     visibleEvents = listOf(event3, event2, event1),
-                    realtimeOverlay = overlayWithEvent3,
                     feedDelta = null,
                 ),
             )
             runCurrent()
             assertTrue(
-                "ev-3" in vm.state.value.liveCreatedIds,
-                "Fallback classifier must not require eventVersion == 1L",
+                vm.state.value.liveCreatedIds
+                    .isEmpty(),
+                "Feed emission without feedDelta must clear liveCreatedIds",
+            )
+
+            // 3. Stale feedDelta with batchId <= lastProcessedDeltaBatchId must not be re-processed
+            session.emitState(
+                initialFeed.copy(
+                    asOfSequence = 13L,
+                    visibleEvents = listOf(event3, event2, event1),
+                    feedDelta =
+                        EventsFeedDelta(
+                            batchId = 1L, // stale batchId <= 1L
+                            tenantSequence = 13L,
+                            createdEventIds = listOf(event3.id),
+                        ),
+                ),
+            )
+            runCurrent()
+            assertTrue(
+                vm.state.value.liveCreatedIds
+                    .isEmpty(),
+                "Stale feedDelta must not be re-processed",
             )
         }
 
@@ -1640,6 +1660,191 @@ class EventsReviewFixesTests {
         assertEquals(PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY, presentationState.activeFlushContext?.reason)
         assertTrue("ev-exit" in presentationState.exitingIds)
     }
+
+    @Test
+    fun testBurst2To5_PreservesOrderedCascade() {
+        val presentationState = EventsListPresentationState()
+        val createdIds = listOf("ev-a", "ev-b", "ev-c")
+        val unrecorded = createdIds.filter { it !in presentationState.completedEnterIds }
+        presentationState.liveEnterBatchSize = unrecorded.size
+        val indicesMap = unrecorded.mapIndexed { idx, id -> id to idx }.toMap()
+        presentationState.liveEnterCascadeIndices = presentationState.liveEnterCascadeIndices + indicesMap
+        presentationState.liveEnterIds = presentationState.liveEnterIds + unrecorded.toSet()
+
+        assertEquals(0, presentationState.liveEnterCascadeIndices["ev-a"])
+        assertEquals(1, presentationState.liveEnterCascadeIndices["ev-b"])
+        assertEquals(2, presentationState.liveEnterCascadeIndices["ev-c"])
+        assertEquals(3, presentationState.liveEnterBatchSize)
+    }
+
+    @Test
+    fun testExitAnimationRetention_BeforeEmptyState() {
+        val presentationState = EventsListPresentationState()
+        presentationState.exitingIds = setOf("ev-last")
+
+        val visibleEventsEmpty = emptyList<Event>()
+        val isInitialLoading = false
+        val initialLoadError = null
+
+        val showEmptyStateDuringExit =
+            isInitialLoading ||
+                initialLoadError != null ||
+                (visibleEventsEmpty.isEmpty() && presentationState.exitingIds.isEmpty())
+
+        assertFalse(showEmptyStateDuringExit, "Empty state must not show while exit animation is running")
+
+        // Once exit animation finishes:
+        presentationState.exitingIds = emptySet()
+        val showEmptyStateAfterExit =
+            isInitialLoading ||
+                initialLoadError != null ||
+                (visibleEventsEmpty.isEmpty() && presentationState.exitingIds.isEmpty())
+
+        assertTrue(showEmptyStateAfterExit, "Empty state must show once exit animation is completed")
+    }
+
+    @Test
+    fun testExitingGenerationCounter_PreventsPrematureExitRemoval() {
+        val presentationState = EventsListPresentationState()
+        val eventId = "ev-race"
+
+        // First removal: generation 1
+        val gen1 = ++presentationState.exitGenerationCounter
+        presentationState.exitingGenerations[eventId] = gen1
+        presentationState.exitingIds = setOf(eventId)
+
+        // Event re-enters and is removed again: generation 2
+        val gen2 = ++presentationState.exitGenerationCounter
+        presentationState.exitingGenerations[eventId] = gen2
+
+        // Animation completion callback for gen1 arrives (stale)
+        if (presentationState.exitingGenerations[eventId] == gen1) {
+            presentationState.exitingIds = presentationState.exitingIds - eventId
+            presentationState.exitingGenerations.remove(eventId)
+        }
+
+        assertTrue(eventId in presentationState.exitingIds, "Stale animation callback must not remove new exit record")
+        assertEquals(gen2, presentationState.exitingGenerations[eventId])
+
+        // Animation completion callback for gen2 arrives (valid)
+        if (presentationState.exitingGenerations[eventId] == gen2) {
+            presentationState.exitingIds = presentationState.exitingIds - eventId
+            presentationState.exitingGenerations.remove(eventId)
+        }
+
+        assertFalse(eventId in presentationState.exitingIds, "Current generation callback must remove exit record")
+        assertFalse(presentationState.exitingGenerations.containsKey(eventId))
+    }
+
+    @Test
+    fun testFeedDeltaMonotonicity_InEventsViewModel() =
+        runTest {
+            val event1 = sampleEvent("ev-1")
+            val event2 = sampleEvent("ev-2")
+            val event3 = sampleEvent("ev-3")
+            val event4 = sampleEvent("ev-4")
+
+            val session = TestFeedSession()
+            val initialFeed =
+                EventsFeedState(
+                    isInitialLoading = false,
+                    visibleEvents = listOf(event1),
+                    snapshotId = "snap-1",
+                    asOfSequence = 10L,
+                    access = EventsAccessCapabilities(eventsRead = true),
+                )
+            session.emitState(initialFeed)
+
+            val vm = createTestViewModel(session)
+            vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true))
+            advanceUntilIdle()
+
+            // 1. New delta with batchId 5L -> processed
+            session.emitState(
+                initialFeed.copy(
+                    asOfSequence = 11L,
+                    visibleEvents = listOf(event2, event1),
+                    feedDelta =
+                        EventsFeedDelta(
+                            batchId = 5L,
+                            tenantSequence = 11L,
+                            createdEventIds = listOf(event2.id),
+                        ),
+                ),
+            )
+            runCurrent()
+            assertEquals(listOf("ev-2"), vm.state.value.liveCreatedIds)
+            assertEquals(5L, vm.state.value.liveBatchId)
+
+            // 2. Unrelated update with feedDelta null -> liveCreatedIds cleared
+            session.emitState(
+                initialFeed.copy(
+                    asOfSequence = 11L,
+                    visibleEvents = listOf(event2, event1),
+                    feedDelta = null,
+                ),
+            )
+            runCurrent()
+            assertTrue(
+                vm.state.value.liveCreatedIds
+                    .isEmpty(),
+            )
+
+            // 3. Stale delta with batchId 4L (< 5L) -> ignored
+            session.emitState(
+                initialFeed.copy(
+                    asOfSequence = 12L,
+                    visibleEvents = listOf(event3, event2, event1),
+                    feedDelta =
+                        EventsFeedDelta(
+                            batchId = 4L,
+                            tenantSequence = 12L,
+                            createdEventIds = listOf(event3.id),
+                        ),
+                ),
+            )
+            runCurrent()
+            assertTrue(
+                vm.state.value.liveCreatedIds
+                    .isEmpty(),
+            )
+
+            // 4. Stale delta replaying same batchId 5L -> ignored
+            session.emitState(
+                initialFeed.copy(
+                    asOfSequence = 13L,
+                    visibleEvents = listOf(event3, event2, event1),
+                    feedDelta =
+                        EventsFeedDelta(
+                            batchId = 5L,
+                            tenantSequence = 13L,
+                            createdEventIds = listOf(event3.id),
+                        ),
+                ),
+            )
+            runCurrent()
+            assertTrue(
+                vm.state.value.liveCreatedIds
+                    .isEmpty(),
+            )
+
+            // 5. Monotonic new delta with batchId 6L -> processed
+            session.emitState(
+                initialFeed.copy(
+                    asOfSequence = 14L,
+                    visibleEvents = listOf(event4, event3, event2, event1),
+                    feedDelta =
+                        EventsFeedDelta(
+                            batchId = 6L,
+                            tenantSequence = 14L,
+                            createdEventIds = listOf(event4.id),
+                        ),
+                ),
+            )
+            runCurrent()
+            assertEquals(listOf("ev-4"), vm.state.value.liveCreatedIds)
+            assertEquals(6L, vm.state.value.liveBatchId)
+        }
 
     private fun sampleEvent(
         id: String,

@@ -522,7 +522,11 @@ private fun WideEventsLayout(
                     onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                     presentationState = presentationState,
                 )
-                if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
+                val showEmptyState =
+                    state.isInitialLoading ||
+                        state.initialLoadError != null ||
+                        (state.visibleEvents.isEmpty() && presentationState.exitingIds.isEmpty())
+                if (showEmptyState) {
                     Box(
                         modifier =
                             Modifier
@@ -662,7 +666,11 @@ private fun MediumEventsLayout(
                     onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                     presentationState = presentationState,
                 )
-                if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
+                val showEmptyState =
+                    state.isInitialLoading ||
+                        state.initialLoadError != null ||
+                        (state.visibleEvents.isEmpty() && presentationState.exitingIds.isEmpty())
+                if (showEmptyState) {
                     Box(
                         modifier =
                             Modifier
@@ -858,7 +866,11 @@ private fun CompactEventsLayout(
                 onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                 presentationState = presentationState,
             )
-            if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
+            val showEmptyState =
+                state.isInitialLoading ||
+                    state.initialLoadError != null ||
+                    (state.visibleEvents.isEmpty() && presentationState.exitingIds.isEmpty())
+            if (showEmptyState) {
                 Box(
                     modifier =
                         Modifier

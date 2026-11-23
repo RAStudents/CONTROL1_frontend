@@ -47,11 +47,9 @@ import studio.acmenra.control.feature.events.domain.model.EventsQuery
 import studio.acmenra.control.feature.events.domain.model.EventsQueryRouteCodec
 import studio.acmenra.control.feature.events.domain.model.LocationFilterGroup
 import studio.acmenra.control.feature.events.domain.model.LocationToggleState
-import studio.acmenra.control.feature.events.domain.model.OverlayMembership
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 import studio.acmenra.control.feature.events.domain.model.locationToggleState
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
-import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
 import studio.acmenra.control.feature.events.domain.usecase.AcknowledgeEventUseCase
 import studio.acmenra.control.feature.events.domain.usecase.CreateEventsExportUseCase
 import studio.acmenra.control.feature.events.domain.usecase.DownloadEventsExportUseCase
@@ -94,7 +92,7 @@ class EventsViewModel(
     private var filterRequestGeneration: Long = 0L
     private var filterOptionsGeneration: Long = 0L
     private var downloadGeneration: Long = 0L
-    private var liveEventsCleanupJob: Job? = null
+    private var lastProcessedDeltaBatchId: Long = 0L
 
     var onQueryHashChanged: ((String?) -> Unit)? = null
     private var activeQueryHash: String? = null
@@ -239,6 +237,7 @@ class EventsViewModel(
         activeExportKey = null
         activeExportRequest = null
         autoDownloadAttemptedExportId = null
+        lastProcessedDeltaBatchId = 0L
         feedSession?.close()
         feedSession = null
 
@@ -329,6 +328,7 @@ class EventsViewModel(
         feedCollectJob?.cancel()
         feedNoticeJob?.cancel()
         feedFilterOptionsJob?.cancel()
+        lastProcessedDeltaBatchId = 0L
         feedSession?.close()
 
         val query = EventsQuery(filter = _state.value.filter)
@@ -337,77 +337,21 @@ class EventsViewModel(
 
         feedCollectJob =
             viewModelScope.launch {
-                var prevFeedState: EventsFeedState? = null
                 session.state.collect { feedState ->
                     if (currentGen != filterRequestGeneration || sessionCompanyGen != companyGeneration) return@collect
                     val canRead = feedState.access.eventsRead && _state.value.access.eventsRead
                     val feedScopeKey = canonicalFeedScopeKey(companyId, _state.value.filter, _state.value.sort)
 
-                    // Classify feed change provenance (§1.5, §7.1, P1.1, P1.2)
-                    val liveCreated = mutableSetOf<String>()
-                    val liveRemoved = mutableSetOf<String>()
-
-                    val isBootstrapOrRefresh =
-                        prevFeedState == null ||
-                            feedState.snapshotId != prevFeedState?.snapshotId ||
-                            feedState.isInitialLoading
-
-                    val currentSequence = feedState.asOfSequence
-                    val previousSequence = prevFeedState?.asOfSequence
-                    val hasSequenceAdvance =
-                        currentSequence != null &&
-                            previousSequence != null &&
-                            currentSequence > previousSequence
-
-                    val isFeedDelta = !isBootstrapOrRefresh && canRead && prevFeedState != null
-                    if (feedState.feedDelta != null) {
-                        liveCreated.addAll(feedState.feedDelta.createdEventIds)
-                        liveRemoved.addAll(feedState.feedDelta.removedEventIds)
-                    } else if (isFeedDelta) {
-                        val prev = prevFeedState!!
-                        for ((id, entry) in feedState.realtimeOverlay.entries) {
-                            val isDirectLiveIncluded =
-                                hasSequenceAdvance &&
-                                    entry.membership == OverlayMembership.INCLUDED &&
-                                    !prev.realtimeOverlay.entries.containsKey(id) &&
-                                    prev.visibleEvents.none { it.id == id }
-
-                            val isPendingNewerMaterialized =
-                                entry.membership == OverlayMembership.INCLUDED &&
-                                    prev.realtimeOverlay.entries[id]?.membership == OverlayMembership.PENDING_NEWER &&
-                                    prev.visibleEvents.none { it.id == id } &&
-                                    feedState.visibleEvents.any { it.id == id }
-
-                            if (isDirectLiveIncluded || isPendingNewerMaterialized) {
-                                liveCreated.add(id)
-                            }
-                        }
-                        for ((id, entry) in feedState.realtimeOverlay.entries) {
-                            if (entry.membership == OverlayMembership.REMOVED &&
-                                prev.visibleEvents.any { it.id == id }
-                            ) {
-                                liveRemoved.add(id)
-                            }
-                        }
+                    // Strictly consume authoritative EventsFeedDelta (§1.5, §7.1, P3.1-P3.4)
+                    val delta = feedState.feedDelta
+                    val batchId = delta?.batchId ?: 0L
+                    val isNewBatch = delta != null && batchId != 0L && batchId > lastProcessedDeltaBatchId && canRead
+                    if (isNewBatch) {
+                        lastProcessedDeltaBatchId = batchId
                     }
-                    prevFeedState = feedState
-
-                    val newLiveBatchId =
-                        feedState.feedDelta?.batchId
-                            ?: if (liveCreated.isNotEmpty() || liveRemoved.isNotEmpty()) {
-                                _state.value.liveBatchId + 1L
-                            } else {
-                                _state.value.liveBatchId
-                            }
-
-                    if (liveCreated.isNotEmpty() || liveRemoved.isNotEmpty()) {
-                        liveEventsCleanupJob?.cancel()
-                        liveEventsCleanupJob =
-                            viewModelScope.launch {
-                                delay(1000L)
-                                _state.update { it.copy(liveCreatedIds = emptySet(), liveRemovedIds = emptySet()) }
-                            }
-                    }
+                    val liveCreated: List<String> = if (isNewBatch) delta!!.createdEventIds else emptyList()
+                    val liveRemoved: Set<String> = if (isNewBatch) delta!!.removedEventIds else emptySet()
+                    val newLiveBatchId = if (isNewBatch) batchId else _state.value.liveBatchId
 
                     _state.update { current ->
                         val hasLoadedContent = current.summary != null || current.visibleEvents.isNotEmpty()

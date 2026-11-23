@@ -41,6 +41,9 @@ internal data class PendingNewerFlushContext(
     val capturedCount: Int,
     val feedScopeKey: String,
     val preFlushEventIds: Set<String> = emptySet(),
+    val pendingEventIds: List<String> = emptyList(),
+    val expectedBatchId: Long? = null,
+    val expectedSnapshotId: String? = null,
 )
 
 internal data class OffscreenQueueState(

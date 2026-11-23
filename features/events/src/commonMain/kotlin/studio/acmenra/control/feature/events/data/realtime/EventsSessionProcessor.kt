@@ -324,6 +324,7 @@ class EventsSessionProcessor(
                             asOfSequence = 0L,
                             pendingNewerCount = 0,
                             pendingHistoryCount = 0,
+                            feedDelta = null,
                         )
                     }
                     if (wasRead) {
@@ -343,7 +344,13 @@ class EventsSessionProcessor(
                         when (frame.frame.reason) {
                             "TOKEN_EXPIRED" -> onTokenRefreshNeeded()
                             "SESSION_REVOKED" -> onSessionRevoked()
-                            else -> _state.update { it.copy(connectionState = RealtimeConnectionState.FAILED) }
+                            else ->
+                                _state.update {
+                                    it.copy(
+                                        connectionState = RealtimeConnectionState.FAILED,
+                                        feedDelta = null,
+                                    )
+                                }
                         }
                     }
                     return
@@ -473,7 +480,7 @@ class EventsSessionProcessor(
         if (accessFence.value.denied && command !is SessionCommand.AccessUpdated && command !is SessionCommand.Close) {
             when (command) {
                 is SessionCommand.ConnectionStateChanged -> {
-                    _state.update { it.copy(connectionState = command.state) }
+                    _state.update { it.copy(connectionState = command.state, feedDelta = null) }
                 }
                 is SessionCommand.InstallBootstrap -> {
                     command.response.complete(BootstrapApplyResult.Stale)
@@ -502,6 +509,7 @@ class EventsSessionProcessor(
                         it.copy(
                             isInitialLoading = false,
                             initialLoadError = command.error,
+                            feedDelta = null,
                         )
                     }
                 }
@@ -511,11 +519,12 @@ class EventsSessionProcessor(
                     it.copy(
                         isLoadingNextPage = false,
                         paginationError = command.error,
+                        feedDelta = null,
                     )
                 }
             }
             is SessionCommand.SetLoadingNextPage -> {
-                _state.update { it.copy(isLoadingNextPage = command.isLoading) }
+                _state.update { it.copy(isLoadingNextPage = command.isLoading, feedDelta = null) }
             }
             is SessionCommand.WsConnectionActivated -> {
                 if (command.connectionId > activeConnectionId) {
@@ -541,6 +550,7 @@ class EventsSessionProcessor(
                             replayId = command.initialReplayId,
                             asOfSequence = command.afterSequence,
                             connectionState = RealtimeConnectionState.CONNECTING,
+                            feedDelta = null,
                         )
                     }
                     val earlyFrames = earlyFramesBuffer.remove(command.connectionId)
@@ -567,20 +577,20 @@ class EventsSessionProcessor(
                 }
             }
             is SessionCommand.ConnectionStateChanged -> {
-                _state.update { it.copy(connectionState = command.state) }
+                _state.update { it.copy(connectionState = command.state, feedDelta = null) }
             }
             is SessionCommand.RebootstrapStateChanged -> {
-                _state.update { it.copy(rebootstrapState = command.rebootstrapState) }
+                _state.update { it.copy(rebootstrapState = command.rebootstrapState, feedDelta = null) }
             }
             is SessionCommand.OptimisticAckPending -> {
                 val newPending = currentOverlay.pendingAckIds + command.eventId
                 currentOverlay = currentOverlay.copy(pendingAckIds = newPending)
-                _state.update { it.copy(realtimeOverlay = currentOverlay) }
+                _state.update { it.copy(realtimeOverlay = currentOverlay, feedDelta = null) }
             }
             is SessionCommand.ClearOptimisticAckPending -> {
                 val newPending = currentOverlay.pendingAckIds - command.eventId
                 currentOverlay = currentOverlay.copy(pendingAckIds = newPending)
-                _state.update { it.copy(realtimeOverlay = currentOverlay) }
+                _state.update { it.copy(realtimeOverlay = currentOverlay, feedDelta = null) }
             }
             is SessionCommand.AcknowledgeSucceeded -> handleAcknowledgeSucceeded(command.event)
             is SessionCommand.EventMutationApplied -> handleEventMutationApplied(command.event)
@@ -631,6 +641,7 @@ class EventsSessionProcessor(
                             pendingNewerCount = 0,
                             pendingHistoryCount = 0,
                             snapshotId = null,
+                            feedDelta = null,
                         )
                     }
                     if (wasRead) {
@@ -638,10 +649,10 @@ class EventsSessionProcessor(
                     }
                 } else {
                     if (!wasRead && command.access.eventsRead) {
-                        _state.update { it.copy(access = command.access) }
+                        _state.update { it.copy(access = command.access, feedDelta = null) }
                         onEventsReadGranted()
                     } else {
-                        _state.update { it.copy(access = command.access) }
+                        _state.update { it.copy(access = command.access, feedDelta = null) }
                     }
                 }
             }
@@ -651,6 +662,7 @@ class EventsSessionProcessor(
                     it.copy(
                         asOfSequence = sequenceProcessor.currentSequence,
                         replayId = command.replayId,
+                        feedDelta = null,
                     )
                 }
             }
@@ -662,7 +674,7 @@ class EventsSessionProcessor(
                             bufferReplayId = res.replayId
                             rebootstrapBuffer.clear()
                         }
-                        _state.update { it.copy(replayId = res.replayId) }
+                        _state.update { it.copy(replayId = res.replayId, feedDelta = null) }
                         command.response.complete(res)
                     }
                     is ReplayGenerationResult.RequiresFreshAuth -> {
@@ -672,7 +684,7 @@ class EventsSessionProcessor(
                             bufferReplayId = res.initialReplayId
                             rebootstrapBuffer.clear()
                         }
-                        _state.update { it.copy(replayId = res.initialReplayId) }
+                        _state.update { it.copy(replayId = res.initialReplayId, feedDelta = null) }
                         onFreshAuthNeeded?.invoke(sequenceProcessor.currentSequence, res.initialReplayId)
                         command.response.complete(res)
                     }
@@ -680,7 +692,7 @@ class EventsSessionProcessor(
             }
             is SessionCommand.ResetSequence -> {
                 sequenceProcessor.resetSequence(command.sequence)
-                _state.update { it.copy(asOfSequence = sequenceProcessor.currentSequence) }
+                _state.update { it.copy(asOfSequence = sequenceProcessor.currentSequence, feedDelta = null) }
             }
             is SessionCommand.ViewportAtTop -> {
                 if (!_state.value.access.eventsRead || accessFence.value.denied) return
@@ -1003,13 +1015,13 @@ class EventsSessionProcessor(
         snapshotId: String?,
     ) {
         if (!_state.value.access.eventsRead || accessFence.value.denied) {
-            _state.update { it.copy(isLoadingNextPage = false) }
+            _state.update { it.copy(isLoadingNextPage = false, feedDelta = null) }
             return
         }
 
         if (snapshotId != null && snapshotId != _state.value.snapshotId) {
             // Discard page from outdated snapshot
-            _state.update { it.copy(isLoadingNextPage = false) }
+            _state.update { it.copy(isLoadingNextPage = false, feedDelta = null) }
             return
         }
 
@@ -1019,6 +1031,7 @@ class EventsSessionProcessor(
                     isLoadingNextPage = false,
                     paginationError =
                         EventsPaginationError.Server("Contract violation: hasMore is true but nextCursor is null"),
+                    feedDelta = null,
                 )
             }
             return
@@ -1039,6 +1052,7 @@ class EventsSessionProcessor(
                 paginationError = null,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
+                feedDelta = null,
             )
         }
     }
@@ -1115,6 +1129,7 @@ class EventsSessionProcessor(
                 snapshotTotalCount = currentTotalCount,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
+                feedDelta = null,
             )
         }
     }
@@ -1197,6 +1212,7 @@ class EventsSessionProcessor(
                 snapshotTotalCount = currentTotalCount,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
+                feedDelta = null,
             )
         }
     }
@@ -1223,6 +1239,7 @@ class EventsSessionProcessor(
                     asOfSequence = 0L,
                     pendingNewerCount = 0,
                     pendingHistoryCount = 0,
+                    feedDelta = null,
                 )
             }
             return
@@ -1233,7 +1250,7 @@ class EventsSessionProcessor(
                 "TOKEN_EXPIRED" -> onTokenRefreshNeeded()
                 "SESSION_REVOKED" -> onSessionRevoked()
                 else -> {
-                    _state.update { it.copy(connectionState = RealtimeConnectionState.FAILED) }
+                    _state.update { it.copy(connectionState = RealtimeConnectionState.FAILED, feedDelta = null) }
                 }
             }
             return
@@ -1299,7 +1316,7 @@ class EventsSessionProcessor(
                         maxClosedReplayGeneration = maxOf(maxClosedReplayGeneration, sequenceProcessor.currentReplayId)
                         when (val genResult = sequenceProcessor.tryNextReplayGeneration()) {
                             is ReplayGenerationResult.Next -> {
-                                _state.update { it.copy(replayId = genResult.replayId) }
+                                _state.update { it.copy(replayId = genResult.replayId, feedDelta = null) }
                                 onSendReplayRequest(genResult.replayId, sequenceProcessor.currentSequence)
                             }
                             is ReplayGenerationResult.RequiresFreshAuth -> {
@@ -1308,7 +1325,7 @@ class EventsSessionProcessor(
                                     sequenceProcessor.currentSequence,
                                     genResult.initialReplayId,
                                 )
-                                _state.update { it.copy(replayId = genResult.initialReplayId) }
+                                _state.update { it.copy(replayId = genResult.initialReplayId, feedDelta = null) }
                                 onFreshAuthNeeded?.invoke(sequenceProcessor.currentSequence, genResult.initialReplayId)
                             }
                         }
@@ -1341,7 +1358,7 @@ class EventsSessionProcessor(
                     return
                 }
                 if (frame.frame.replayEmpty) {
-                    _state.update { it.copy(connectionState = RealtimeConnectionState.CONNECTED) }
+                    _state.update { it.copy(connectionState = RealtimeConnectionState.CONNECTED, feedDelta = null) }
                 }
             }
             is IncomingWsFrame.ReplayCompleted -> {
@@ -1356,7 +1373,7 @@ class EventsSessionProcessor(
                     onSendReplayRequest(sequenceProcessor.currentReplayId, sequenceProcessor.currentSequence)
                     return
                 }
-                _state.update { it.copy(connectionState = RealtimeConnectionState.CONNECTED) }
+                _state.update { it.copy(connectionState = RealtimeConnectionState.CONNECTED, feedDelta = null) }
             }
             is IncomingWsFrame.HeartbeatAck -> {
                 if (frame.frame.replayId != sequenceProcessor.currentReplayId ||

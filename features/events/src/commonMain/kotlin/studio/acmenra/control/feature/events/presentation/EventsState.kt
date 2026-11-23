@@ -31,7 +31,7 @@ data class EventsState(
     val asOfSequence: Long = 0L,
     val snapshotId: String? = null,
     val feedScopeKey: String = "",
-    val liveCreatedIds: Set<String> = emptySet(),
+    val liveCreatedIds: List<String> = emptyList(),
     val liveRemovedIds: Set<String> = emptySet(),
     val liveBatchId: Long = 0L,
     val snapshotTotalCount: Int? = null,

@@ -94,9 +94,38 @@
     <string name="events_empty_no_events_filtered">По заданным фильтрам событий не найдено</string>
     <string name="events_list_loading">Загрузка событий...</string>
     <string name="events_list_load_more">Загрузка следующих событий...</string>
+    <string name="events_list_end_reached">Все события загружены</string>
+    <string name="events_list_pagination_retry">Повторить</string>
+    <string name="events_list_pagination_error">Не удалось загрузить следующие события</string>
     <string name="events_list_pending_new_events">+%1$d новых событий ↑</string>
     <string name="events_list_requires_refresh">Доступны новые события. Нажмите для обновления.</string>
     <string name="events_refresh">Обновить</string>
+
+    <!-- Offscreen Queue & Indicator -->
+    <string name="events_offscreen_pill_plus_99">+99+</string>
+    <string name="events_offscreen_pill_count">+%1$d</string>
+    <string name="events_offscreen_pill_accessibility_up">%1$d новых событий выше</string>
+    <string name="events_offscreen_pill_accessibility_down">%1$d новых событий ниже</string>
+    <string name="events_offscreen_notice_title">Новые события</string>
+
+    <!-- Month Names and Date Headers -->
+    <string name="month_1_genitive">января</string>
+    <string name="month_2_genitive">февраля</string>
+    <string name="month_3_genitive">марта</string>
+    <string name="month_4_genitive">апреля</string>
+    <string name="month_5_genitive">мая</string>
+    <string name="month_6_genitive">июня</string>
+    <string name="month_7_genitive">июля</string>
+    <string name="month_8_genitive">августа</string>
+    <string name="month_9_genitive">сентября</string>
+    <string name="month_10_genitive">октября</string>
+    <string name="month_11_genitive">ноября</string>
+    <string name="month_12_genitive">декабря</string>
+
+    <string name="events_date_header_today">%1$s (сегодня)</string>
+    <string name="events_date_header_yesterday">%1$s (вчера)</string>
+    <string name="events_date_header_current_year">%1$d %2$s</string>
+    <string name="events_date_header_other_year">%1$d %2$s %3$d</string>
 
     <!-- Card Statuses -->
     <string name="events_status_new">Новое</string>

@@ -94,9 +94,38 @@
     <string name="events_empty_no_events_filtered">No events found matching current filters</string>
     <string name="events_list_loading">Loading events...</string>
     <string name="events_list_load_more">Loading more...</string>
+    <string name="events_list_end_reached">All events loaded</string>
+    <string name="events_list_pagination_retry">Retry</string>
+    <string name="events_list_pagination_error">Failed to load more events</string>
     <string name="events_list_pending_new_events">+%1$d new events</string>
     <string name="events_list_requires_refresh">New events available. Click to refresh.</string>
     <string name="events_refresh">Refresh</string>
+
+    <!-- Offscreen Queue & Indicator -->
+    <string name="events_offscreen_pill_plus_99">+99+</string>
+    <string name="events_offscreen_pill_count">+%1$d</string>
+    <string name="events_offscreen_pill_accessibility_up">%1$d new events above</string>
+    <string name="events_offscreen_pill_accessibility_down">%1$d new events below</string>
+    <string name="events_offscreen_notice_title">New live events</string>
+
+    <!-- Month Names and Date Headers -->
+    <string name="month_1_genitive">January</string>
+    <string name="month_2_genitive">February</string>
+    <string name="month_3_genitive">March</string>
+    <string name="month_4_genitive">April</string>
+    <string name="month_5_genitive">May</string>
+    <string name="month_6_genitive">June</string>
+    <string name="month_7_genitive">July</string>
+    <string name="month_8_genitive">August</string>
+    <string name="month_9_genitive">September</string>
+    <string name="month_10_genitive">October</string>
+    <string name="month_11_genitive">November</string>
+    <string name="month_12_genitive">December</string>
+
+    <string name="events_date_header_today">%1$s (today)</string>
+    <string name="events_date_header_yesterday">%1$s (yesterday)</string>
+    <string name="events_date_header_current_year">%2$s %1$d</string>
+    <string name="events_date_header_other_year">%2$s %1$d, %3$d</string>
 
     <!-- Card Statuses -->
     <string name="events_status_new">New</string>

@@ -234,6 +234,16 @@ object AmberDimens {
     val OutlinedBorderWidth = 1.dp
     val StatusBadgePaddingHorizontal = 8.dp
     val StatusBadgePaddingVertical = 2.dp
+
+    // Events list & EventCard tokens
+    val EventsSelectedListGap = 5.dp
+    val EventsSelectedBorderWidth = 1.5.dp
+    val EventsHoverChevronShift = 2.dp
+    val EventsStickyDateHeight = 36.dp
+    val EventsOffscreenPillHeight = 28.dp
+    val EventsStickyDatePillReservedWidth = 80.dp
+    val EventsDaySectionSpacing = 12.dp
+    val EventsListFooterPadding = 16.dp
 }
 
 object AmberBreakpoints {

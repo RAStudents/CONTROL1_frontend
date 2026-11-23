@@ -417,7 +417,7 @@ fun EventsList(
                 (flush == null || flush.reason == PendingNewerFlushReason.TRANSIENT_AT_TOP)
             ) {
                 // Leading edge LIVE insertion at top (§1.6): keep at top and animate placement
-                listState.scrollToItem(0, 0)
+                listState.requestScrollToItem(0, 0)
                 activeFlushContext = null
                 isLiveInserting = true
                 liveInsertJob?.cancel()
@@ -448,22 +448,29 @@ fun EventsList(
             queueState = queueState.enqueue(offscreenToEnqueue)
             val batchKey = "live_batch_${feedScopeKey}_${offscreenToEnqueue.joinToString("_")}"
             onOffscreenLiveEventsDetected?.invoke(offscreenToEnqueue.size, batchKey)
+        }
+    }
 
-            // Restore scroll anchor if not at top (§2, P1.6, P2.2)
-            if (!isAtTop && !listState.isScrollInProgress && anchorEventId != null) {
-                val resolvedIdx =
-                    EventsScrollAnchorHelper.resolveFallbackIndex(
-                        anchorId = anchorEventId,
-                        priorSnapshotIds = priorSnapshotIds,
-                        currentIdToLazyIndex = eventIdToLazyIndex,
-                    )
-                val scrollOffset = EventsScrollAnchorHelper.calculateScrollOffset(anchorOffsetPx)
-                if (resolvedIdx >= 0) {
-                    listState.scrollToItem(
-                        index = resolvedIdx,
-                        scrollOffset = if (resolvedIdx == 0) 0 else scrollOffset,
-                    )
-                }
+    // Restore scroll anchor strictly if the anchored event was deleted/evicted (§2, P1.6, P2.2)
+    LaunchedEffect(events) {
+        val anchorId = anchorEventId
+        if (!isAtTopState.value &&
+            !listState.isScrollInProgress &&
+            anchorId != null &&
+            !eventIdToLazyIndex.containsKey(anchorId)
+        ) {
+            val resolvedIdx =
+                EventsScrollAnchorHelper.resolveFallbackIndex(
+                    anchorId = anchorId,
+                    priorSnapshotIds = priorSnapshotIds,
+                    currentIdToLazyIndex = eventIdToLazyIndex,
+                )
+            val scrollOffset = EventsScrollAnchorHelper.calculateScrollOffset(anchorOffsetPx)
+            if (resolvedIdx >= 0) {
+                listState.requestScrollToItem(
+                    index = resolvedIdx,
+                    scrollOffset = if (resolvedIdx == 0) 0 else scrollOffset,
+                )
             }
         }
     }
@@ -476,8 +483,8 @@ fun EventsList(
             flush.reason == PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY &&
             pendingNewerCount == 0
         ) {
-            // Scroll to top and await layout remeasure with materialized items
-            listState.scrollToItem(0, 0)
+            // Request top position and await layout remeasure with materialized items (§1.6)
+            listState.requestScrollToItem(0, 0)
             snapshotFlow {
                 val info = listState.layoutInfo
                 listState.firstVisibleItemIndex == 0 && info.visibleItemsInfo.isNotEmpty()

@@ -104,8 +104,8 @@
     <!-- Offscreen Queue & Indicator -->
     <string name="events_offscreen_pill_plus_99">+99+</string>
     <string name="events_offscreen_pill_count">+%1$d</string>
-    <string name="events_offscreen_pill_accessibility_up">Событий выше: %1$d</string>
-    <string name="events_offscreen_pill_accessibility_down">Событий ниже: %1$d</string>
+    <string name="events_offscreen_pill_accessibility_up">Выше: %1$d</string>
+    <string name="events_offscreen_pill_accessibility_down">Ниже: %1$d</string>
     <string name="events_offscreen_notice_title">Новые события</string>
 
     <!-- Month Names and Date Headers -->

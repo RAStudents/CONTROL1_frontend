@@ -159,7 +159,7 @@ fun EventsList(
     // Event model retention cache and exit animation tracking (§1.5, §7.3, P1.5)
     val eventCache = remember { mutableMapOf<String, Event>() }
     var exitingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var displayedEvents by remember { mutableStateOf<List<Event>>(events) }
+    val animatedEventIds = remember { mutableSetOf<String>() }
     var liveEnterIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var previousEventsSnapshot by remember { mutableStateOf<List<Event>>(emptyList()) }
 
@@ -181,7 +181,7 @@ fun EventsList(
             isJumpInFlight = false
             isHistoryRefreshInFlight = false
             exitingIds = emptySet()
-            displayedEvents = events
+            animatedEventIds.clear()
             previousEventsSnapshot = emptyList()
             anchorEventId = null
             anchorOffsetPx = 0
@@ -323,35 +323,34 @@ fun EventsList(
         if (newExiting.isNotEmpty()) {
             exitingIds = exitingIds + newExiting
         }
-
-        // Build displayedEvents preserving slots of exiting items
-        val nextDisplayed = mutableListOf<Event>()
-        val addedIds = mutableSetOf<String>()
-        val activeExitingMap = exitingIds.mapNotNull { eventCache[it] }.associateBy { it.id }
-
-        var eventIdx = 0
-        for (oldEvent in displayedEvents) {
-            if (oldEvent.id in activeExitingMap) {
-                nextDisplayed.add(oldEvent)
-                addedIds.add(oldEvent.id)
-            } else if (eventIdx < events.size && events[eventIdx].id == oldEvent.id) {
-                nextDisplayed.add(events[eventIdx])
-                addedIds.add(events[eventIdx].id)
-                eventIdx++
-            }
-        }
-        for (event in events) {
-            if (event.id !in addedIds) {
-                nextDisplayed.add(event)
-                addedIds.add(event.id)
-            }
-        }
-        displayedEvents = nextDisplayed
     }
+
+    val displayedEvents =
+        remember(events, exitingIds, eventCache) {
+            events.forEach { eventCache[it.id] = it }
+            if (exitingIds.isEmpty()) {
+                events
+            } else {
+                val activeExitingMap = exitingIds.mapNotNull { eventCache[it] }.associateBy { it.id }
+                val nextDisplayed = mutableListOf<Event>()
+                val addedIds = mutableSetOf<String>()
+                for (event in events) {
+                    nextDisplayed.add(event)
+                    addedIds.add(event.id)
+                }
+                for ((id, exitingEvent) in activeExitingMap) {
+                    if (id !in addedIds) {
+                        nextDisplayed.add(exitingEvent)
+                    }
+                }
+                nextDisplayed.sortedWith { a, b ->
+                    compareValuesBy(b, a, { it.occurredAt }, { it.id })
+                }
+            }
+        }
 
     val onExitAnimationFinished: (String) -> Unit = { finishedId ->
         exitingIds = exitingIds - finishedId
-        displayedEvents = displayedEvents.filterNot { it.id == finishedId }
     }
 
     // Group events by date: active displayed + exiting (§1.1, §6.1, §7.3)
@@ -776,15 +775,41 @@ fun EventsList(
                             AmberDimens.ListGap
                         }
 
+                    val isLiveInsertingNow =
+                        isLiveInserting ||
+                            (
+                                liveCreatedIds.isNotEmpty() &&
+                                    wasAtTopBeforeBatch &&
+                                    events.firstOrNull()?.id in liveCreatedIds
+                            )
+
                     val placementSpec: FiniteAnimationSpec<IntOffset>? =
-                        if (isLiveInserting && !listState.isScrollInProgress) {
+                        if (isLiveInsertingNow && !listState.isScrollInProgress) {
                             motion.fastSpatialSpec<IntOffset>()
                         } else {
                             null
                         }
 
-                    val shouldAnimateEnter = event.id in liveEnterIds
-                    val isGlobalHead = shouldAnimateEnter && wasAtTopBeforeBatch && event.id == events.firstOrNull()?.id
+                    val targetLazyIdx = eventIdToLazyIndex[event.id]
+                    val (minIdx, maxIdx) = minMaxVisibleEventLazyIndices.value
+                    val isLiveTarget = event.id in liveEnterIds || event.id in liveCreatedIds
+                    val isGlobalHead =
+                        isLiveTarget &&
+                            wasAtTopBeforeBatch &&
+                            event.id == events.firstOrNull()?.id
+                    val isMidListLive =
+                        isLiveTarget &&
+                            targetLazyIdx != null &&
+                            minIdx != null &&
+                            maxIdx != null &&
+                            targetLazyIdx in minIdx..maxIdx
+
+                    val shouldAnimateEnter =
+                        (isGlobalHead || isMidListLive) && event.id !in animatedEventIds
+
+                    if (shouldAnimateEnter) {
+                        animatedEventIds.add(event.id)
+                    }
 
                     val enterTransition =
                         if (!shouldAnimateEnter) {
@@ -815,7 +840,12 @@ fun EventsList(
                         fadeOut(animationSpec = motion.fastEffectsSpec()) +
                             shrinkVertically(animationSpec = motion.fastSpatialSpec())
 
-                    val transitionState = remember(event.id) { MutableTransitionState(true) }
+                    val transitionState =
+                        remember(event.id) {
+                            MutableTransitionState(initialState = !shouldAnimateEnter).apply {
+                                targetState = true
+                            }
+                        }
                     if (isExiting) {
                         transitionState.targetState = false
                     }

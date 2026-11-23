@@ -19,6 +19,7 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.datetime.LocalDate
@@ -75,7 +76,10 @@ import studio.acmenra.control.feature.events.domain.model.EventsQuery
 import studio.acmenra.control.feature.events.domain.model.EventsQueryRouteCodec
 import studio.acmenra.control.feature.events.domain.model.EventsSummary
 import studio.acmenra.control.feature.events.domain.model.LocationFilterGroup
+import studio.acmenra.control.feature.events.domain.model.OverlayEntry
+import studio.acmenra.control.feature.events.domain.model.OverlayMembership
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
+import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
 import studio.acmenra.control.feature.events.domain.repository.EventsRepository
@@ -1329,6 +1333,185 @@ class EventsReviewFixesTests {
             } finally {
                 testScope.cancel()
             }
+        }
+
+    @Test
+    fun testLiveCreatedClassification_DirectAndPendingNewerMaterialization() =
+        runTest {
+            val event1 = sampleEvent("ev-1")
+            val event2 = sampleEvent("ev-2")
+            val event3 = sampleEvent("ev-3")
+
+            val initialFeed =
+                EventsFeedState(
+                    isInitialLoading = false,
+                    visibleEvents = listOf(event1),
+                    snapshotId = "snap-1",
+                    asOfSequence = 10L,
+                    access = EventsAccessCapabilities(eventsRead = true),
+                )
+            val session = TestFeedSession(initialFeed)
+            val observeFeed =
+                object : ObserveEventsFeedUseCase {
+                    override fun invoke(
+                        companyId: String,
+                        query: EventsQuery,
+                        accessCapabilities: EventsAccessCapabilities,
+                    ): EventsFeedSession = session
+                }
+
+            val vm =
+                EventsViewModel(
+                    observeEventsFeedUseCase = observeFeed,
+                    loadEventFilterOptionsUseCase =
+                        object : LoadEventFilterOptionsUseCase {
+                            override suspend fun invoke(companyId: String): EventsFilterOptions = EventsFilterOptions()
+                        },
+                    acknowledgeEventUseCase =
+                        object : AcknowledgeEventUseCase {
+                            override suspend fun invoke(
+                                companyId: String,
+                                eventId: String,
+                            ) = EventsOperationResult.Success(event1)
+                        },
+                    markEventErroneousUseCase =
+                        object : MarkEventErroneousUseCase {
+                            override suspend fun invoke(
+                                companyId: String,
+                                eventId: String,
+                                v: Long,
+                                k: String,
+                            ) = EventsOperationResult.Success(event1)
+                        },
+                    createEventsExportUseCase =
+                        object : CreateEventsExportUseCase {
+                            override suspend fun invoke(
+                                companyId: String,
+                                r: EventsExportRequest,
+                                k: String,
+                            ) = EventsExportStatus(
+                                exportId = "e1",
+                                status = EventsExportStatusCode.QUEUED,
+                                createdAt = Clock.System.now(),
+                            )
+                        },
+                    observeEventsExportStatusUseCase =
+                        object : ObserveEventsExportStatusUseCase {
+                            override suspend fun invoke(
+                                companyId: String,
+                                exportId: String,
+                            ) = EventsExportStatus(
+                                exportId = "e1",
+                                status = EventsExportStatusCode.COMPLETED,
+                                createdAt = Clock.System.now(),
+                            )
+                        },
+                    downloadEventsExportUseCase =
+                        object : DownloadEventsExportUseCase {
+                            override suspend fun invoke(
+                                companyId: String,
+                                exportId: String,
+                            ) = EventsExportDownload("file.csv", 100L, "h")
+                        },
+                    exportFileSaver =
+                        object : ExportFileSaver {
+                            override suspend fun saveExportFile(download: EventsExportDownload) = true
+                        },
+                )
+
+            vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true))
+            advanceUntilIdle()
+
+            // 1. Direct live creation: event2 added directly as INCLUDED with sequence advance
+            val overlayWithEvent2 =
+                RealtimeOverlay(
+                    entries =
+                        mapOf(
+                            event2.id to
+                                OverlayEntry(
+                                    eventId = event2.id,
+                                    event = event2,
+                                    eventVersion = 1L,
+                                    membership = OverlayMembership.INCLUDED,
+                                ),
+                        ),
+                )
+            session.emitState(
+                initialFeed.copy(
+                    asOfSequence = 11L,
+                    visibleEvents = listOf(event2, event1),
+                    realtimeOverlay = overlayWithEvent2,
+                ),
+            )
+            runCurrent()
+            assertTrue("ev-2" in vm.state.value.liveCreatedIds, "Direct live event must be in liveCreatedIds")
+
+            // 2. Pending newer event arrives: event3 with membership PENDING_NEWER
+            val overlayWithEvent3Pending =
+                RealtimeOverlay(
+                    entries =
+                        mapOf(
+                            event2.id to
+                                OverlayEntry(
+                                    eventId = event2.id,
+                                    event = event2,
+                                    eventVersion = 1L,
+                                    membership = OverlayMembership.INCLUDED,
+                                ),
+                            event3.id to
+                                OverlayEntry(
+                                    eventId = event3.id,
+                                    event = event3,
+                                    eventVersion = 1L,
+                                    membership = OverlayMembership.PENDING_NEWER,
+                                ),
+                        ),
+                )
+            session.emitState(
+                initialFeed.copy(
+                    asOfSequence = 12L,
+                    visibleEvents = listOf(event2, event1),
+                    realtimeOverlay = overlayWithEvent3Pending,
+                    pendingNewerCount = 1,
+                ),
+            )
+            runCurrent()
+            assertFalse("ev-3" in vm.state.value.liveCreatedIds, "Pending newer event not yet in visibleEvents")
+
+            // 3. onViewportAtTop integrates event3 into INCLUDED and visibleEvents (sequence does not advance)
+            val overlayWithEvent3Integrated =
+                RealtimeOverlay(
+                    entries =
+                        mapOf(
+                            event2.id to
+                                OverlayEntry(
+                                    eventId = event2.id,
+                                    event = event2,
+                                    eventVersion = 1L,
+                                    membership = OverlayMembership.INCLUDED,
+                                ),
+                            event3.id to
+                                OverlayEntry(
+                                    eventId = event3.id,
+                                    event = event3,
+                                    eventVersion = 1L,
+                                    membership = OverlayMembership.INCLUDED,
+                                ),
+                        ),
+                )
+            session.emitState(
+                initialFeed.copy(
+                    asOfSequence = 12L,
+                    visibleEvents = listOf(event3, event2, event1),
+                    realtimeOverlay = overlayWithEvent3Integrated,
+                    pendingNewerCount = 0,
+                ),
+            )
+            runCurrent()
+            assertTrue(
+                "ev-3" in vm.state.value.liveCreatedIds,
+                "Materialized pending newer event must be in liveCreatedIds",
+            )
         }
 
     private fun sampleEvent(

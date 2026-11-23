@@ -94,6 +94,7 @@ class EventsViewModel(
     private var filterRequestGeneration: Long = 0L
     private var filterOptionsGeneration: Long = 0L
     private var downloadGeneration: Long = 0L
+    private var liveEventsCleanupJob: Job? = null
 
     var onQueryHashChanged: ((String?) -> Unit)? = null
     private var activeQueryHash: String? = null
@@ -358,14 +359,25 @@ class EventsViewModel(
                             previousSequence != null &&
                             currentSequence > previousSequence
 
-                    if (!isBootstrapOrRefresh && canRead && hasSequenceAdvance && prevFeedState != null) {
+                    val isFeedDelta = !isBootstrapOrRefresh && canRead && prevFeedState != null
+                    if (isFeedDelta) {
                         val prev = prevFeedState!!
                         for ((id, entry) in feedState.realtimeOverlay.entries) {
-                            if (entry.membership == OverlayMembership.INCLUDED &&
-                                entry.eventVersion == 1L &&
-                                !prev.realtimeOverlay.entries.containsKey(id) &&
-                                prev.visibleEvents.none { it.id == id }
-                            ) {
+                            val isDirectLiveIncluded =
+                                hasSequenceAdvance &&
+                                    entry.membership == OverlayMembership.INCLUDED &&
+                                    entry.eventVersion == 1L &&
+                                    !prev.realtimeOverlay.entries.containsKey(id) &&
+                                    prev.visibleEvents.none { it.id == id }
+
+                            val isPendingNewerMaterialized =
+                                entry.membership == OverlayMembership.INCLUDED &&
+                                    entry.eventVersion == 1L &&
+                                    prev.realtimeOverlay.entries[id]?.membership == OverlayMembership.PENDING_NEWER &&
+                                    prev.visibleEvents.none { it.id == id } &&
+                                    feedState.visibleEvents.any { it.id == id }
+
+                            if (isDirectLiveIncluded || isPendingNewerMaterialized) {
                                 liveCreated.add(id)
                             }
                         }
@@ -378,6 +390,15 @@ class EventsViewModel(
                         }
                     }
                     prevFeedState = feedState
+
+                    if (liveCreated.isNotEmpty() || liveRemoved.isNotEmpty()) {
+                        liveEventsCleanupJob?.cancel()
+                        liveEventsCleanupJob =
+                            viewModelScope.launch {
+                                delay(1000L)
+                                _state.update { it.copy(liveCreatedIds = emptySet(), liveRemovedIds = emptySet()) }
+                            }
+                    }
 
                     _state.update { current ->
                         val hasLoadedContent = current.summary != null || current.visibleEvents.isNotEmpty()

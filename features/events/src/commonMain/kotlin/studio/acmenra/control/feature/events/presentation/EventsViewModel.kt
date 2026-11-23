@@ -47,9 +47,11 @@ import studio.acmenra.control.feature.events.domain.model.EventsQuery
 import studio.acmenra.control.feature.events.domain.model.EventsQueryRouteCodec
 import studio.acmenra.control.feature.events.domain.model.LocationFilterGroup
 import studio.acmenra.control.feature.events.domain.model.LocationToggleState
+import studio.acmenra.control.feature.events.domain.model.OverlayMembership
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 import studio.acmenra.control.feature.events.domain.model.locationToggleState
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
+import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
 import studio.acmenra.control.feature.events.domain.usecase.AcknowledgeEventUseCase
 import studio.acmenra.control.feature.events.domain.usecase.CreateEventsExportUseCase
 import studio.acmenra.control.feature.events.domain.usecase.DownloadEventsExportUseCase
@@ -334,13 +336,44 @@ class EventsViewModel(
 
         feedCollectJob =
             viewModelScope.launch {
+                var prevFeedState: EventsFeedState? = null
                 session.state.collect { feedState ->
                     if (currentGen != filterRequestGeneration || sessionCompanyGen != companyGeneration) return@collect
                     val canRead = feedState.access.eventsRead && _state.value.access.eventsRead
-                    val tz =
-                        feedState.summary?.businessTimezone?.let {
-                            DateFilterUtils.resolveBusinessTimeZone(it)
+                    val feedScopeKey = "$companyId:${_state.value.filter.hashCode()}:${feedState.snapshotId ?: ""}"
+
+                    // Classify feed change provenance (§1.5, §7.1, P1.1)
+                    val liveCreated = mutableSetOf<String>()
+                    val liveRemoved = mutableSetOf<String>()
+
+                    val isBootstrapOrRefresh =
+                        prevFeedState == null ||
+                            feedState.snapshotId != prevFeedState?.snapshotId ||
+                            feedState.isInitialLoading
+
+                    if (!isBootstrapOrRefresh && canRead && prevFeedState != null) {
+                        val prev = prevFeedState!!
+                        if (feedState.asOfSequence > prev.asOfSequence) {
+                            for ((id, entry) in feedState.realtimeOverlay.entries) {
+                                if (entry.membership == OverlayMembership.INCLUDED &&
+                                    entry.eventVersion == 1L &&
+                                    !prev.realtimeOverlay.entries.containsKey(id) &&
+                                    prev.visibleEvents.none { it.id == id }
+                                ) {
+                                    liveCreated.add(id)
+                                }
+                            }
+                            for ((id, entry) in feedState.realtimeOverlay.entries) {
+                                if (entry.membership == OverlayMembership.REMOVED &&
+                                    prev.visibleEvents.any { it.id == id }
+                                ) {
+                                    liveRemoved.add(id)
+                                }
+                            }
                         }
+                    }
+                    prevFeedState = feedState
+
                     _state.update { current ->
                         val hasLoadedContent = current.summary != null || current.visibleEvents.isNotEmpty()
                         val isSessionInitial = feedState.isInitialLoading
@@ -357,6 +390,10 @@ class EventsViewModel(
                                 },
                             realtimeOverlay = if (canRead) feedState.realtimeOverlay else RealtimeOverlay(),
                             asOfSequence = if (canRead) feedState.asOfSequence else 0L,
+                            snapshotId = if (canRead) feedState.snapshotId else null,
+                            feedScopeKey = feedScopeKey,
+                            liveCreatedIds = liveCreated,
+                            liveRemovedIds = liveRemoved,
                             snapshotTotalCount =
                                 if (canRead) {
                                     if (isSessionInitial &&

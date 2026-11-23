@@ -191,28 +191,28 @@ fun EventCard(
             EventIconKey.DEFECT -> Res.drawable.ic_event_defect
             EventIconKey.PERSON -> Res.drawable.ic_event_person
             EventIconKey.GENERIC_ALERT -> Res.drawable.ic_event_alert
-            else -> Res.drawable.ic_event_alert
         }
 
     // Supporting text format (§1.2): "HH:mm • locationName, deviceName"
+    val effectiveTz = businessTimeZone ?: TimeZone.currentSystemDefault()
     val supportingText =
-        if (businessTimeZone != null) {
-            EventDateDisplayFormatter.formatEventCardSupportingText(
-                occurredAt = event.occurredAt,
-                businessTimeZone = businessTimeZone,
-                locationName = event.locationName,
-                deviceName = event.deviceName,
-            )
-        } else {
-            val loc = event.locationName?.trim()?.takeIf { it.isNotEmpty() }
-            val dev = event.deviceName?.trim()?.takeIf { it.isNotEmpty() }
-            when {
-                loc != null && dev != null -> "$loc, $dev"
-                loc != null -> loc
-                dev != null -> dev
-                else -> ""
-            }
-        }
+        EventDateDisplayFormatter.formatEventCardSupportingText(
+            occurredAt = event.occurredAt,
+            businessTimeZone = effectiveTz,
+            locationName = event.locationName,
+            deviceName = event.deviceName,
+        )
+
+    val hoverOverlayColor by animateColorAsState(
+        targetValue =
+            if (isHovered) {
+                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f)
+            } else {
+                Color.Transparent
+            },
+        animationSpec = motion.fastEffectsSpec(),
+        label = "event-card-hover-overlay",
+    )
 
     Card(
         modifier =
@@ -227,70 +227,77 @@ fun EventCard(
         colors = CardDefaults.cardColors(containerColor = animatedContainerColor),
         border = border,
     ) {
-        Row(
+        Box(
             modifier =
                 Modifier
                     .fillMaxWidth()
-                    .heightIn(min = AmberDimens.ListItemHeight)
-                    .padding(horizontal = AmberDimens.GapMedium, vertical = AmberDimens.GapSmall),
-            verticalAlignment = Alignment.CenterVertically,
+                    .background(hoverOverlayColor),
         ) {
-            // Left: Icon Circle
-            Box(
+            Row(
                 modifier =
                     Modifier
-                        .size(AmberDimens.ListIconCircle)
-                        .clip(CircleShape)
-                        .background(animatedCircleColor),
-                contentAlignment = Alignment.Center,
+                        .fillMaxWidth()
+                        .heightIn(min = AmberDimens.ListItemHeight)
+                        .padding(horizontal = AmberDimens.GapMedium, vertical = AmberDimens.GapSmall),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    painter = painterResource(iconRes),
-                    contentDescription = null,
-                    modifier = Modifier.size(AmberDimens.ListIcon),
-                    tint = animatedIconTint,
-                )
-            }
+                // Left: Icon Circle
+                Box(
+                    modifier =
+                        Modifier
+                            .size(AmberDimens.ListIconCircle)
+                            .clip(CircleShape)
+                            .background(animatedCircleColor),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        painter = painterResource(iconRes),
+                        contentDescription = null,
+                        modifier = Modifier.size(AmberDimens.ListIcon),
+                        tint = animatedIconTint,
+                    )
+                }
 
-            Spacer(modifier = Modifier.width(AmberDimens.GapMedium))
+                Spacer(modifier = Modifier.width(AmberDimens.GapMedium))
 
-            // Middle: Two text lines (§1.2: both maxLines = 1, Ellipsis)
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = event.eventTypeName,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = animatedContentColor,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-
-                if (supportingText.isNotEmpty()) {
+                // Middle: Two text lines (§1.2: both maxLines = 1, Ellipsis)
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = supportingText,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = animatedSupportingColor,
+                        text = event.eventTypeName,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = animatedContentColor,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+
+                    if (supportingText.isNotEmpty()) {
+                        Text(
+                            text = supportingText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = animatedSupportingColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
+
+                Spacer(modifier = Modifier.width(AmberDimens.GapSmall))
+
+                // Right: Chevron icon that scales when selected and shifts on hover
+                Icon(
+                    painter = painterResource(Res.drawable.ic_chevron_right),
+                    contentDescription = null,
+                    modifier =
+                        Modifier
+                            .size(AmberDimens.ListIcon)
+                            .graphicsLayer {
+                                scaleX = chevronScale
+                                scaleY = chevronScale
+                                translationX = chevronShift.toPx()
+                            },
+                    tint = animatedContentColor,
+                )
             }
-
-            Spacer(modifier = Modifier.width(AmberDimens.GapSmall))
-
-            // Right: Chevron icon that scales when selected and shifts on hover
-            Icon(
-                painter = painterResource(Res.drawable.ic_chevron_right),
-                contentDescription = null,
-                modifier =
-                    Modifier
-                        .size(AmberDimens.ListIcon)
-                        .graphicsLayer {
-                            scaleX = chevronScale
-                            scaleY = chevronScale
-                            translationX = chevronShift.toPx()
-                        },
-                tint = animatedContentColor,
-            )
         }
     }
 }

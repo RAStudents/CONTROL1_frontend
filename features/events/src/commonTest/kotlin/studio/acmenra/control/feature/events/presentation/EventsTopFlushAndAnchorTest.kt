@@ -51,7 +51,7 @@ class EventsTopFlushAndAnchorTest {
             PendingNewerFlushContext(
                 reason = PendingNewerFlushReason.TRANSIENT_AT_TOP,
                 capturedCount = 3,
-                feedGeneration = 1L,
+                feedScopeKey = "test_feed_1",
             )
         assertEquals(PendingNewerFlushReason.TRANSIENT_AT_TOP, flushContext.reason)
 
@@ -69,7 +69,7 @@ class EventsTopFlushAndAnchorTest {
             PendingNewerFlushContext(
                 reason = PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY,
                 capturedCount = 5,
-                feedGeneration = 2L,
+                feedScopeKey = "test_feed_2",
             )
         assertEquals(PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY, flushContext.reason)
 

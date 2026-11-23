@@ -193,8 +193,43 @@ class OffscreenQueueStateTest {
                 minVisibleLazy,
                 maxVisibleLazy,
                 idToLazyIndex,
+                allFeedEventIds = setOf("ev-unmeasured"),
             )
         assertNull(targetUnmeasured)
         assertEquals(1, qUnmeasuredHeld.totalCount)
+
+        // 7. Target removed from feed entirely: prune and advance to next target (§8.1, P1.9)
+        val qRemoved = OffscreenQueueState().enqueue(listOf("ev-removed", "ev-4"))
+        val (qRemovedCleaned, targetRemoved) =
+            qRemoved.computeHeadTarget(
+                minVisibleLazy,
+                maxVisibleLazy,
+                idToLazyIndex,
+                allFeedEventIds = setOf("ev-1", "ev-2", "ev-3", "ev-4"), // ev-removed not in feed
+            )
+        assertEquals(1, qRemovedCleaned.totalCount)
+        assertEquals(listOf("ev-4"), qRemovedCleaned.loadedEventIds)
+        assertNotNull(targetRemoved)
+        assertTrue(targetRemoved is OffscreenJumpTarget.LoadedEvent)
+        assertEquals("ev-4", targetRemoved.eventId)
+    }
+
+    @Test
+    fun testReconcilePendingNewer_PreservesSegmentOrder() {
+        // Queue contains: LoadedEvent(A), PendingNewer(2), PendingHistory(1)
+        var q =
+            OffscreenQueueState()
+                .enqueue(listOf("ev-A"))
+                .upsertPendingNewer(2)
+                .upsertPendingHistory(1, requiresRefresh = true, hasMore = true)
+
+        // Order before reconcile: LoadedEvent(A), PendingNewer(2), PendingHistory(1)
+        val materialized = listOf("ev-B", "ev-C")
+        q = q.reconcilePendingNewerWithMaterializedIds(materialized, currentlyVisibleIds = emptySet())
+
+        // Marker at index 0 is replaced in-place: LoadedEvent(B), LoadedEvent(C), LoadedEvent(A), PendingHistory(1)
+        assertEquals(4, q.totalCount)
+        assertEquals(listOf("ev-B", "ev-C", "ev-A"), q.loadedEventIds)
+        assertTrue(q.entries.last() is OffscreenQueueEntry.PendingHistory)
     }
 }

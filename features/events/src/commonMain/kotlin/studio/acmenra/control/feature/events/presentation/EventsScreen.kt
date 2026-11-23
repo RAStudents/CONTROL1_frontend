@@ -5,6 +5,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -484,36 +485,47 @@ private fun WideEventsLayout(
                         .fillMaxHeight()
                         .clipToBounds(),
             ) {
+                EventsList(
+                    events = state.visibleEvents,
+                    selectedEventId = state.selectedEventId,
+                    pendingAckIds = state.pendingAckIds,
+                    canAcknowledge = state.access.canAcknowledge,
+                    pendingNewerCount = state.pendingNewerCount,
+                    hasMore = state.hasMore,
+                    isLoadingNextPage = state.isLoadingNextPage,
+                    businessTimeZone = businessTimeZone,
+                    isCompact = false,
+                    isViewerOpenInCompact = state.isViewerOpenInCompact,
+                    listState = listState,
+                    feedScopeKey = state.feedScopeKey,
+                    liveCreatedIds = state.liveCreatedIds,
+                    liveRemovedIds = state.liveRemovedIds,
+                    isInitialLoading = state.isInitialLoading,
+                    pendingHistoryCount = state.pendingHistoryCount,
+                    requiresRefresh = state.requiresRefresh,
+                    paginationError = state.paginationError,
+                    onRefreshHistory = onRefresh,
+                    onSelectEvent = onSelectEvent,
+                    onAcknowledgeEvent = onAcknowledgeEvent,
+                    onLoadNextPage = onLoadNextPage,
+                    onViewportAtTop = onViewportAtTop,
+                    onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
+                )
                 if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
-                    EventsEmptyState(
-                        isLoading = state.isInitialLoading,
-                        initialLoadError = state.initialLoadError,
-                        hasActiveFilters = state.filter.hasActiveFilters,
-                        onResetFilters = onResetFilters,
-                        onRetry = onRefresh,
-                    )
-                } else {
-                    EventsList(
-                        events = state.visibleEvents,
-                        selectedEventId = state.selectedEventId,
-                        pendingAckIds = state.pendingAckIds,
-                        canAcknowledge = state.access.canAcknowledge,
-                        pendingNewerCount = state.pendingNewerCount,
-                        hasMore = state.hasMore,
-                        isLoadingNextPage = state.isLoadingNextPage,
-                        businessTimeZone = businessTimeZone,
-                        isCompact = false,
-                        listState = listState,
-                        pendingHistoryCount = state.pendingHistoryCount,
-                        requiresRefresh = state.requiresRefresh,
-                        paginationError = state.paginationError,
-                        onRefreshHistory = onRefresh,
-                        onSelectEvent = onSelectEvent,
-                        onAcknowledgeEvent = onAcknowledgeEvent,
-                        onLoadNextPage = onLoadNextPage,
-                        onViewportAtTop = onViewportAtTop,
-                        onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
-                    )
+                    Box(
+                        modifier =
+                            Modifier
+                                .fillMaxSize()
+                                .background(MaterialTheme.colorScheme.surface),
+                    ) {
+                        EventsEmptyState(
+                            isLoading = state.isInitialLoading,
+                            initialLoadError = state.initialLoadError,
+                            hasActiveFilters = state.filter.hasActiveFilters,
+                            onResetFilters = onResetFilters,
+                            onRetry = onRefresh,
+                        )
+                    }
                 }
             }
 
@@ -607,36 +619,47 @@ private fun MediumEventsLayout(
                         .fillMaxHeight()
                         .clipToBounds(),
             ) {
+                EventsList(
+                    events = state.visibleEvents,
+                    selectedEventId = state.selectedEventId,
+                    pendingAckIds = state.pendingAckIds,
+                    canAcknowledge = state.access.canAcknowledge,
+                    pendingNewerCount = state.pendingNewerCount,
+                    hasMore = state.hasMore,
+                    isLoadingNextPage = state.isLoadingNextPage,
+                    businessTimeZone = businessTimeZone,
+                    isCompact = false,
+                    isViewerOpenInCompact = state.isViewerOpenInCompact,
+                    listState = listState,
+                    feedScopeKey = state.feedScopeKey,
+                    liveCreatedIds = state.liveCreatedIds,
+                    liveRemovedIds = state.liveRemovedIds,
+                    isInitialLoading = state.isInitialLoading,
+                    pendingHistoryCount = state.pendingHistoryCount,
+                    requiresRefresh = state.requiresRefresh,
+                    paginationError = state.paginationError,
+                    onRefreshHistory = onRefresh,
+                    onSelectEvent = onSelectEvent,
+                    onAcknowledgeEvent = onAcknowledgeEvent,
+                    onLoadNextPage = onLoadNextPage,
+                    onViewportAtTop = onViewportAtTop,
+                    onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
+                )
                 if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
-                    EventsEmptyState(
-                        isLoading = state.isInitialLoading,
-                        initialLoadError = state.initialLoadError,
-                        hasActiveFilters = state.filter.hasActiveFilters,
-                        onResetFilters = onResetFilters,
-                        onRetry = onRefresh,
-                    )
-                } else {
-                    EventsList(
-                        events = state.visibleEvents,
-                        selectedEventId = state.selectedEventId,
-                        pendingAckIds = state.pendingAckIds,
-                        canAcknowledge = state.access.canAcknowledge,
-                        pendingNewerCount = state.pendingNewerCount,
-                        hasMore = state.hasMore,
-                        isLoadingNextPage = state.isLoadingNextPage,
-                        businessTimeZone = businessTimeZone,
-                        isCompact = false,
-                        listState = listState,
-                        pendingHistoryCount = state.pendingHistoryCount,
-                        requiresRefresh = state.requiresRefresh,
-                        paginationError = state.paginationError,
-                        onRefreshHistory = onRefresh,
-                        onSelectEvent = onSelectEvent,
-                        onAcknowledgeEvent = onAcknowledgeEvent,
-                        onLoadNextPage = onLoadNextPage,
-                        onViewportAtTop = onViewportAtTop,
-                        onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
-                    )
+                    Box(
+                        modifier =
+                            Modifier
+                                .fillMaxSize()
+                                .background(MaterialTheme.colorScheme.surface),
+                    ) {
+                        EventsEmptyState(
+                            isLoading = state.isInitialLoading,
+                            initialLoadError = state.initialLoadError,
+                            hasActiveFilters = state.filter.hasActiveFilters,
+                            onResetFilters = onResetFilters,
+                            onRetry = onRefresh,
+                        )
+                    }
                 }
             }
 
@@ -786,36 +809,47 @@ private fun CompactEventsLayout(
                     .weight(1f)
                     .clipToBounds(),
         ) {
+            EventsList(
+                events = state.visibleEvents,
+                selectedEventId = state.selectedEventId,
+                pendingAckIds = state.pendingAckIds,
+                canAcknowledge = state.access.canAcknowledge,
+                pendingNewerCount = state.pendingNewerCount,
+                hasMore = state.hasMore,
+                isLoadingNextPage = state.isLoadingNextPage,
+                businessTimeZone = businessTimeZone,
+                isCompact = true,
+                isViewerOpenInCompact = state.isViewerOpenInCompact,
+                listState = listState,
+                feedScopeKey = state.feedScopeKey,
+                liveCreatedIds = state.liveCreatedIds,
+                liveRemovedIds = state.liveRemovedIds,
+                isInitialLoading = state.isInitialLoading,
+                pendingHistoryCount = state.pendingHistoryCount,
+                requiresRefresh = state.requiresRefresh,
+                paginationError = state.paginationError,
+                onRefreshHistory = onRefresh,
+                onSelectEvent = onSelectEvent,
+                onAcknowledgeEvent = onAcknowledgeEvent,
+                onLoadNextPage = onLoadNextPage,
+                onViewportAtTop = onViewportAtTop,
+                onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
+            )
             if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
-                EventsEmptyState(
-                    isLoading = state.isInitialLoading,
-                    initialLoadError = state.initialLoadError,
-                    hasActiveFilters = state.filter.hasActiveFilters,
-                    onResetFilters = onResetFilters,
-                    onRetry = onRefresh,
-                )
-            } else {
-                EventsList(
-                    events = state.visibleEvents,
-                    selectedEventId = state.selectedEventId,
-                    pendingAckIds = state.pendingAckIds,
-                    canAcknowledge = state.access.canAcknowledge,
-                    pendingNewerCount = state.pendingNewerCount,
-                    hasMore = state.hasMore,
-                    isLoadingNextPage = state.isLoadingNextPage,
-                    businessTimeZone = businessTimeZone,
-                    isCompact = true,
-                    listState = listState,
-                    pendingHistoryCount = state.pendingHistoryCount,
-                    requiresRefresh = state.requiresRefresh,
-                    paginationError = state.paginationError,
-                    onRefreshHistory = onRefresh,
-                    onSelectEvent = onSelectEvent,
-                    onAcknowledgeEvent = onAcknowledgeEvent,
-                    onLoadNextPage = onLoadNextPage,
-                    onViewportAtTop = onViewportAtTop,
-                    onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
-                )
+                Box(
+                    modifier =
+                        Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.surface),
+                ) {
+                    EventsEmptyState(
+                        isLoading = state.isInitialLoading,
+                        initialLoadError = state.initialLoadError,
+                        hasActiveFilters = state.filter.hasActiveFilters,
+                        onResetFilters = onResetFilters,
+                        onRetry = onRefresh,
+                    )
+                }
             }
         }
 

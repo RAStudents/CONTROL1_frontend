@@ -3,10 +3,12 @@ package studio.acmenra.control.feature.events.presentation.components
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
@@ -25,7 +27,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ButtonDefaults
@@ -51,6 +53,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
@@ -63,11 +66,12 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.TimeZone
@@ -93,9 +97,11 @@ import studio.acmenra.control.core.ui.notice.NoticeDefaults
 import studio.acmenra.control.core.ui.theme.AmberCorners
 import studio.acmenra.control.core.ui.theme.AmberDimens
 import studio.acmenra.control.feature.events.domain.model.Event
+import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementStatus
 import studio.acmenra.control.feature.events.domain.model.EventsPaginationError
 import studio.acmenra.control.feature.events.presentation.util.EventDateDisplayFormatter
 import studio.acmenra.control.feature.events.presentation.util.EventsKeyboardNavigationHelper
+import studio.acmenra.control.feature.events.presentation.util.EventsScrollAnchorHelper
 import kotlin.time.Clock
 
 private const val TOP_OFFSET_TOLERANCE_PX = 2
@@ -116,6 +122,7 @@ fun EventsList(
     modifier: Modifier = Modifier,
     businessTimeZone: TimeZone? = null,
     isCompact: Boolean = false,
+    isViewerOpenInCompact: Boolean = false,
     pendingHistoryCount: Int = 0,
     requiresRefresh: Boolean = false,
     paginationError: EventsPaginationError? = null,
@@ -124,8 +131,12 @@ fun EventsList(
     onAcknowledgeEvent: ((Event) -> Unit)? = null,
     timeZone: TimeZone? = businessTimeZone,
     listState: LazyListState = rememberLazyListState(),
+    feedScopeKey: String = "",
+    liveCreatedIds: Set<String> = emptySet(),
+    liveRemovedIds: Set<String> = emptySet(),
+    isInitialLoading: Boolean = false,
 ) {
-    val effectiveTimeZone = businessTimeZone ?: timeZone
+    val effectiveTimeZone = businessTimeZone ?: timeZone ?: TimeZone.currentSystemDefault()
     val coroutineScope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
     val motion = MaterialTheme.motionScheme
@@ -136,6 +147,22 @@ fun EventsList(
     var isJumpInFlight by remember { mutableStateOf(false) }
     var isLiveInserting by remember { mutableStateOf(false) }
     var liveInsertJob by remember { mutableStateOf<Job?>(null) }
+
+    // Map of eventId to Event for items undergoing exit animation (§1.5, §7.3)
+    var exitingEvents by remember { mutableStateOf<Map<String, Event>>(emptyMap()) }
+    var previousEventsSnapshot by remember { mutableStateOf<List<Event>>(emptyList()) }
+
+    // Reset queue and flush context when feed scope (company, filter, generation) changes (§1.6, §8.2, P1.5)
+    var currentScopeKey by remember { mutableStateOf(feedScopeKey) }
+    LaunchedEffect(feedScopeKey) {
+        if (currentScopeKey != feedScopeKey) {
+            currentScopeKey = feedScopeKey
+            queueState = OffscreenQueueState()
+            activeFlushContext = null
+            isJumpInFlight = false
+            exitingEvents = emptyMap()
+        }
+    }
 
     // Synchronize PendingHistory with feed state (§8)
     LaunchedEffect(pendingHistoryCount, requiresRefresh, hasMore) {
@@ -167,7 +194,7 @@ fun EventsList(
                             PendingNewerFlushContext(
                                 reason = PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY,
                                 capturedCount = queueState.pendingNewerMarkerCount,
-                                feedGeneration = 0L,
+                                feedScopeKey = feedScopeKey,
                             )
                     }
                     onViewportAtTop()
@@ -175,7 +202,7 @@ fun EventsList(
             }
     }
 
-    // Handle incoming pendingNewerCount (§1.6, §8)
+    // Handle incoming pendingNewerCount (§1.6, §8, P2.2)
     LaunchedEffect(pendingNewerCount, isAtTopState.value) {
         val isCurrentlyAtTop = isAtTopState.value
         if (pendingNewerCount > 0) {
@@ -185,15 +212,19 @@ fun EventsList(
                     PendingNewerFlushContext(
                         reason = PendingNewerFlushReason.TRANSIENT_AT_TOP,
                         capturedCount = pendingNewerCount,
-                        feedGeneration = 0L,
+                        feedScopeKey = feedScopeKey,
                     )
                 onViewportAtTop()
             } else if (!isCurrentlyAtTop) {
                 // ACCUMULATED_WHILE_AWAY: update pill marker while user is away from top
+                val wasAlreadyMarker = queueState.hasPendingNewerMarker
                 queueState = queueState.upsertPendingNewer(pendingNewerCount)
+                if (!wasAlreadyMarker) {
+                    val batchKey = "pending_newer_${feedScopeKey}_$pendingNewerCount"
+                    onOffscreenLiveEventsDetected?.invoke(pendingNewerCount, batchKey)
+                }
             }
         } else if (pendingNewerCount == 0) {
-            // Keep marker if active ACCUMULATED_WHILE_AWAY flush is in progress (§1.6, §8)
             val flush = activeFlushContext
             if (flush == null || flush.reason == PendingNewerFlushReason.TRANSIENT_AT_TOP) {
                 queueState = queueState.upsertPendingNewer(0)
@@ -202,122 +233,35 @@ fun EventsList(
         }
     }
 
-    // Live Event Classification & offscreen queue detection (§1.5, §1.6, §7.1, §8)
-    var previousEventsSnapshot by remember { mutableStateOf<List<Event>>(emptyList()) }
+    // Scroll Anchor tracking & pre-mutation viewport snapshot (§2, §1.6, P1.6)
     var wasAtTopBeforeBatch by remember { mutableStateOf(true) }
+    var anchorEventId by remember { mutableStateOf<String?>(null) }
+    var anchorOffsetPx by remember { mutableStateOf(0) }
+    var priorSnapshotIds by remember { mutableStateOf<List<String>>(emptyList()) }
 
-    LaunchedEffect(events) {
-        val oldEvents = previousEventsSnapshot
-        previousEventsSnapshot = events
-
-        if (oldEvents.isEmpty()) {
-            // Initial bootstrap load: no animations, no queue
-            return@LaunchedEffect
-        }
-
-        val oldIds = oldEvents.map { it.id }.toSet()
-        val newEvents = events.filter { it.id !in oldIds }
-
-        if (newEvents.isNotEmpty()) {
-            val isAtTop = wasAtTopBeforeBatch
-            val flush = activeFlushContext
-            val isLeadingEdge = events.firstOrNull()?.id in newEvents.map { it.id }.toSet()
-
-            if (isLeadingEdge &&
-                isAtTop &&
-                (flush == null || flush.reason == PendingNewerFlushReason.TRANSIENT_AT_TOP)
-            ) {
-                // Leading edge LIVE insertion at top (§1.6):
-                // Ensure viewport displays the true top of list and animate placement
-                listState.scrollToItem(0, 0)
-                activeFlushContext = null
-                isLiveInserting = true
-                liveInsertJob?.cancel()
-                liveInsertJob =
-                    coroutineScope.launch {
-                        delay(450)
-                        isLiveInserting = false
-                    }
-            } else if (flush != null && flush.reason == PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY) {
-                // Reconcile accumulated flush with materialized events
-                val visibleItemKeys =
-                    listState.layoutInfo.visibleItemsInfo
-                        .mapNotNull { it.key as? String }
-                        .toSet()
-                queueState =
-                    queueState.reconcilePendingNewerWithMaterializedIds(
-                        materializedIds = newEvents.map { it.id },
-                        currentlyVisibleIds = visibleItemKeys,
-                    )
-                activeFlushContext = null
-            } else if (!isLoadingNextPage && isLeadingEdge) {
-                // User is scrolled down: add offscreen events to queue and notify
-                val visibleKeys =
-                    listState.layoutInfo.visibleItemsInfo
-                        .mapNotNull { it.key as? String }
-                        .toSet()
-                val offscreenIds = newEvents.map { it.id }.filter { it !in visibleKeys }
-                if (offscreenIds.isNotEmpty()) {
-                    queueState = queueState.enqueue(offscreenIds)
-                    val batchKey = "live_batch_${Clock.System.now().toEpochMilliseconds()}"
-                    onOffscreenLiveEventsDetected?.invoke(offscreenIds.size, batchKey)
-                }
-            }
-        } else if (activeFlushContext != null && events.size >= oldEvents.size) {
-            // Flush completed without new items
-            queueState = queueState.upsertPendingNewer(0)
-            activeFlushContext = null
-        }
-    }
-
-    // Update layout snapshot state before next mutation
     LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
         wasAtTopBeforeBatch = isAtTopState.value
-    }
-
-    // Prune loaded queue targets that become visible in layout snapshot (§1.6, §8.2)
-    val visibleEventKeys =
-        remember {
-            derivedStateOf {
-                listState.layoutInfo.visibleItemsInfo
-                    .mapNotNull { it.key as? String }
-                    .filterNot { it.startsWith("header_") || it.startsWith("footer_") }
-                    .toSet()
+        if (!listState.isScrollInProgress) {
+            val firstVisible =
+                listState.layoutInfo.visibleItemsInfo.firstOrNull { item ->
+                    val k = item.key as? String
+                    k != null && !k.startsWith("header_") && !k.startsWith("footer_")
+                }
+            if (firstVisible != null) {
+                anchorEventId = firstVisible.key as? String
+                anchorOffsetPx = firstVisible.offset
+                priorSnapshotIds = events.map { it.id }
             }
         }
-
-    LaunchedEffect(visibleEventKeys.value) {
-        if (visibleEventKeys.value.isNotEmpty()) {
-            queueState = queueState.removeLoadedAll(visibleEventKeys.value)
-        }
     }
 
-    // Infinite scroll trigger: <= 5 events remaining (§10)
-    val shouldLoadMore by remember {
-        derivedStateOf {
-            val layoutInfo = listState.layoutInfo
-            val visibleItems = layoutInfo.visibleItemsInfo
-            val lastVisible = visibleItems.lastOrNull()?.index ?: 0
-            val totalItems = layoutInfo.totalItemsCount
-            val remaining = totalItems - 1 - lastVisible
-            hasMore && !isLoadingNextPage && paginationError == null && totalItems > 0 && remaining <= 5
-        }
-    }
-
-    LaunchedEffect(shouldLoadMore) {
-        if (shouldLoadMore) {
-            onLoadNextPage()
-        }
-    }
-
-    // Group events by business date (§1.1, §5)
+    // Group events by date: active displayed + exiting (§1.1, §6.1, §7.3)
     val groupedEvents =
-        remember(events, effectiveTimeZone) {
-            if (effectiveTimeZone != null) {
-                events.groupBy { it.occurredAt.toLocalDateTime(effectiveTimeZone).date }
-            } else {
-                emptyMap()
-            }
+        remember(events, exitingEvents, effectiveTimeZone) {
+            val allEvents = events + exitingEvents.values
+            allEvents
+                .distinctBy { it.id }
+                .groupBy { it.occurredAt.toLocalDateTime(effectiveTimeZone).date }
         }
 
     // Map each event ID to its current index in LazyColumn
@@ -341,8 +285,8 @@ fun EventsList(
             derivedStateOf {
                 val eventItems =
                     listState.layoutInfo.visibleItemsInfo.filter { item ->
-                        (item.key as? String)?.startsWith("header_") == false &&
-                            (item.key as? String)?.startsWith("footer_") == false
+                        val k = item.key as? String
+                        k != null && !k.startsWith("header_") && !k.startsWith("footer_")
                     }
                 val min = eventItems.minOfOrNull { it.index }
                 val max = eventItems.maxOfOrNull { it.index }
@@ -350,22 +294,217 @@ fun EventsList(
             }
         }
 
-    // Compute head target and direction (§8.1)
-    val headTargetState =
+    val allFeedEventIds = remember(events) { events.map { it.id }.toSet() }
+
+    // Live Event Classification & offscreen queue detection (§1.5, §1.6, §7.1, §8, P1.1, P1.2)
+    LaunchedEffect(liveCreatedIds, events) {
+        val oldEvents = previousEventsSnapshot
+        previousEventsSnapshot = events
+
+        if (liveCreatedIds.isEmpty()) return@LaunchedEffect
+        if (oldEvents.isEmpty()) return@LaunchedEffect
+
+        val isAtTop = wasAtTopBeforeBatch
+        val flush = activeFlushContext
+        val (minIdx, maxIdx) = minMaxVisibleEventLazyIndices.value
+
+        val offscreenToEnqueue = mutableListOf<String>()
+
+        for (createdId in liveCreatedIds) {
+            val isLeadingEdge = events.firstOrNull()?.id == createdId
+            val targetLazyIdx = eventIdToLazyIndex[createdId]
+
+            if (isLeadingEdge &&
+                isAtTop &&
+                (flush == null || flush.reason == PendingNewerFlushReason.TRANSIENT_AT_TOP)
+            ) {
+                // Leading edge LIVE insertion at top (§1.6): keep at top and animate placement
+                listState.scrollToItem(0, 0)
+                activeFlushContext = null
+                isLiveInserting = true
+                liveInsertJob?.cancel()
+                liveInsertJob =
+                    coroutineScope.launch {
+                        delay(450)
+                        isLiveInserting = false
+                    }
+            } else if (targetLazyIdx != null && minIdx != null && maxIdx != null && targetLazyIdx in minIdx..maxIdx) {
+                // Mid-list live insertion inside visible viewport (§1.5): animate inside viewport, do not enqueue
+            } else {
+                // Offscreen live insertion (above/below viewport or backdated) (§1.6, P1.2)
+                offscreenToEnqueue.add(createdId)
+            }
+        }
+
+        if (offscreenToEnqueue.isNotEmpty()) {
+            queueState = queueState.enqueue(offscreenToEnqueue)
+            val batchKey = "live_batch_${feedScopeKey}_${offscreenToEnqueue.joinToString("_")}"
+            onOffscreenLiveEventsDetected?.invoke(offscreenToEnqueue.size, batchKey)
+
+            // Restore scroll anchor if not at top (§2, P1.6)
+            if (!isAtTop && !listState.isScrollInProgress && anchorEventId != null) {
+                val resolvedIdx =
+                    EventsScrollAnchorHelper.resolveFallbackIndex(
+                        anchorId = anchorEventId,
+                        priorSnapshotIds = priorSnapshotIds,
+                        currentIdToLazyIndex = eventIdToLazyIndex,
+                    )
+                val scrollOffset = EventsScrollAnchorHelper.calculateScrollOffset(anchorOffsetPx)
+                if (resolvedIdx > 0) {
+                    listState.scrollToItem(resolvedIdx, scrollOffset)
+                }
+            }
+        }
+    }
+
+    // Live Removal & Exit animation handling (§1.5, §7.3, P1.11)
+    LaunchedEffect(liveRemovedIds) {
+        if (liveRemovedIds.isNotEmpty()) {
+            val visibleKeys =
+                listState.layoutInfo.visibleItemsInfo
+                    .mapNotNull { it.key as? String }
+                    .toSet()
+            val toAnimateExit = mutableMapOf<String, Event>()
+            for (id in liveRemovedIds) {
+                if (id in visibleKeys) {
+                    val removedEvent = previousEventsSnapshot.firstOrNull { it.id == id }
+                    if (removedEvent != null) {
+                        toAnimateExit[id] = removedEvent
+                    }
+                }
+            }
+            if (toAnimateExit.isNotEmpty()) {
+                exitingEvents = exitingEvents + toAnimateExit
+                delay(350L) // Wait for fadeOut + shrinkVertically
+                exitingEvents = exitingEvents - toAnimateExit.keys
+            }
+        }
+    }
+
+    // Reconcile ACCUMULATED_WHILE_AWAY flush with new layout snapshot (§1.6, §8, P1.3, P1.4)
+    LaunchedEffect(events, activeFlushContext) {
+        val flush = activeFlushContext
+        if (flush != null &&
+            flush.reason == PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY &&
+            pendingNewerCount == 0
+        ) {
+            // Scroll to top and await layout remeasure with materialized items
+            listState.scrollToItem(0, 0)
+            snapshotFlow { listState.layoutInfo }
+                .filter { it.visibleItemsInfo.isNotEmpty() }
+                .first()
+
+            val newlyVisibleKeys =
+                listState.layoutInfo.visibleItemsInfo
+                    .mapNotNull { it.key as? String }
+                    .toSet()
+
+            val newlyPrependedIds = events.map { it.id }
+            queueState =
+                queueState.reconcilePendingNewerWithMaterializedIds(
+                    materializedIds = newlyPrependedIds,
+                    currentlyVisibleIds = newlyVisibleKeys,
+                )
+            activeFlushContext = null
+        }
+    }
+
+    // Prune loaded queue targets that become visible in layout snapshot (§1.6, §8.2)
+    val visibleEventKeys =
         remember {
+            derivedStateOf {
+                listState.layoutInfo.visibleItemsInfo
+                    .mapNotNull { it.key as? String }
+                    .filterNot { it.startsWith("header_") || it.startsWith("footer_") }
+                    .toSet()
+            }
+        }
+
+    LaunchedEffect(visibleEventKeys.value) {
+        if (visibleEventKeys.value.isNotEmpty()) {
+            queueState = queueState.removeLoadedAll(visibleEventKeys.value)
+        }
+    }
+
+    // Infinite scroll trigger: <= 5 event items remaining (excluding headers/footers) (§10, P2.3)
+    val shouldLoadMore by remember(hasMore, isLoadingNextPage, paginationError, isInitialLoading, events) {
+        derivedStateOf {
+            if (!hasMore || isLoadingNextPage || paginationError != null || isInitialLoading || events.isEmpty()) {
+                false
+            } else {
+                val lastVisibleEventId =
+                    listState.layoutInfo.visibleItemsInfo
+                        .mapNotNull { it.key as? String }
+                        .lastOrNull { !it.startsWith("header_") && !it.startsWith("footer_") }
+                val lastEventIndex =
+                    if (lastVisibleEventId !=
+                        null
+                    ) {
+                        events.indexOfFirst { it.id == lastVisibleEventId }
+                    } else {
+                        -1
+                    }
+                if (lastEventIndex != -1) {
+                    val remainingEvents = events.size - 1 - lastEventIndex
+                    remainingEvents <= 5
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(shouldLoadMore) {
+        if (shouldLoadMore) {
+            onLoadNextPage()
+        }
+    }
+
+    // Compute head target and direction (§8.1, P1.8, P1.9)
+    val headTargetState =
+        remember(queueState, eventIdToLazyIndex, minMaxVisibleEventLazyIndices.value, allFeedEventIds) {
             derivedStateOf {
                 val (minIdx, maxIdx) = minMaxVisibleEventLazyIndices.value
                 queueState.computeHeadTarget(
                     minVisibleEventLazyIndex = minIdx,
                     maxVisibleEventLazyIndex = maxIdx,
                     eventIdToLazyIndex = eventIdToLazyIndex,
+                    allFeedEventIds = allFeedEventIds,
                 )
             }
         }
 
     val currentHeadTarget = headTargetState.value.second
 
-    // Keyboard navigation handler (§9)
+    // Synchronize queue state if heads were pruned during target evaluation (§8.1, P1.9)
+    LaunchedEffect(headTargetState.value.first) {
+        val cleaned = headTargetState.value.first
+        if (cleaned != queueState) {
+            queueState = cleaned
+        }
+    }
+
+    // Unified event open & acknowledge action (§1.3, §6.3, P1.13, P2.5)
+    val openEvent: (Event) -> Unit = { event ->
+        if (!isCompact && event.id == selectedEventId) {
+            onSelectEvent(null)
+        } else {
+            onSelectEvent(event.id)
+            val canAck =
+                canAcknowledge &&
+                    (
+                        event.status == EventAcknowledgementStatus.NEW ||
+                            event.status == EventAcknowledgementStatus.LEGACY_UNKNOWN
+                    ) &&
+                    event.id !in pendingAckIds &&
+                    !event.isErroneous
+            if (canAck) {
+                onAcknowledgeEvent?.invoke(event)
+            }
+        }
+    }
+
+    // Keyboard navigation handler (§9, P2.5)
     val handleKeyEvent: (androidx.compose.ui.input.key.KeyEvent) -> Boolean = { keyEvent ->
         EventsKeyboardNavigationHelper.handleNavigationKey(
             key = keyEvent.key,
@@ -377,14 +516,22 @@ fun EventsList(
             selectedEventId = selectedEventId,
             isCompact = isCompact,
             onSelectEvent = { newId ->
-                onSelectEvent(newId)
-                if (newId != null) {
-                    eventIdToLazyIndex[newId]?.let { idx ->
+                val eventToOpen = events.firstOrNull { it.id == newId }
+                if (eventToOpen != null) {
+                    openEvent(eventToOpen)
+                    eventIdToLazyIndex[eventToOpen.id]?.let { idx ->
                         coroutineScope.launch { listState.animateScrollToItem(idx) }
                     }
+                } else if (newId == null) {
+                    onSelectEvent(null)
                 }
             },
         )
+    }
+
+    // Request initial focus for keyboard navigation (§9, P2.5)
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
     }
 
     Box(
@@ -418,21 +565,53 @@ fun EventsList(
                     )
                 }
 
-                items(
-                    items = eventsOnDate,
-                    key = { it.id },
-                ) { event ->
-                    val i = eventsOnDate.indexOfFirst { it.id == event.id }
-                    val isVisuallySelected = event.id == selectedEventId
-                    val isPrevSelected = i > 0 && eventsOnDate[i - 1].id == selectedEventId
-                    val isNextSelected =
-                        i < eventsOnDate.lastIndex && eventsOnDate[i + 1].id == selectedEventId
+                val activeEventsOnDate = eventsOnDate.filter { it.id !in exitingEvents }
 
-                    val hasGluedAbove = i > 0 && !isVisuallySelected && !isPrevSelected
-                    val hasGluedBelow = i < eventsOnDate.lastIndex && !isVisuallySelected && !isNextSelected
+                itemsIndexed(
+                    items = eventsOnDate,
+                    key = { _, item -> item.id },
+                ) { _, event ->
+                    val isExiting = event.id in exitingEvents
+                    val activeIdx = activeEventsOnDate.indexOfFirst { it.id == event.id }
+
+                    // Connected geometry computed strictly on active events (§6.1, §7.3, P1.11, P2.4)
+                    val isVisuallySelected =
+                        if (isCompact) {
+                            isViewerOpenInCompact && event.id == selectedEventId
+                        } else {
+                            event.id == selectedEventId
+                        }
+
+                    val isPrevSelected =
+                        activeIdx > 0 &&
+                            (
+                                if (isCompact) {
+                                    isViewerOpenInCompact && activeEventsOnDate[activeIdx - 1].id == selectedEventId
+                                } else {
+                                    activeEventsOnDate[activeIdx - 1].id == selectedEventId
+                                }
+                            )
+
+                    val isNextSelected =
+                        activeIdx != -1 &&
+                            activeIdx < activeEventsOnDate.lastIndex &&
+                            (
+                                if (isCompact) {
+                                    isViewerOpenInCompact && activeEventsOnDate[activeIdx + 1].id == selectedEventId
+                                } else {
+                                    activeEventsOnDate[activeIdx + 1].id == selectedEventId
+                                }
+                            )
+
+                    val hasGluedAbove = activeIdx > 0 && !isVisuallySelected && !isPrevSelected
+                    val hasGluedBelow =
+                        activeIdx != -1 &&
+                            activeIdx < activeEventsOnDate.lastIndex &&
+                            !isVisuallySelected &&
+                            !isNextSelected
 
                     val targetTopGap =
-                        if (i == 0) {
+                        if (activeIdx == 0) {
                             AmberDimens.EventsDaySectionSpacing
                         } else if (isVisuallySelected || isPrevSelected) {
                             AmberDimens.EventsSelectedListGap
@@ -447,33 +626,62 @@ fun EventsList(
                             null
                         }
 
-                    Box(
-                        modifier =
-                            Modifier
-                                .animateItem(
-                                    fadeInSpec = null,
-                                    fadeOutSpec = null,
-                                    placementSpec = placementSpec,
-                                ).fillMaxWidth()
-                                .zIndex(if (isVisuallySelected) 1f else 0f)
-                                .padding(top = targetTopGap),
+                    val isHead = isLiveInserting && wasAtTopBeforeBatch && activeIdx == 0
+
+                    val enterTransition =
+                        if (isHead) {
+                            slideInVertically(animationSpec = motion.fastSpatialSpec()) { -it } +
+                                fadeIn(animationSpec = motion.fastEffectsSpec()) +
+                                scaleIn(
+                                    initialScale = NoticeDefaults.EnterScale,
+                                    transformOrigin = TransformOrigin(0.5f, 0f),
+                                    animationSpec = motion.fastSpatialSpec(),
+                                ) +
+                                expandVertically(expandFrom = Alignment.Top, animationSpec = motion.fastSpatialSpec())
+                        } else {
+                            fadeIn(animationSpec = motion.fastEffectsSpec()) +
+                                scaleIn(
+                                    initialScale = NoticeDefaults.EnterScale,
+                                    transformOrigin = TransformOrigin(0.5f, 0.5f),
+                                    animationSpec = motion.fastSpatialSpec(),
+                                ) +
+                                expandVertically(
+                                    expandFrom = Alignment.CenterVertically,
+                                    animationSpec = motion.fastSpatialSpec(),
+                                )
+                        }
+
+                    val exitTransition =
+                        fadeOut(animationSpec = motion.fastEffectsSpec()) +
+                            shrinkVertically(animationSpec = motion.fastSpatialSpec())
+
+                    AnimatedVisibility(
+                        visible = !isExiting,
+                        enter = enterTransition,
+                        exit = exitTransition,
                     ) {
-                        EventCard(
-                            event = event,
-                            isVisuallySelected = isVisuallySelected,
-                            isPendingAck = event.id in pendingAckIds,
-                            businessTimeZone = effectiveTimeZone,
-                            hasGluedAbove = hasGluedAbove,
-                            hasGluedBelow = hasGluedBelow,
-                            onClick = {
-                                if (!isCompact && isVisuallySelected) {
-                                    onSelectEvent(null)
-                                } else {
-                                    onSelectEvent(event.id)
-                                    onAcknowledgeEvent?.invoke(event)
-                                }
-                            },
-                        )
+                        Box(
+                            modifier =
+                                Modifier
+                                    .animateItem(
+                                        fadeInSpec = null,
+                                        fadeOutSpec = null,
+                                        placementSpec = placementSpec,
+                                    ).fillMaxWidth()
+                                    .zIndex(if (isVisuallySelected) 1f else 0f)
+                                    .padding(top = targetTopGap),
+                        ) {
+                            EventCard(
+                                event = event,
+                                isVisuallySelected = isVisuallySelected,
+                                isPendingAck = event.id in pendingAckIds,
+                                businessTimeZone = effectiveTimeZone,
+                                hasGluedAbove = hasGluedAbove,
+                                hasGluedBelow = hasGluedBelow,
+                                shape = if (isExiting) RoundedCornerShape(AmberCorners.ExtraLarge) else null,
+                                onClick = { openEvent(event) },
+                            )
+                        }
                     }
                 }
             }
@@ -543,8 +751,7 @@ fun EventsList(
             }
         }
 
-        // Overlay Indicator Pill (§1.6, §8)
-        // Positioned as a stable overlay in top band above LazyColumn
+        // Overlay Indicator Pill (§1.6, §8, P5)
         val isPillVisible = queueState.isVisible && currentHeadTarget != null
         val totalCount = queueState.totalCount
 
@@ -597,7 +804,7 @@ fun EventsList(
             Surface(
                 shape = RoundedCornerShape(AmberCorners.ExtraLarge),
                 color = MaterialTheme.colorScheme.secondaryContainer,
-                shadowElevation = 2.dp,
+                shadowElevation = AmberDimens.EventsOffscreenPillElevation,
                 modifier =
                     Modifier
                         .height(AmberDimens.EventsOffscreenPillHeight)
@@ -714,7 +921,6 @@ private fun DateGroupHeader(
                     .padding(horizontal = AmberDimens.ScreenMargin),
             contentAlignment = Alignment.CenterStart,
         ) {
-            // Text reserves space on the right for overlay pill (§1.1, §1.6)
             Text(
                 text = dateText,
                 style = MaterialTheme.typography.labelMedium,

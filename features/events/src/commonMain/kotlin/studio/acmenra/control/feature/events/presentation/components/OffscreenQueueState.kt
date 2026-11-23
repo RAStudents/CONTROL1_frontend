@@ -39,7 +39,7 @@ internal enum class PendingNewerFlushReason {
 internal data class PendingNewerFlushContext(
     val reason: PendingNewerFlushReason,
     val capturedCount: Int,
-    val feedGeneration: Long,
+    val feedScopeKey: String,
 )
 
 internal data class OffscreenQueueState(
@@ -134,16 +134,27 @@ internal data class OffscreenQueueState(
     }
 
     /**
-     * Replaces the PendingNewerAtTop marker atomically with materialized loaded event IDs (§1.6, §8).
-     * Prevents badge drop to 0 and double-counting.
+     * Replaces the PendingNewerAtTop marker atomically with materialized loaded event IDs (§1.6, §8, P2.1).
+     * Replaces the marker at its exact position in entries, preserving delivery order without badge drop.
      */
     fun reconcilePendingNewerWithMaterializedIds(
         materializedIds: List<String>,
         currentlyVisibleIds: Set<String>,
     ): OffscreenQueueState {
-        val withoutMarker = entries.filterNot { it is OffscreenQueueEntry.PendingNewerAtTop }
+        val markerIndex = entries.indexOfFirst { it is OffscreenQueueEntry.PendingNewerAtTop }
         val offscreenIds = materializedIds.filter { it !in currentlyVisibleIds }
-        return copy(entries = withoutMarker).enqueue(offscreenIds)
+        val existingLoadedIds = loadedEventIds.toSet()
+        val toInsert = offscreenIds.filter { it !in existingLoadedIds }.map { OffscreenQueueEntry.LoadedEvent(it) }
+
+        if (markerIndex == -1) {
+            return enqueue(offscreenIds)
+        }
+        val newEntries =
+            entries.toMutableList().apply {
+                removeAt(markerIndex)
+                addAll(markerIndex, toInsert)
+            }
+        return copy(entries = newEntries)
     }
 
     /**
@@ -172,13 +183,15 @@ internal data class OffscreenQueueState(
     }
 
     /**
-     * Computes the head target and its direction relative to visible event items in Lazy index space (§8.1).
-     * Returns a pair of (cleanedQueue, target). If head loaded event is already visible, it is pruned.
+     * Computes the head target and its direction relative to visible event items in Lazy index space (§8.1, P1.9).
+     * Returns a pair of (cleanedQueue, target). If head loaded event is already visible or removed from feed,
+     * it is pruned so it never blocks subsequent targets.
      */
     fun computeHeadTarget(
         minVisibleEventLazyIndex: Int?,
         maxVisibleEventLazyIndex: Int?,
         eventIdToLazyIndex: Map<String, Int>,
+        allFeedEventIds: Set<String>? = null,
     ): Pair<OffscreenQueueState, OffscreenJumpTarget?> {
         var current = this
         while (current.entries.isNotEmpty()) {
@@ -187,6 +200,11 @@ internal data class OffscreenQueueState(
                     return current to OffscreenJumpTarget.PendingNewerAtTop
                 }
                 is OffscreenQueueEntry.LoadedEvent -> {
+                    if (allFeedEventIds != null && head.eventId !in allFeedEventIds) {
+                        // Event no longer exists in authoritative feed: prune it immediately (§8.1, P1.9)
+                        current = current.removeLoaded(head.eventId)
+                        continue
+                    }
                     val targetIndex = eventIdToLazyIndex[head.eventId]
                     if (targetIndex == null) {
                         // Target item not yet measured / index not found in current layout snapshot.

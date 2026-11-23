@@ -268,7 +268,7 @@ fun EventsScreen(
     )
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
-        val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+        val listState = rememberSaveable(state.feedScopeKey, saver = LazyListState.Saver) { LazyListState() }
         val usableContentWidth = maxWidth - AmberDimens.ScreenMargin * 2
         val layoutMode =
             calculateEventsLayoutMode(
@@ -498,6 +498,7 @@ private fun WideEventsLayout(
                     isViewerOpenInCompact = state.isViewerOpenInCompact,
                     listState = listState,
                     feedScopeKey = state.feedScopeKey,
+                    snapshotId = state.snapshotId,
                     liveCreatedIds = state.liveCreatedIds,
                     liveRemovedIds = state.liveRemovedIds,
                     isInitialLoading = state.isInitialLoading,
@@ -632,6 +633,7 @@ private fun MediumEventsLayout(
                     isViewerOpenInCompact = state.isViewerOpenInCompact,
                     listState = listState,
                     feedScopeKey = state.feedScopeKey,
+                    snapshotId = state.snapshotId,
                     liveCreatedIds = state.liveCreatedIds,
                     liveRemovedIds = state.liveRemovedIds,
                     isInitialLoading = state.isInitialLoading,
@@ -822,6 +824,7 @@ private fun CompactEventsLayout(
                 isViewerOpenInCompact = state.isViewerOpenInCompact,
                 listState = listState,
                 feedScopeKey = state.feedScopeKey,
+                snapshotId = state.snapshotId,
                 liveCreatedIds = state.liveCreatedIds,
                 liveRemovedIds = state.liveRemovedIds,
                 isInitialLoading = state.isInitialLoading,

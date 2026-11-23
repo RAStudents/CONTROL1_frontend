@@ -340,7 +340,7 @@ class EventsViewModel(
                 session.state.collect { feedState ->
                     if (currentGen != filterRequestGeneration || sessionCompanyGen != companyGeneration) return@collect
                     val canRead = feedState.access.eventsRead && _state.value.access.eventsRead
-                    val feedScopeKey = "$companyId:${_state.value.filter.hashCode()}:${feedState.snapshotId ?: ""}"
+                    val feedScopeKey = canonicalFeedScopeKey(companyId, _state.value.filter)
 
                     // Classify feed change provenance (§1.5, §7.1, P1.1)
                     val liveCreated = mutableSetOf<String>()
@@ -351,24 +351,29 @@ class EventsViewModel(
                             feedState.snapshotId != prevFeedState?.snapshotId ||
                             feedState.isInitialLoading
 
-                    if (!isBootstrapOrRefresh && canRead && prevFeedState != null) {
+                    val currentSequence = feedState.asOfSequence
+                    val previousSequence = prevFeedState?.asOfSequence
+                    val hasSequenceAdvance =
+                        currentSequence != null &&
+                            previousSequence != null &&
+                            currentSequence > previousSequence
+
+                    if (!isBootstrapOrRefresh && canRead && hasSequenceAdvance && prevFeedState != null) {
                         val prev = prevFeedState!!
-                        if (feedState.asOfSequence > prev.asOfSequence) {
-                            for ((id, entry) in feedState.realtimeOverlay.entries) {
-                                if (entry.membership == OverlayMembership.INCLUDED &&
-                                    entry.eventVersion == 1L &&
-                                    !prev.realtimeOverlay.entries.containsKey(id) &&
-                                    prev.visibleEvents.none { it.id == id }
-                                ) {
-                                    liveCreated.add(id)
-                                }
+                        for ((id, entry) in feedState.realtimeOverlay.entries) {
+                            if (entry.membership == OverlayMembership.INCLUDED &&
+                                entry.eventVersion == 1L &&
+                                !prev.realtimeOverlay.entries.containsKey(id) &&
+                                prev.visibleEvents.none { it.id == id }
+                            ) {
+                                liveCreated.add(id)
                             }
-                            for ((id, entry) in feedState.realtimeOverlay.entries) {
-                                if (entry.membership == OverlayMembership.REMOVED &&
-                                    prev.visibleEvents.any { it.id == id }
-                                ) {
-                                    liveRemoved.add(id)
-                                }
+                        }
+                        for ((id, entry) in feedState.realtimeOverlay.entries) {
+                            if (entry.membership == OverlayMembership.REMOVED &&
+                                prev.visibleEvents.any { it.id == id }
+                            ) {
+                                liveRemoved.add(id)
                             }
                         }
                     }
@@ -389,7 +394,7 @@ class EventsViewModel(
                                     emptyList()
                                 },
                             realtimeOverlay = if (canRead) feedState.realtimeOverlay else RealtimeOverlay(),
-                            asOfSequence = if (canRead) feedState.asOfSequence else 0L,
+                            asOfSequence = if (canRead) (feedState.asOfSequence ?: 0L) else 0L,
                             snapshotId = if (canRead) feedState.snapshotId else null,
                             feedScopeKey = feedScopeKey,
                             liveCreatedIds = liveCreated,

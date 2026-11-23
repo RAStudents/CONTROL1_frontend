@@ -40,6 +40,7 @@ internal data class PendingNewerFlushContext(
     val reason: PendingNewerFlushReason,
     val capturedCount: Int,
     val feedScopeKey: String,
+    val preFlushEventIds: Set<String> = emptySet(),
 )
 
 internal data class OffscreenQueueState(
@@ -65,6 +66,9 @@ internal data class OffscreenQueueState(
 
     val hasPendingHistoryMarker: Boolean
         get() = entries.any { it is OffscreenQueueEntry.PendingHistory }
+
+    val pendingHistoryCount: Int
+        get() = entries.filterIsInstance<OffscreenQueueEntry.PendingHistory>().firstOrNull()?.count ?: 0
 
     val loadedEventIds: List<String>
         get() = entries.filterIsInstance<OffscreenQueueEntry.LoadedEvent>().map { it.eventId }

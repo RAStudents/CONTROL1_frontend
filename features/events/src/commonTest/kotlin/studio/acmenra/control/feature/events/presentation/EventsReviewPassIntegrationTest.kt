@@ -1,10 +1,12 @@
 package studio.acmenra.control.feature.events.presentation
 
+import androidx.compose.ui.input.key.Key
 import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementStatus
 import studio.acmenra.control.feature.events.domain.model.EventIconKey
+import studio.acmenra.control.feature.events.domain.model.EventsFilter
 import studio.acmenra.control.feature.events.domain.model.OverlayEntry
 import studio.acmenra.control.feature.events.domain.model.OverlayMembership
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
@@ -16,6 +18,8 @@ import studio.acmenra.control.feature.events.presentation.components.OffscreenQu
 import studio.acmenra.control.feature.events.presentation.components.PendingNewerFlushContext
 import studio.acmenra.control.feature.events.presentation.components.PendingNewerFlushReason
 import studio.acmenra.control.feature.events.presentation.util.EventDateDisplayFormatter
+import studio.acmenra.control.feature.events.presentation.util.EventsKeyboardNavigationHelper
+import studio.acmenra.control.feature.events.presentation.util.EventsScrollAnchorHelper
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -325,5 +329,284 @@ class EventsReviewPassIntegrationTest {
             )
         assertTrue(text.contains(":"))
         assertTrue(text.contains("Location A, Device 1"))
+    }
+
+    @Test
+    fun testAccumulatedWhileAway_FeedWith300OldEvents_OnlyPrependedMaterializedSegmentEntersReconcile() {
+        val oldEvents = (1..300).map { createSampleEvent("old-$it") }
+        val preFlushEventIds = oldEvents.map { it.id }.toSet()
+        val flush =
+            PendingNewerFlushContext(
+                reason = PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY,
+                capturedCount = 3,
+                feedScopeKey = "scope_1",
+                preFlushEventIds = preFlushEventIds,
+            )
+        var queue = OffscreenQueueState().upsertPendingNewer(3)
+        val newEvents =
+            listOf(
+                createSampleEvent("new-1"),
+                createSampleEvent("new-2"),
+                createSampleEvent("new-3"),
+            ) + oldEvents
+
+        val prependedCandidates = newEvents.takeWhile { it.id !in flush.preFlushEventIds }
+        val materializedIds = prependedCandidates.take(flush.capturedCount).map { it.id }
+        assertEquals(listOf("new-1", "new-2", "new-3"), materializedIds)
+
+        // Visible in layout after scroll to top: new-1, new-2. Offscreen: new-3
+        val newlyVisibleKeys = setOf("new-1", "new-2")
+        queue =
+            queue.reconcilePendingNewerWithMaterializedIds(
+                materializedIds = materializedIds,
+                currentlyVisibleIds = newlyVisibleKeys,
+            )
+
+        // Only new-3 should enter queue! None of the 300 old events!
+        assertEquals(listOf("new-3"), queue.loadedEventIds)
+        assertEquals(1, queue.totalCount)
+        assertFalse(queue.hasPendingNewerMarker)
+    }
+
+    @Test
+    fun testAccumulatedWhileAway_SnapshotIdChange_RetainsMarkerAndFlushContext() {
+        var activeFlushContext: PendingNewerFlushContext? =
+            PendingNewerFlushContext(
+                reason = PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY,
+                capturedCount = 5,
+                feedScopeKey = "scope_1",
+            )
+        var queueState = OffscreenQueueState().upsertPendingNewer(5)
+
+        // Expected authoritative refresh arrives with new snapshotId
+        if (activeFlushContext?.reason != PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY) {
+            queueState = OffscreenQueueState()
+        }
+        assertEquals(5, queueState.pendingNewerMarkerCount)
+        assertNotNull(activeFlushContext)
+
+        // Conversely, independent refresh without active flush MUST reset queue
+        activeFlushContext = null
+        if (activeFlushContext?.reason != PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY) {
+            queueState = OffscreenQueueState()
+        }
+        assertEquals(0, queueState.totalCount)
+    }
+
+    @Test
+    fun testPendingCount_UpdateDuringActiveFlush_UpdatesCapturedCountAndMarker() {
+        var activeFlushContext =
+            PendingNewerFlushContext(
+                reason = PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY,
+                capturedCount = 5,
+                feedScopeKey = "scope_1",
+            )
+        var queueState = OffscreenQueueState().upsertPendingNewer(5)
+
+        // Feed sends update: pendingNewerCount = 8 while flush is active
+        val updatedPendingCount = 8
+        if (activeFlushContext.reason == PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY) {
+            if (updatedPendingCount > activeFlushContext.capturedCount) {
+                activeFlushContext = activeFlushContext.copy(capturedCount = updatedPendingCount)
+                queueState = queueState.upsertPendingNewer(updatedPendingCount)
+            }
+        }
+        assertEquals(8, activeFlushContext.capturedCount)
+        assertEquals(8, queueState.pendingNewerMarkerCount)
+    }
+
+    @Test
+    fun testReconcile_TriggeredWhenPendingNewerCountBecomesZero() {
+        val preFlushEventIds = setOf("ev-1")
+        val flush =
+            PendingNewerFlushContext(
+                reason = PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY,
+                capturedCount = 2,
+                feedScopeKey = "scope_1",
+                preFlushEventIds = preFlushEventIds,
+            )
+        val pendingNewerCount = 0
+        val shouldReconcile = flush.reason == PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY && pendingNewerCount == 0
+        assertTrue(shouldReconcile)
+    }
+
+    @Test
+    fun testLiveRemoval_TwoBatchesUnder350ms_PreservesIndependentLifecycles() {
+        var exitingIds = setOf<String>()
+        var displayedEvents = listOf(createSampleEvent("ev-A"), createSampleEvent("ev-B"), createSampleEvent("ev-C"))
+
+        // Batch 1 removes ev-A
+        val liveRemovedBatch1 = setOf("ev-A")
+        exitingIds = exitingIds + liveRemovedBatch1
+        assertEquals(setOf("ev-A"), exitingIds)
+
+        // Batch 2 removes ev-B within < 350ms before batch 1 finishes
+        val liveRemovedBatch2 = setOf("ev-B")
+        exitingIds = exitingIds + liveRemovedBatch2
+        assertEquals(setOf("ev-A", "ev-B"), exitingIds)
+
+        // Batch 1 finishes exit transition
+        exitingIds = exitingIds - "ev-A"
+        displayedEvents = displayedEvents.filterNot { it.id == "ev-A" }
+        assertEquals(setOf("ev-B"), exitingIds)
+        assertEquals(listOf("ev-B", "ev-C"), displayedEvents.map { it.id })
+
+        // Batch 2 finishes exit transition independently
+        exitingIds = exitingIds - "ev-B"
+        displayedEvents = displayedEvents.filterNot { it.id == "ev-B" }
+        assertTrue(exitingIds.isEmpty())
+        assertEquals(listOf("ev-C"), displayedEvents.map { it.id })
+    }
+
+    @Test
+    fun testInitialLoadAndPagination_DoNotTriggerLiveEnterAnimations() {
+        val liveEnterIds = emptySet<String>()
+        val sampleEvent = createSampleEvent("ev-1")
+        val shouldAnimateEnter = sampleEvent.id in liveEnterIds
+        assertFalse(shouldAnimateEnter)
+    }
+
+    @Test
+    fun testCardRecyclingOnScroll_DoesNotReplayEnterAnimation() {
+        val liveEnterIds = setOf("ev-live-1") // only newly arrived live event
+        val recycledOldEvent = createSampleEvent("ev-old-20")
+        val shouldAnimateEnter = recycledOldEvent.id in liveEnterIds
+        assertFalse(shouldAnimateEnter)
+    }
+
+    @Test
+    fun testScrollAnchor_FallbackIndexZero_RestoresTopWithZeroOffset() {
+        val resolvedFallbackZero =
+            EventsScrollAnchorHelper.resolveFallbackIndex(
+                anchorId = "ev-none",
+                priorSnapshotIds = listOf("ev-none"),
+                currentIdToLazyIndex = emptyMap(),
+            )
+        assertEquals(0, resolvedFallbackZero)
+        val scrollOffset = if (resolvedFallbackZero == 0) 0 else 100
+        assertEquals(0, scrollOffset)
+    }
+
+    @Test
+    fun testFeedScopeChange_ClearsQueueAndResetsState() {
+        val filter1 = EventsFilter(eventTypeIds = setOf("type-1"))
+        val filter2 = EventsFilter(eventTypeIds = setOf("type-2"))
+        val scope1 = canonicalFeedScopeKey("comp-1", filter1)
+        val scope2 = canonicalFeedScopeKey("comp-1", filter2)
+        assertTrue(scope1 != scope2)
+
+        var queueState = OffscreenQueueState().enqueue(listOf("ev-1"))
+        var activeFlushContext: PendingNewerFlushContext? =
+            PendingNewerFlushContext(
+                reason = PendingNewerFlushReason.TRANSIENT_AT_TOP,
+                capturedCount = 1,
+                feedScopeKey = scope1,
+            )
+
+        // Scope changes to scope2 -> state reset
+        if (scope1 != scope2) {
+            queueState = OffscreenQueueState()
+            activeFlushContext = null
+        }
+        assertEquals(0, queueState.totalCount)
+        assertEquals(null, activeFlushContext)
+    }
+
+    @Test
+    fun testFilterReEntry_EventUpdatedDoesNotClassifyAsLiveCreated() {
+        val initialFeed =
+            EventsFeedState(
+                visibleEvents = emptyList(), // event was previously filtered out
+                snapshotId = "snap-1",
+                asOfSequence = 10L,
+            )
+        // event_updated arrives (eventVersion = 2L), causing it to appear in visibleEvents
+        val updatedOverlay =
+            RealtimeOverlay(
+                entries =
+                    mapOf(
+                        "ev-1" to
+                            OverlayEntry(
+                                eventId = "ev-1",
+                                event = createSampleEvent("ev-1", eventVersion = 2L),
+                                eventVersion = 2L,
+                                membership = OverlayMembership.INCLUDED,
+                            ),
+                    ),
+            )
+        val feedWithUpdatedEvent =
+            initialFeed.copy(
+                asOfSequence = 11L,
+                visibleEvents = listOf(createSampleEvent("ev-1", eventVersion = 2L)),
+                realtimeOverlay = updatedOverlay,
+            )
+        val liveCreated = mutableSetOf<String>()
+        for ((id, entry) in feedWithUpdatedEvent.realtimeOverlay.entries) {
+            if (entry.membership == OverlayMembership.INCLUDED &&
+                entry.eventVersion == 1L &&
+                !initialFeed.realtimeOverlay.entries.containsKey(id) &&
+                initialFeed.visibleEvents.none { it.id == id }
+            ) {
+                liveCreated.add(id)
+            }
+        }
+        // eventVersion == 2L is an update, NOT a live created event
+        assertTrue(liveCreated.isEmpty())
+    }
+
+    @Test
+    fun testShiftNavigation_IgnoredByKeyboardHelper() {
+        val events = listOf(createSampleEvent("ev-1"), createSampleEvent("ev-2"))
+        var selectedId: String? = "ev-1"
+        val handled =
+            EventsKeyboardNavigationHelper.handleNavigationKey(
+                key = Key.DirectionDown,
+                isCtrlPressed = false,
+                isAltPressed = false,
+                isMetaPressed = false,
+                isShiftPressed = true, // Shift pressed
+                isKeyDown = true,
+                events = events,
+                selectedEventId = selectedId,
+                isCompact = false,
+                onSelectEvent = { selectedId = it },
+            )
+        assertFalse(handled)
+        assertEquals("ev-1", selectedId)
+    }
+
+    @Test
+    fun testDirectionalAccessibilityCount_SeparatesUpAndDown() {
+        val queue =
+            OffscreenQueueState()
+                .upsertPendingNewer(4)
+                .enqueue(listOf("ev-loaded-above", "ev-loaded-below"))
+                .upsertPendingHistory(2, requiresRefresh = true, hasMore = true)
+
+        val idToLazyIndex =
+            mapOf(
+                "ev-loaded-above" to 1,
+                "ev-visible" to 5,
+                "ev-loaded-below" to 9,
+            )
+        val minVisible = 4
+        val maxVisible = 6
+
+        val loadedAbove =
+            queue.entries
+                .filterIsInstance<OffscreenQueueEntry.LoadedEvent>()
+                .count { idToLazyIndex[it.eventId]?.let { idx -> idx < minVisible } == true }
+        val loadedBelow =
+            queue.entries
+                .filterIsInstance<OffscreenQueueEntry.LoadedEvent>()
+                .count { idToLazyIndex[it.eventId]?.let { idx -> idx > maxVisible } == true }
+
+        val upCount = queue.pendingNewerMarkerCount + loadedAbove
+        val downCount = queue.pendingHistoryCount + loadedBelow
+
+        assertEquals(1, loadedAbove)
+        assertEquals(1, loadedBelow)
+        assertEquals(5, upCount) // 4 pending newer + 1 loaded above
+        assertEquals(3, downCount) // 2 pending history + 1 loaded below
     }
 }

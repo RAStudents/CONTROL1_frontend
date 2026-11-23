@@ -24,8 +24,9 @@ object EventsKeyboardNavigationHelper {
         selectedEventId: String?,
         isCompact: Boolean,
         onSelectEvent: (String?) -> Unit,
+        isShiftPressed: Boolean = false,
     ): Boolean {
-        if (!isKeyDown || isCtrlPressed || isAltPressed || isMetaPressed) {
+        if (!isKeyDown || isCtrlPressed || isAltPressed || isMetaPressed || isShiftPressed) {
             return false
         }
         return when (key) {

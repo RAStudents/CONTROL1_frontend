@@ -194,7 +194,7 @@ fun EventCard(
         }
 
     // Supporting text format (§1.2): "HH:mm • locationName, deviceName"
-    val effectiveTz = businessTimeZone ?: TimeZone.currentSystemDefault()
+    val effectiveTz = businessTimeZone ?: TimeZone.UTC
     val supportingText =
         EventDateDisplayFormatter.formatEventCardSupportingText(
             occurredAt = event.occurredAt,

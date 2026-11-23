@@ -71,3 +71,17 @@ data class EventsState(
     val pendingAckIds: Set<String>
         get() = realtimeOverlay.pendingAckIds
 }
+
+fun canonicalFeedScopeKey(
+    companyId: String,
+    filter: EventsFilter,
+): String =
+    buildString {
+        append("company:").append(companyId)
+        append("|types:").append(filter.eventTypeIds.sorted().joinToString(","))
+        append("|devices:").append(filter.deviceIds.sorted().joinToString(","))
+        append("|validity:").append(filter.validity.name)
+        append("|q:").append(filter.searchId.orEmpty())
+        append("|from:").append(filter.dateFrom?.toString().orEmpty())
+        append("|to:").append(filter.dateTo?.toString().orEmpty())
+    }

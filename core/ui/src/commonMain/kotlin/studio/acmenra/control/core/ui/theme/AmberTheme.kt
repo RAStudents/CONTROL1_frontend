@@ -244,6 +244,7 @@ object AmberDimens {
     val EventsStickyDatePillReservedWidth = 80.dp
     val EventsDaySectionSpacing = 12.dp
     val EventsListFooterPadding = 16.dp
+    val EventsOffscreenPillElevation = 2.dp
 }
 
 object AmberBreakpoints {

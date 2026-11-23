@@ -104,8 +104,8 @@
     <!-- Offscreen Queue & Indicator -->
     <string name="events_offscreen_pill_plus_99">+99+</string>
     <string name="events_offscreen_pill_count">+%1$d</string>
-    <string name="events_offscreen_pill_accessibility_up">%1$d new events above</string>
-    <string name="events_offscreen_pill_accessibility_down">%1$d new events below</string>
+    <string name="events_offscreen_pill_accessibility_up">Events above: %1$d</string>
+    <string name="events_offscreen_pill_accessibility_down">Events below: %1$d</string>
     <string name="events_offscreen_notice_title">New live events</string>
 
     <!-- Month Names and Date Headers -->

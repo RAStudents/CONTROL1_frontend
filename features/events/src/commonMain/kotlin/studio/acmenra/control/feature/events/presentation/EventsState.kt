@@ -62,7 +62,11 @@ data class EventsState(
     val mutationErrorNotice: StringResource? = null,
     val clipboardNotice: String? = null,
     val errorNotice: Notice? = null,
+    val infoNotice: Notice? = null,
 ) {
+    val feedScope: EventsFeedScope
+        get() = EventsFeedScope(companyId, filter, sort)
+
     val erroneousConfirmationEventId: String?
         get() = confirmationTarget?.eventId
     val selectedEvent: Event?
@@ -73,6 +77,14 @@ data class EventsState(
 
     val pendingAckIds: Set<String>
         get() = realtimeOverlay.pendingAckIds
+}
+
+data class EventsFeedScope(
+    val companyId: String,
+    val filter: EventsFilter,
+    val sort: EventsSort = EventsSort.OCCURRED_AT_DESC,
+) {
+    val key: String get() = canonicalFeedScopeKey(companyId, filter, sort)
 }
 
 fun canonicalFeedScopeKey(

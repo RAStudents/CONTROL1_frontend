@@ -361,7 +361,7 @@ class EventsViewModelTest {
         }
 
     @Test
-    fun testSelectEventAutoAcknowledgesNewEvent() =
+    fun testSelectEventDoesNotAutoAcknowledgeNewEvent() =
         runTest(testDispatcher) {
             val event = createSampleEvent("ev-new")
             val feed =
@@ -395,8 +395,9 @@ class EventsViewModelTest {
             vm.selectEvent("ev-new")
             advanceUntilIdle()
 
-            assertEquals("ev-new", acknowledgedEventId)
-            assertEquals("ev-new", feed.appliedAcks.firstOrNull()?.id)
+            assertEquals("ev-new", vm.state.value.selectedEventId)
+            assertNull(acknowledgedEventId)
+            assertTrue(feed.appliedAcks.isEmpty())
             assertFalse(feed.pendingAcks.contains("ev-new"))
         }
 

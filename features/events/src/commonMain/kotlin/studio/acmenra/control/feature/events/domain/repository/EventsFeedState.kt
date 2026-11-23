@@ -26,12 +26,31 @@ sealed interface RebootstrapState {
 }
 
 data class EventsFeedDelta(
-    val batchId: Long = 0L,
-    val tenantSequence: Long = 0L,
+    val batchId: Long,
+    val tenantSequence: Long,
     val createdEventIds: List<String> = emptyList(),
-    val updatedEventIds: Set<String> = emptySet(),
-    val removedEventIds: Set<String> = emptySet(),
-)
+    val updatedEventIds: List<String> = emptyList(),
+    val removedEventIds: List<String> = emptyList(),
+) {
+    init {
+        require(batchId > 0L) { "batchId must be strictly positive: $batchId" }
+        require(tenantSequence >= 0L) { "tenantSequence must be non-negative: $tenantSequence" }
+        require(createdEventIds.distinct().size == createdEventIds.size) { "createdEventIds contains duplicates" }
+        require(updatedEventIds.distinct().size == updatedEventIds.size) { "updatedEventIds contains duplicates" }
+        require(removedEventIds.distinct().size == removedEventIds.size) { "removedEventIds contains duplicates" }
+
+        val createdSet = createdEventIds.toSet()
+        val updatedSet = updatedEventIds.toSet()
+        val removedSet = removedEventIds.toSet()
+
+        require(createdSet.intersect(updatedSet).isEmpty()) { "createdEventIds and updatedEventIds must be disjoint" }
+        require(createdSet.intersect(removedSet).isEmpty()) { "createdEventIds and removedEventIds must be disjoint" }
+        require(updatedSet.intersect(removedSet).isEmpty()) { "updatedEventIds and removedEventIds must be disjoint" }
+    }
+
+    val isEmpty: Boolean
+        get() = createdEventIds.isEmpty() && updatedEventIds.isEmpty() && removedEventIds.isEmpty()
+}
 
 data class EventsFeedState(
     val visibleEvents: List<Event> = emptyList(),
@@ -53,8 +72,60 @@ data class EventsFeedState(
     val pendingHistoryCount: Int = 0,
     val summary: EventsSummary? = null,
     val isSummaryLoading: Boolean = false,
-    val feedDelta: EventsFeedDelta? = null,
+    val pendingDeltas: List<EventsFeedDelta> = emptyList(),
 ) {
+    constructor(
+        visibleEvents: List<Event> = emptyList(),
+        realtimeOverlay: RealtimeOverlay = RealtimeOverlay(),
+        access: EventsAccessCapabilities =
+            EventsAccessCapabilities(eventsRead = false, eventsReview = false, reportsExport = false),
+        snapshotId: String? = null,
+        asOfSequence: Long = 0L,
+        replayId: Long = 1L,
+        snapshotTotalCount: Int = 0,
+        hasMore: Boolean = false,
+        isInitialLoading: Boolean = true,
+        initialLoadError: EventsInitialLoadError? = null,
+        isLoadingNextPage: Boolean = false,
+        paginationError: EventsPaginationError? = null,
+        connectionState: RealtimeConnectionState = RealtimeConnectionState.DISCONNECTED,
+        rebootstrapState: RebootstrapState = RebootstrapState.Idle,
+        pendingNewerCount: Int = 0,
+        pendingHistoryCount: Int = 0,
+        summary: EventsSummary? = null,
+        isSummaryLoading: Boolean = false,
+        feedDelta: EventsFeedDelta?,
+    ) : this(
+        visibleEvents = visibleEvents,
+        realtimeOverlay = realtimeOverlay,
+        access = access,
+        snapshotId = snapshotId,
+        asOfSequence = asOfSequence,
+        replayId = replayId,
+        snapshotTotalCount = snapshotTotalCount,
+        hasMore = hasMore,
+        isInitialLoading = isInitialLoading,
+        initialLoadError = initialLoadError,
+        isLoadingNextPage = isLoadingNextPage,
+        paginationError = paginationError,
+        connectionState = connectionState,
+        rebootstrapState = rebootstrapState,
+        pendingNewerCount = pendingNewerCount,
+        pendingHistoryCount = pendingHistoryCount,
+        summary = summary,
+        isSummaryLoading = isSummaryLoading,
+        pendingDeltas = if (feedDelta != null) listOf(feedDelta) else emptyList(),
+    )
+
+    val feedDelta: EventsFeedDelta? get() = pendingDeltas.firstOrNull()
     val pendingAckIds: Set<String> get() = realtimeOverlay.pendingAckIds
     val requiresRefresh: Boolean get() = realtimeOverlay.requiresRefresh
+}
+
+fun appendFeedDelta(
+    current: List<EventsFeedDelta>,
+    delta: EventsFeedDelta?,
+): List<EventsFeedDelta> {
+    if (delta == null || delta.isEmpty) return current
+    return current + delta
 }

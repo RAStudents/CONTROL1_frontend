@@ -179,7 +179,7 @@ class OffscreenQueueStateTest {
         // 4. PendingNewerAtTop target: always heads to top
         val qNewer = OffscreenQueueState().upsertPendingNewer(3)
         val (_, targetNewer) = qNewer.computeHeadTarget(minVisibleLazy, maxVisibleLazy, idToLazyIndex)
-        assertEquals(OffscreenJumpTarget.PendingNewerAtTop, targetNewer)
+        assertEquals(OffscreenJumpTarget.PendingNewerAtTop(), targetNewer)
 
         // 5. PendingHistory target: signals refresh
         val qHistory = OffscreenQueueState().upsertPendingHistory(5, requiresRefresh = true, hasMore = true)
@@ -231,5 +231,58 @@ class OffscreenQueueStateTest {
         assertEquals(4, q.totalCount)
         assertEquals(listOf("ev-B", "ev-C", "ev-A"), q.loadedEventIds)
         assertTrue(q.entries.last() is OffscreenQueueEntry.PendingHistory)
+    }
+
+    @Test
+    fun testPillStatusTransitionsAndDirectionalCount() {
+        val q0 = OffscreenQueueState()
+        val (_, res0) = q0.resolveHeadTarget(2, 5, emptyMap())
+        assertEquals(OffscreenPillStatus.HIDDEN, computePillStatus(res0))
+        assertEquals(0, q0.directionalCount(OffscreenDirection.UP, 2, 5, emptyMap()))
+
+        // Target unmeasured -> AWAITING_LAYOUT
+        val q1 = q0.enqueue(listOf("ev-unmeasured"))
+        val (qHeld, res1) =
+            q1.resolveHeadTarget(
+                2,
+                5,
+                emptyMap<String, Int>(),
+                allFeedEventIds = setOf("ev-unmeasured"),
+            )
+        assertTrue(res1 is OffscreenHeadResolution.AwaitingLayout)
+        // With unmeasured target, status is AWAITING_LAYOUT, not HIDDEN!
+        assertEquals(OffscreenPillStatus.AWAITING_LAYOUT, computePillStatus(res1))
+        assertEquals(1, qHeld.directionalCount(OffscreenDirection.UP, 2, 5, emptyMap()))
+
+        // Target measured -> READY
+        val (_, res2) =
+            qHeld.resolveHeadTarget(
+                2,
+                5,
+                mapOf("ev-unmeasured" to 1),
+                allFeedEventIds = setOf("ev-unmeasured"),
+            )
+        assertTrue(res2 is OffscreenHeadResolution.Ready)
+        assertEquals(OffscreenPillStatus.READY, computePillStatus(res2))
+        assertEquals(1, qHeld.directionalCount(res2.target.direction, 2, 5, mapOf("ev-unmeasured" to 1)))
+
+        // In-flight state overrides Ready/AwaitingLayout to IN_FLIGHT
+        assertEquals(OffscreenPillStatus.IN_FLIGHT, computePillStatus(res2, isInFlight = true))
+    }
+
+    @Test
+    fun testDirectionalCountConsistencyForPendingNewer() {
+        val q = OffscreenQueueState().upsertPendingNewer(5)
+        val (_, res) =
+            q.resolveHeadTarget(
+                2,
+                5,
+                emptyMap<String, Int>(),
+            )
+        assertTrue(res is OffscreenHeadResolution.Ready)
+        val target = res.target
+        assertTrue(target is OffscreenJumpTarget.PendingNewerAtTop)
+        assertEquals(5, res.directionalCount)
+        assertEquals(5, q.directionalCount(target.direction, 2, 5, emptyMap()))
     }
 }

@@ -11,8 +11,12 @@ internal sealed interface OffscreenQueueEntry {
     ) : OffscreenQueueEntry
 
     data class PendingNewerAtTop(
-        val count: Int,
-    ) : OffscreenQueueEntry
+        val eventIds: List<String> = emptyList(),
+        val reportedCount: Int = eventIds.size,
+    ) : OffscreenQueueEntry {
+        val effectiveCount: Int
+            get() = maxOf(eventIds.size, reportedCount)
+    }
 
     data class PendingHistory(
         val count: Int,
@@ -20,28 +24,80 @@ internal sealed interface OffscreenQueueEntry {
 }
 
 internal sealed interface OffscreenJumpTarget {
+    val direction: OffscreenDirection
+        get() =
+            when (this) {
+                is LoadedEvent -> direction
+                is PendingNewerAtTop -> direction
+                is PendingHistoryRefresh -> OffscreenDirection.DOWN
+            }
+
     data class LoadedEvent(
         val eventId: String,
         val lazyItemIndex: Int,
-        val direction: OffscreenDirection,
+        override val direction: OffscreenDirection,
     ) : OffscreenJumpTarget
 
-    data object PendingNewerAtTop : OffscreenJumpTarget
+    data class PendingNewerAtTop(
+        val eventIds: List<String> = emptyList(),
+        override val direction: OffscreenDirection = OffscreenDirection.UP,
+    ) : OffscreenJumpTarget
 
     data object PendingHistoryRefresh : OffscreenJumpTarget
 }
+
+internal sealed interface OffscreenHeadResolution {
+    data object Empty : OffscreenHeadResolution
+
+    data class AwaitingLayout(
+        val targetEventId: String,
+        val fallbackDirection: OffscreenDirection = OffscreenDirection.UP,
+    ) : OffscreenHeadResolution
+
+    data class Ready(
+        val target: OffscreenJumpTarget,
+        val directionalCount: Int,
+    ) : OffscreenHeadResolution
+}
+
+internal enum class OffscreenPillStatus {
+    HIDDEN,
+    AWAITING_LAYOUT,
+    READY,
+    IN_FLIGHT,
+}
+
+internal fun computePillStatus(
+    headResolution: OffscreenHeadResolution,
+    isInFlight: Boolean = false,
+): OffscreenPillStatus =
+    when {
+        isInFlight -> OffscreenPillStatus.IN_FLIGHT
+        headResolution is OffscreenHeadResolution.Ready -> OffscreenPillStatus.READY
+        headResolution is OffscreenHeadResolution.AwaitingLayout -> OffscreenPillStatus.AWAITING_LAYOUT
+        else -> OffscreenPillStatus.HIDDEN
+    }
 
 internal enum class PendingNewerFlushReason {
     TRANSIENT_AT_TOP,
     ACCUMULATED_WHILE_AWAY,
 }
 
+internal enum class PendingNewerFlushPhase {
+    IDLE,
+    SCROLLING_TO_TOP,
+    DISPATCHING_FLUSH,
+    AWAITING_MATERIALIZATION,
+    AWAITING_LAYOUT,
+    RECONCILING,
+}
+
 internal data class PendingNewerFlushContext(
-    val reason: PendingNewerFlushReason,
+    val phase: PendingNewerFlushPhase = PendingNewerFlushPhase.IDLE,
+    val reason: PendingNewerFlushReason = PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY,
     val capturedCount: Int,
     val feedScopeKey: String,
     val preFlushEventIds: Set<String> = emptySet(),
-    val pendingEventIds: List<String> = emptyList(),
     val expectedBatchId: Long? = null,
     val expectedSnapshotId: String? = null,
 )
@@ -54,7 +110,7 @@ internal data class OffscreenQueueState(
             entries.sumOf { entry ->
                 when (entry) {
                     is OffscreenQueueEntry.LoadedEvent -> 1
-                    is OffscreenQueueEntry.PendingNewerAtTop -> entry.count
+                    is OffscreenQueueEntry.PendingNewerAtTop -> entry.effectiveCount
                     is OffscreenQueueEntry.PendingHistory -> entry.count
                 }
             }
@@ -65,7 +121,7 @@ internal data class OffscreenQueueState(
         get() = entries.any { it is OffscreenQueueEntry.PendingNewerAtTop }
 
     val pendingNewerMarkerCount: Int
-        get() = entries.filterIsInstance<OffscreenQueueEntry.PendingNewerAtTop>().firstOrNull()?.count ?: 0
+        get() = entries.filterIsInstance<OffscreenQueueEntry.PendingNewerAtTop>().firstOrNull()?.effectiveCount ?: 0
 
     val hasPendingHistoryMarker: Boolean
         get() = entries.any { it is OffscreenQueueEntry.PendingHistory }
@@ -78,7 +134,7 @@ internal data class OffscreenQueueState(
 
     /**
      * Enqueues newly detected loaded event IDs.
-     * Deduplicates only against IDs currently active in entries (§1.6, §8, §12.1).
+     * Deduplicates only against IDs currently active in entries.
      */
     fun enqueue(ids: List<String>): OffscreenQueueState {
         if (ids.isEmpty()) return this
@@ -120,31 +176,39 @@ internal data class OffscreenQueueState(
     }
 
     /**
-     * Singleton invariant (§8): at most one PendingNewerAtTop in entries.
+     * Singleton invariant: at most one PendingNewerAtTop in entries.
      * Updates in-place if already present; places before loaded events or at head.
      */
-    fun upsertPendingNewer(count: Int): OffscreenQueueState {
-        if (count <= 0) {
+    fun upsertPendingNewer(
+        count: Int,
+        eventIds: List<String> = emptyList(),
+    ): OffscreenQueueState {
+        if (count <= 0 && eventIds.isEmpty()) {
             val updated = entries.filterNot { it is OffscreenQueueEntry.PendingNewerAtTop }
             return if (updated.size == entries.size) this else copy(entries = updated)
         }
         val existingIndex = entries.indexOfFirst { it is OffscreenQueueEntry.PendingNewerAtTop }
+        val entry =
+            OffscreenQueueEntry.PendingNewerAtTop(
+                eventIds = eventIds,
+                reportedCount = maxOf(count, eventIds.size),
+            )
         val updatedEntries =
             if (existingIndex != -1) {
                 entries.toMutableList().apply {
-                    set(existingIndex, OffscreenQueueEntry.PendingNewerAtTop(count))
+                    set(existingIndex, entry)
                 }
             } else {
-                listOf(OffscreenQueueEntry.PendingNewerAtTop(count)) + entries
+                listOf(entry) + entries
             }
         return copy(entries = updatedEntries)
     }
 
     /**
-     * Replaces the PendingNewerAtTop marker atomically with materialized loaded event IDs (§1.6, §8, P2.1).
+     * Replaces the PendingNewerAtTop marker atomically with materialized loaded event IDs.
      * Replaces the marker at its exact position in entries, preserving delivery order without badge drop.
      */
-    fun reconcilePendingNewerWithMaterializedIds(
+    fun reconcilePendingNewer(
         materializedIds: List<String>,
         currentlyVisibleIds: Set<String>,
     ): OffscreenQueueState {
@@ -164,8 +228,13 @@ internal data class OffscreenQueueState(
         return copy(entries = newEntries)
     }
 
+    fun reconcilePendingNewerWithMaterializedIds(
+        materializedIds: List<String>,
+        currentlyVisibleIds: Set<String>,
+    ): OffscreenQueueState = reconcilePendingNewer(materializedIds, currentlyVisibleIds)
+
     /**
-     * Singleton invariant (§8): at most one PendingHistory at the tail of entries.
+     * Singleton invariant: at most one PendingHistory at the tail of entries.
      */
     fun upsertPendingHistory(
         count: Int,
@@ -190,65 +259,178 @@ internal data class OffscreenQueueState(
     }
 
     /**
-     * Computes the head target and its direction relative to visible event items in Lazy index space (§8.1, P1.9).
-     * Returns a pair of (cleanedQueue, target). If head loaded event is already visible or removed from feed,
-     * it is pruned so it never blocks subsequent targets.
+     * Calculates the directional count for the indicator.
      */
+    fun directionalCount(
+        direction: OffscreenDirection,
+        minVisibleIndex: Int?,
+        maxVisibleIndex: Int?,
+        eventIdToLazyIndex: Map<String, Int>,
+    ): Int {
+        var count = 0
+        for (entry in entries) {
+            when (entry) {
+                is OffscreenQueueEntry.PendingNewerAtTop -> {
+                    if (direction == OffscreenDirection.UP) {
+                        count += entry.effectiveCount
+                    }
+                }
+                is OffscreenQueueEntry.LoadedEvent -> {
+                    val idx = eventIdToLazyIndex[entry.eventId]
+                    if (idx != null && minVisibleIndex != null && maxVisibleIndex != null) {
+                        if (direction == OffscreenDirection.UP && idx < minVisibleIndex) {
+                            count++
+                        } else if (direction == OffscreenDirection.DOWN && idx > maxVisibleIndex) {
+                            count++
+                        }
+                    } else {
+                        // If not yet measured in layout, assume UP
+                        if (direction == OffscreenDirection.UP) count++
+                    }
+                }
+                is OffscreenQueueEntry.PendingHistory -> {
+                    if (direction == OffscreenDirection.DOWN) {
+                        count += entry.count
+                    }
+                }
+            }
+        }
+        return count
+    }
+
+    /**
+     * Resolves the head target and its direction relative to visible event items in Lazy index space.
+     * Prunes invalid or already-visible loaded items.
+     */
+    fun resolveHeadTarget(
+        minVisibleEventLazyIndex: Int?,
+        maxVisibleEventLazyIndex: Int?,
+        eventIdToLazyIndex: Map<String, Int>,
+        allFeedEventIds: Set<String>? = null,
+    ): Pair<OffscreenQueueState, OffscreenHeadResolution> {
+        var current = this
+        while (current.entries.isNotEmpty()) {
+            when (val head = current.entries.first()) {
+                is OffscreenQueueEntry.PendingNewerAtTop -> {
+                    val count =
+                        current.directionalCount(
+                            direction = OffscreenDirection.UP,
+                            minVisibleIndex = minVisibleEventLazyIndex,
+                            maxVisibleIndex = maxVisibleEventLazyIndex,
+                            eventIdToLazyIndex = eventIdToLazyIndex,
+                        )
+                    return current to
+                        OffscreenHeadResolution.Ready(
+                            target =
+                                OffscreenJumpTarget.PendingNewerAtTop(
+                                    eventIds = head.eventIds,
+                                    direction = OffscreenDirection.UP,
+                                ),
+                            directionalCount = count,
+                        )
+                }
+                is OffscreenQueueEntry.LoadedEvent -> {
+                    if (allFeedEventIds != null && head.eventId !in allFeedEventIds) {
+                        current = current.removeLoaded(head.eventId)
+                        continue
+                    }
+                    val targetIndex = eventIdToLazyIndex[head.eventId]
+                    if (targetIndex == null) {
+                        return current to
+                            OffscreenHeadResolution.AwaitingLayout(
+                                targetEventId = head.eventId,
+                                fallbackDirection = OffscreenDirection.UP,
+                            )
+                    }
+                    if (minVisibleEventLazyIndex == null || maxVisibleEventLazyIndex == null) {
+                        return current to
+                            OffscreenHeadResolution.AwaitingLayout(
+                                targetEventId = head.eventId,
+                                fallbackDirection = OffscreenDirection.UP,
+                            )
+                    }
+                    when {
+                        targetIndex < minVisibleEventLazyIndex -> {
+                            val count =
+                                current.directionalCount(
+                                    direction = OffscreenDirection.UP,
+                                    minVisibleIndex = minVisibleEventLazyIndex,
+                                    maxVisibleIndex = maxVisibleEventLazyIndex,
+                                    eventIdToLazyIndex = eventIdToLazyIndex,
+                                )
+                            return current to
+                                OffscreenHeadResolution.Ready(
+                                    target =
+                                        OffscreenJumpTarget.LoadedEvent(
+                                            eventId = head.eventId,
+                                            lazyItemIndex = targetIndex,
+                                            direction = OffscreenDirection.UP,
+                                        ),
+                                    directionalCount = count,
+                                )
+                        }
+                        targetIndex > maxVisibleEventLazyIndex -> {
+                            val count =
+                                current.directionalCount(
+                                    direction = OffscreenDirection.DOWN,
+                                    minVisibleIndex = minVisibleEventLazyIndex,
+                                    maxVisibleIndex = maxVisibleEventLazyIndex,
+                                    eventIdToLazyIndex = eventIdToLazyIndex,
+                                )
+                            return current to
+                                OffscreenHeadResolution.Ready(
+                                    target =
+                                        OffscreenJumpTarget.LoadedEvent(
+                                            eventId = head.eventId,
+                                            lazyItemIndex = targetIndex,
+                                            direction = OffscreenDirection.DOWN,
+                                        ),
+                                    directionalCount = count,
+                                )
+                        }
+                        else -> {
+                            // Already in visible viewport -> prune
+                            current = current.removeLoaded(head.eventId)
+                        }
+                    }
+                }
+                is OffscreenQueueEntry.PendingHistory -> {
+                    val count =
+                        current.directionalCount(
+                            direction = OffscreenDirection.DOWN,
+                            minVisibleIndex = minVisibleEventLazyIndex,
+                            maxVisibleIndex = maxVisibleEventLazyIndex,
+                            eventIdToLazyIndex = eventIdToLazyIndex,
+                        )
+                    return current to
+                        OffscreenHeadResolution.Ready(
+                            target = OffscreenJumpTarget.PendingHistoryRefresh,
+                            directionalCount = count,
+                        )
+                }
+            }
+        }
+        return current to OffscreenHeadResolution.Empty
+    }
+
     fun computeHeadTarget(
         minVisibleEventLazyIndex: Int?,
         maxVisibleEventLazyIndex: Int?,
         eventIdToLazyIndex: Map<String, Int>,
         allFeedEventIds: Set<String>? = null,
     ): Pair<OffscreenQueueState, OffscreenJumpTarget?> {
-        var current = this
-        while (current.entries.isNotEmpty()) {
-            when (val head = current.entries.first()) {
-                is OffscreenQueueEntry.PendingNewerAtTop -> {
-                    return current to OffscreenJumpTarget.PendingNewerAtTop
-                }
-                is OffscreenQueueEntry.LoadedEvent -> {
-                    if (allFeedEventIds != null && head.eventId !in allFeedEventIds) {
-                        // Event no longer exists in authoritative feed: prune it immediately (§8.1, P1.9)
-                        current = current.removeLoaded(head.eventId)
-                        continue
-                    }
-                    val targetIndex = eventIdToLazyIndex[head.eventId]
-                    if (targetIndex == null) {
-                        // Target item not yet measured / index not found in current layout snapshot.
-                        // Hold queue and wait for next layout (§8.1 rule 6).
-                        return current to null
-                    }
-                    if (minVisibleEventLazyIndex == null || maxVisibleEventLazyIndex == null) {
-                        return current to null
-                    }
-                    when {
-                        targetIndex < minVisibleEventLazyIndex -> {
-                            return current to
-                                OffscreenJumpTarget.LoadedEvent(
-                                    eventId = head.eventId,
-                                    lazyItemIndex = targetIndex,
-                                    direction = OffscreenDirection.UP,
-                                )
-                        }
-                        targetIndex > maxVisibleEventLazyIndex -> {
-                            return current to
-                                OffscreenJumpTarget.LoadedEvent(
-                                    eventId = head.eventId,
-                                    lazyItemIndex = targetIndex,
-                                    direction = OffscreenDirection.DOWN,
-                                )
-                        }
-                        else -> {
-                            // Target has entered the visible viewport: prune it and continue to next (§8.1 rule 5)
-                            current = current.removeLoaded(head.eventId)
-                        }
-                    }
-                }
-                is OffscreenQueueEntry.PendingHistory -> {
-                    return current to OffscreenJumpTarget.PendingHistoryRefresh
-                }
+        val (q, res) =
+            resolveHeadTarget(
+                minVisibleEventLazyIndex = minVisibleEventLazyIndex,
+                maxVisibleEventLazyIndex = maxVisibleEventLazyIndex,
+                eventIdToLazyIndex = eventIdToLazyIndex,
+                allFeedEventIds = allFeedEventIds,
+            )
+        val target =
+            when (res) {
+                is OffscreenHeadResolution.Ready -> res.target
+                else -> null
             }
-        }
-        return current to null
+        return q to target
     }
 }

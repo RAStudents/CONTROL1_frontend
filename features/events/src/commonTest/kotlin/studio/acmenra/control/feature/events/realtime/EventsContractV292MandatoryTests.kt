@@ -864,7 +864,7 @@ class EventsContractV292MandatoryTests {
                 assertEquals(2, processor.state.value.pendingNewerCount)
 
                 // Integrate newer events: they become visible
-                processor.dispatch(SessionCommand.ViewportAtTop)
+                processor.dispatch(SessionCommand.ViewportAtTop())
                 advanceUntilIdle()
 
                 val visibleIds =
@@ -1528,7 +1528,7 @@ class EventsContractV292MandatoryTests {
                 assertTrue(applyRes is studio.acmenra.control.feature.events.data.realtime.BootstrapApplyResult.Applied)
 
                 assertEquals(101L, processor.getAsOfSequence())
-                processor.dispatch(SessionCommand.ViewportAtTop)
+                processor.dispatch(SessionCommand.ViewportAtTop())
                 advanceUntilIdle()
 
                 val visible =
@@ -2205,7 +2205,7 @@ class EventsContractV292MandatoryTests {
 
                 val result = processor.installBootstrap(bootstrap, 1L)
                 assertTrue(result is BootstrapApplyResult.Applied)
-                processor.dispatch(SessionCommand.ViewportAtTop)
+                processor.dispatch(SessionCommand.ViewportAtTop())
                 advanceUntilIdle()
 
                 assertEquals(2, processor.state.value.visibleEvents.size)
@@ -2242,7 +2242,7 @@ class EventsContractV292MandatoryTests {
                         ),
                     ),
                 )
-                processor.dispatch(SessionCommand.ViewportAtTop)
+                processor.dispatch(SessionCommand.ViewportAtTop())
                 advanceUntilIdle()
 
                 // Commit must be dropped: no events should appear
@@ -2503,7 +2503,7 @@ class EventsContractV292MandatoryTests {
                         sampleCommitDto(processor.currentReplayId, 101L, "ev-valid").copy(payloadSha256 = shaValid),
                     )
                 processor.dispatch(SessionCommand.WsFrameReceived(IncomingWsEnvelope(2L, processorCommit)))
-                processor.dispatch(SessionCommand.ViewportAtTop)
+                processor.dispatch(SessionCommand.ViewportAtTop())
                 advanceUntilIdle()
                 assertEquals(1, processor.state.value.visibleEvents.size)
                 assertEquals(
@@ -2857,7 +2857,7 @@ class EventsContractV292MandatoryTests {
                 // Bootstrap 2 (generation 2) arrives and installs first
                 val res2 = processor.installBootstrap(bootstrap2, 2L)
                 assertTrue(res2 is BootstrapApplyResult.Applied)
-                processor.dispatch(SessionCommand.ViewportAtTop)
+                processor.dispatch(SessionCommand.ViewportAtTop())
                 advanceUntilIdle()
 
                 assertEquals(
@@ -2997,7 +2997,7 @@ class EventsContractV292MandatoryTests {
                     )
                 val res = processor.installBootstrap(bootstrap, 1L)
                 assertTrue(res is BootstrapApplyResult.Applied)
-                processor.dispatch(SessionCommand.ViewportAtTop)
+                processor.dispatch(SessionCommand.ViewportAtTop())
                 advanceUntilIdle()
 
                 assertEquals(1, processor.state.value.visibleEvents.size)
@@ -4284,7 +4284,7 @@ class EventsContractV292MandatoryTests {
             )
 
             // Commands that recompute visible events MUST NOT republish old events when deny-latch is active
-            processor.dispatch(SessionCommand.ViewportAtTop)
+            processor.dispatch(SessionCommand.ViewportAtTop())
             processor.dispatch(SessionCommand.AcknowledgeSucceeded(sampleEvent("ev-1")))
             processor.dispatch(SessionCommand.EventMutationApplied(sampleEvent("ev-1")))
             advanceUntilIdle()

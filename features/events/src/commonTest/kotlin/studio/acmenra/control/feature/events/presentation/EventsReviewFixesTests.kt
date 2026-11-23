@@ -93,9 +93,13 @@ import studio.acmenra.control.feature.events.domain.usecase.MarkEventErroneousUs
 import studio.acmenra.control.feature.events.domain.usecase.ObserveEventsExportStatusUseCase
 import studio.acmenra.control.feature.events.domain.usecase.ObserveEventsFeedUseCase
 import studio.acmenra.control.feature.events.presentation.components.EventsListPresentationState
+import studio.acmenra.control.feature.events.presentation.components.EventsViewportSnapshot
+import studio.acmenra.control.feature.events.presentation.components.ExitingEventRecord
 import studio.acmenra.control.feature.events.presentation.components.OffscreenQueueState
 import studio.acmenra.control.feature.events.presentation.components.PendingNewerFlushContext
 import studio.acmenra.control.feature.events.presentation.components.PendingNewerFlushReason
+import studio.acmenra.control.feature.events.presentation.components.buildLivePresentationPlan
+import studio.acmenra.control.feature.events.presentation.components.mergeExitingEvents
 import studio.acmenra.control.feature.events.presentation.platform.ExportFileSaver
 import studio.acmenra.control.feature.events.presentation.util.EventDateDisplayFormatter
 import kotlin.test.AfterTest
@@ -1446,11 +1450,13 @@ class EventsReviewFixesTests {
                     asOfSequence = 11L,
                     visibleEvents = listOf(event2, event1),
                     realtimeOverlay = overlayWithEvent2,
-                    feedDelta =
-                        EventsFeedDelta(
-                            batchId = 1L,
-                            tenantSequence = 11L,
-                            createdEventIds = listOf(event2.id),
+                    pendingDeltas =
+                        listOf(
+                            EventsFeedDelta(
+                                batchId = 1L,
+                                tenantSequence = 11L,
+                                createdEventIds = listOf(event2.id),
+                            ),
                         ),
                 ),
             )
@@ -1484,7 +1490,7 @@ class EventsReviewFixesTests {
                     visibleEvents = listOf(event2, event1),
                     realtimeOverlay = overlayWithEvent3Pending,
                     pendingNewerCount = 1,
-                    feedDelta = null,
+                    pendingDeltas = emptyList(),
                 ),
             )
             runCurrent()
@@ -1517,11 +1523,13 @@ class EventsReviewFixesTests {
                     visibleEvents = listOf(event3, event2, event1),
                     realtimeOverlay = overlayWithEvent3Integrated,
                     pendingNewerCount = 0,
-                    feedDelta =
-                        EventsFeedDelta(
-                            batchId = 2L,
-                            tenantSequence = 12L,
-                            createdEventIds = listOf(event3.id),
+                    pendingDeltas =
+                        listOf(
+                            EventsFeedDelta(
+                                batchId = 2L,
+                                tenantSequence = 12L,
+                                createdEventIds = listOf(event3.id),
+                            ),
                         ),
                 ),
             )
@@ -1561,11 +1569,13 @@ class EventsReviewFixesTests {
                 initialFeed.copy(
                     asOfSequence = 11L,
                     visibleEvents = listOf(event2, event1),
-                    feedDelta =
-                        EventsFeedDelta(
-                            batchId = 1L,
-                            tenantSequence = 11L,
-                            createdEventIds = listOf(event2.id),
+                    pendingDeltas =
+                        listOf(
+                            EventsFeedDelta(
+                                batchId = 1L,
+                                tenantSequence = 11L,
+                                createdEventIds = listOf(event2.id),
+                            ),
                         ),
                 ),
             )
@@ -1586,7 +1596,7 @@ class EventsReviewFixesTests {
                 initialFeed.copy(
                     asOfSequence = 12L,
                     visibleEvents = listOf(event3, event2, event1),
-                    feedDelta = null,
+                    pendingDeltas = emptyList(),
                 ),
             )
             runCurrent()
@@ -1601,11 +1611,13 @@ class EventsReviewFixesTests {
                 initialFeed.copy(
                     asOfSequence = 13L,
                     visibleEvents = listOf(event3, event2, event1),
-                    feedDelta =
-                        EventsFeedDelta(
-                            batchId = 1L, // stale batchId <= 1L
-                            tenantSequence = 13L,
-                            createdEventIds = listOf(event3.id),
+                    pendingDeltas =
+                        listOf(
+                            EventsFeedDelta(
+                                batchId = 1L, // stale batchId <= 1L
+                                tenantSequence = 13L,
+                                createdEventIds = listOf(event3.id),
+                            ),
                         ),
                 ),
             )
@@ -1764,11 +1776,13 @@ class EventsReviewFixesTests {
                 initialFeed.copy(
                     asOfSequence = 11L,
                     visibleEvents = listOf(event2, event1),
-                    feedDelta =
-                        EventsFeedDelta(
-                            batchId = 5L,
-                            tenantSequence = 11L,
-                            createdEventIds = listOf(event2.id),
+                    pendingDeltas =
+                        listOf(
+                            EventsFeedDelta(
+                                batchId = 5L,
+                                tenantSequence = 11L,
+                                createdEventIds = listOf(event2.id),
+                            ),
                         ),
                 ),
             )
@@ -1781,7 +1795,7 @@ class EventsReviewFixesTests {
                 initialFeed.copy(
                     asOfSequence = 11L,
                     visibleEvents = listOf(event2, event1),
-                    feedDelta = null,
+                    pendingDeltas = emptyList(),
                 ),
             )
             runCurrent()
@@ -1795,11 +1809,13 @@ class EventsReviewFixesTests {
                 initialFeed.copy(
                     asOfSequence = 12L,
                     visibleEvents = listOf(event3, event2, event1),
-                    feedDelta =
-                        EventsFeedDelta(
-                            batchId = 4L,
-                            tenantSequence = 12L,
-                            createdEventIds = listOf(event3.id),
+                    pendingDeltas =
+                        listOf(
+                            EventsFeedDelta(
+                                batchId = 4L,
+                                tenantSequence = 12L,
+                                createdEventIds = listOf(event3.id),
+                            ),
                         ),
                 ),
             )
@@ -1814,11 +1830,13 @@ class EventsReviewFixesTests {
                 initialFeed.copy(
                     asOfSequence = 13L,
                     visibleEvents = listOf(event3, event2, event1),
-                    feedDelta =
-                        EventsFeedDelta(
-                            batchId = 5L,
-                            tenantSequence = 13L,
-                            createdEventIds = listOf(event3.id),
+                    pendingDeltas =
+                        listOf(
+                            EventsFeedDelta(
+                                batchId = 5L,
+                                tenantSequence = 13L,
+                                createdEventIds = listOf(event3.id),
+                            ),
                         ),
                 ),
             )
@@ -1833,11 +1851,13 @@ class EventsReviewFixesTests {
                 initialFeed.copy(
                     asOfSequence = 14L,
                     visibleEvents = listOf(event4, event3, event2, event1),
-                    feedDelta =
-                        EventsFeedDelta(
-                            batchId = 6L,
-                            tenantSequence = 14L,
-                            createdEventIds = listOf(event4.id),
+                    pendingDeltas =
+                        listOf(
+                            EventsFeedDelta(
+                                batchId = 6L,
+                                tenantSequence = 14L,
+                                createdEventIds = listOf(event4.id),
+                            ),
                         ),
                 ),
             )
@@ -1845,6 +1865,100 @@ class EventsReviewFixesTests {
             assertEquals(listOf("ev-4"), vm.state.value.liveCreatedIds)
             assertEquals(6L, vm.state.value.liveBatchId)
         }
+
+    @Test
+    fun testBuildLivePresentationPlanAtTopSingleItem() {
+        val plan =
+            buildLivePresentationPlan(
+                batchId = 1L,
+                createdEventIds = listOf("ev-1"),
+                removedEventIds = emptySet(),
+                events = listOf(sampleEvent("ev-1")),
+                viewportSnapshot = EventsViewportSnapshot(isAtTop = true),
+                animatedEventIds = emptySet(),
+            )
+
+        assertEquals(1L, plan.batchId)
+        assertEquals(setOf("ev-1"), plan.enterEventIds)
+        assertEquals(emptyList(), plan.offscreenEventIds)
+        assertEquals(mapOf("ev-1" to 0), plan.cascadeIndices)
+        assertEquals(1, plan.batchSize)
+    }
+
+    @Test
+    fun testBuildLivePresentationPlanCascadeForFewItems() {
+        val plan =
+            buildLivePresentationPlan(
+                batchId = 2L,
+                createdEventIds = listOf("ev-1", "ev-2", "ev-3"),
+                removedEventIds = emptySet(),
+                events = listOf(sampleEvent("ev-1"), sampleEvent("ev-2"), sampleEvent("ev-3")),
+                viewportSnapshot = EventsViewportSnapshot(isAtTop = true),
+                animatedEventIds = emptySet(),
+            )
+
+        assertEquals(setOf("ev-1", "ev-2", "ev-3"), plan.enterEventIds)
+        assertEquals(
+            mapOf("ev-1" to 0, "ev-2" to 1, "ev-3" to 2),
+            plan.cascadeIndices,
+        )
+        assertEquals(3, plan.batchSize)
+    }
+
+    @Test
+    fun testBuildLivePresentationPlanLargeBatchDisablesCascade() {
+        val ids = (1..6).map { "ev-$it" }
+        val plan =
+            buildLivePresentationPlan(
+                batchId = 3L,
+                createdEventIds = ids,
+                removedEventIds = emptySet(),
+                events = ids.map { sampleEvent(it) },
+                viewportSnapshot = EventsViewportSnapshot(isAtTop = true),
+                animatedEventIds = emptySet(),
+            )
+
+        assertEquals(ids.toSet(), plan.enterEventIds)
+        // More than 4 items: cascadeMap is empty to animate simultaneously
+        assertTrue(plan.cascadeIndices.isEmpty())
+        assertEquals(6, plan.batchSize)
+    }
+
+    @Test
+    fun testBuildLivePresentationPlanOffscreenWhenNotAtTop() {
+        val plan =
+            buildLivePresentationPlan(
+                batchId = 4L,
+                createdEventIds = listOf("ev-new-1", "ev-new-2"),
+                removedEventIds = emptySet(),
+                events = listOf(sampleEvent("ev-old-1")),
+                viewportSnapshot =
+                    EventsViewportSnapshot(
+                        firstVisibleItemIndex = 5,
+                        firstVisibleItemScrollOffset = 100,
+                        visibleItemIds = setOf("ev-old-1"),
+                        isAtTop = false,
+                    ),
+                animatedEventIds = emptySet(),
+            )
+
+        assertTrue(plan.enterEventIds.isEmpty())
+        assertEquals(listOf("ev-new-1", "ev-new-2"), plan.offscreenEventIds)
+    }
+
+    @Test
+    fun testMergeExitingEventsPreservesCorrectChronologicalPosition() {
+        val event1 = sampleEvent("ev-1").copy(occurredAt = Instant.parse("2026-03-01T12:00:00Z"))
+        val event2 = sampleEvent("ev-2").copy(occurredAt = Instant.parse("2026-03-01T10:00:00Z"))
+        val exitingEvent = sampleEvent("ev-exiting").copy(occurredAt = Instant.parse("2026-03-01T11:00:00Z"))
+
+        val currentEvents = listOf(event1, event2)
+        val exitingMap = mapOf("ev-exiting" to ExitingEventRecord(event = exitingEvent, generation = 1L))
+
+        val merged = mergeExitingEvents(currentEvents, exitingMap)
+        assertEquals(3, merged.size)
+        assertEquals(listOf("ev-1", "ev-exiting", "ev-2"), merged.map { it.id })
+    }
 
     private fun sampleEvent(
         id: String,

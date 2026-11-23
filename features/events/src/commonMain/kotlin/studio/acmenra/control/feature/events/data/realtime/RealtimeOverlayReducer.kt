@@ -6,6 +6,7 @@ import studio.acmenra.control.feature.events.domain.model.EventsFilter
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
 import studio.acmenra.control.feature.events.domain.model.OverlayEntry
 import studio.acmenra.control.feature.events.domain.model.OverlayMembership
+import studio.acmenra.control.feature.events.domain.model.RealtimeEventOrigin
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 
 object RealtimeOverlayReducer {
@@ -176,6 +177,8 @@ object RealtimeOverlayReducer {
                 }
             }
 
+        val origin =
+            existingEntry?.origin ?: if (isEventCreated) RealtimeEventOrigin.CREATED else RealtimeEventOrigin.UPDATED
         val newEntries = currentOverlay.entries.toMutableMap()
         newEntries[effectiveEvent.id] =
             OverlayEntry(
@@ -183,6 +186,7 @@ object RealtimeOverlayReducer {
                 event = effectiveEvent,
                 eventVersion = effectiveEvent.eventVersion,
                 membership = membership,
+                origin = origin,
             )
 
         val newOverlay = currentOverlay.copy(entries = newEntries)

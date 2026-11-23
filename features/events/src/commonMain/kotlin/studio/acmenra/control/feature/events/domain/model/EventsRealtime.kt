@@ -7,11 +7,17 @@ enum class OverlayMembership {
     PENDING_HISTORY,
 }
 
+enum class RealtimeEventOrigin {
+    CREATED,
+    UPDATED,
+}
+
 data class OverlayEntry(
     val eventId: String,
     val event: Event,
     val eventVersion: Long,
     val membership: OverlayMembership,
+    val origin: RealtimeEventOrigin = RealtimeEventOrigin.CREATED,
 )
 
 data class RealtimeOverlay(

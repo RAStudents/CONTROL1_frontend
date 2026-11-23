@@ -89,6 +89,7 @@ import studio.acmenra.control.feature.events.domain.model.EventValidity
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
 import studio.acmenra.control.feature.events.domain.model.EventsExportFormatPreset
 import studio.acmenra.control.feature.events.domain.model.LocationFilterGroup
+import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.presentation.components.EventViewer
 import studio.acmenra.control.feature.events.presentation.components.EventsDatePickerDialog
 import studio.acmenra.control.feature.events.presentation.components.EventsEmptyState
@@ -140,6 +141,13 @@ fun EventsRouteContent(
         }
     }
 
+    LaunchedEffect(state.infoNotice) {
+        state.infoNotice?.let { notice ->
+            noticeController.show(notice)
+            viewModel.dismissInfoNotice()
+        }
+    }
+
     EventsScreen(
         state = state,
         onToggleExportMode = viewModel::toggleExportMode,
@@ -159,6 +167,8 @@ fun EventsRouteContent(
         onLoadNextPage = viewModel::loadNextPage,
         onRefresh = viewModel::refresh,
         onViewportAtTop = viewModel::onViewportAtTop,
+        onFlushPendingNewer = viewModel::flushPendingNewer,
+        onLiveDeltaConsumed = viewModel::onLiveDeltaConsumed,
         onSelectEvent = viewModel::selectEvent,
         onCloseViewerCompact = viewModel::closeViewerCompact,
         onAcknowledgeEvent = viewModel::acknowledgeEvent,
@@ -209,6 +219,8 @@ fun EventsScreen(
     onOpenFilterDialog: () -> Unit,
     onCloseFilterDialog: () -> Unit,
     modifier: Modifier = Modifier,
+    onFlushPendingNewer: (suspend (List<String>) -> PendingNewerFlushResult)? = null,
+    onLiveDeltaConsumed: ((Long) -> Unit)? = null,
     onSearchIdCommitted: ((String) -> Unit)? = null,
     onResetDate: (() -> Unit)? = null,
     onEventTypesApplied: ((Set<String>) -> Unit)? = null,
@@ -297,6 +309,8 @@ fun EventsScreen(
                     onAcknowledgeEvent = onAcknowledgeEvent,
                     onLoadNextPage = onLoadNextPage,
                     onViewportAtTop = onViewportAtTop,
+                    onFlushPendingNewer = onFlushPendingNewer,
+                    onLiveDeltaConsumed = onLiveDeltaConsumed,
                     onCopyEventId = onCopyEventId,
                     onRequestMarkErroneous = onRequestMarkErroneous,
                     onConfirmMarkErroneous = onConfirmMarkErroneous,
@@ -327,6 +341,8 @@ fun EventsScreen(
                     onAcknowledgeEvent = onAcknowledgeEvent,
                     onLoadNextPage = onLoadNextPage,
                     onViewportAtTop = onViewportAtTop,
+                    onFlushPendingNewer = onFlushPendingNewer,
+                    onLiveDeltaConsumed = onLiveDeltaConsumed,
                     onCopyEventId = onCopyEventId,
                     onRequestMarkErroneous = onRequestMarkErroneous,
                     onConfirmMarkErroneous = onConfirmMarkErroneous,
@@ -360,6 +376,8 @@ fun EventsScreen(
                     onAcknowledgeEvent = onAcknowledgeEvent,
                     onLoadNextPage = onLoadNextPage,
                     onViewportAtTop = onViewportAtTop,
+                    onFlushPendingNewer = onFlushPendingNewer,
+                    onLiveDeltaConsumed = onLiveDeltaConsumed,
                     onCopyEventId = onCopyEventId,
                     onRequestMarkErroneous = onRequestMarkErroneous,
                     onConfirmMarkErroneous = onConfirmMarkErroneous,
@@ -434,6 +452,8 @@ private fun WideEventsLayout(
     onDownloadExport: (String) -> Unit,
     onOpenVideo: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
+    onFlushPendingNewer: (suspend (List<String>) -> PendingNewerFlushResult)? = null,
+    onLiveDeltaConsumed: ((Long) -> Unit)? = null,
     listState: LazyListState = rememberLazyListState(),
     presentationState: EventsListPresentationState = remember(state.feedScopeKey) { EventsListPresentationState() },
     onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
@@ -519,6 +539,8 @@ private fun WideEventsLayout(
                     onAcknowledgeEvent = onAcknowledgeEvent,
                     onLoadNextPage = onLoadNextPage,
                     onViewportAtTop = onViewportAtTop,
+                    onFlushPendingNewer = onFlushPendingNewer,
+                    onLiveDeltaConsumed = onLiveDeltaConsumed,
                     onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                     presentationState = presentationState,
                 )
@@ -592,6 +614,8 @@ private fun MediumEventsLayout(
     onDownloadExport: (String) -> Unit,
     onOpenVideo: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
+    onFlushPendingNewer: (suspend (List<String>) -> PendingNewerFlushResult)? = null,
+    onLiveDeltaConsumed: ((Long) -> Unit)? = null,
     listState: LazyListState = rememberLazyListState(),
     presentationState: EventsListPresentationState = remember(state.feedScopeKey) { EventsListPresentationState() },
     onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
@@ -663,6 +687,8 @@ private fun MediumEventsLayout(
                     onAcknowledgeEvent = onAcknowledgeEvent,
                     onLoadNextPage = onLoadNextPage,
                     onViewportAtTop = onViewportAtTop,
+                    onFlushPendingNewer = onFlushPendingNewer,
+                    onLiveDeltaConsumed = onLiveDeltaConsumed,
                     onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                     presentationState = presentationState,
                 )
@@ -757,6 +783,8 @@ private fun CompactEventsLayout(
     onDownloadExport: (String) -> Unit,
     onOpenVideo: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
+    onFlushPendingNewer: (suspend (List<String>) -> PendingNewerFlushResult)? = null,
+    onLiveDeltaConsumed: ((Long) -> Unit)? = null,
     listState: LazyListState = rememberLazyListState(),
     presentationState: EventsListPresentationState = remember(state.feedScopeKey) { EventsListPresentationState() },
     onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
@@ -863,6 +891,8 @@ private fun CompactEventsLayout(
                 onAcknowledgeEvent = onAcknowledgeEvent,
                 onLoadNextPage = onLoadNextPage,
                 onViewportAtTop = onViewportAtTop,
+                onFlushPendingNewer = onFlushPendingNewer,
+                onLiveDeltaConsumed = onLiveDeltaConsumed,
                 onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                 presentationState = presentationState,
             )

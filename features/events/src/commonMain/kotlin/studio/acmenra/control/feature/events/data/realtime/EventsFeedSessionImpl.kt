@@ -41,6 +41,7 @@ import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionStat
 import studio.acmenra.control.feature.events.domain.repository.EventsConnectivityProvider
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
+import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.domain.repository.RebootstrapState
 import kotlin.random.Random
 
@@ -745,7 +746,19 @@ class EventsFeedSessionImpl(
     }
 
     override fun onViewportAtTop() {
-        processor.dispatch(SessionCommand.ViewportAtTop)
+        processor.dispatch(SessionCommand.ViewportAtTop())
+    }
+
+    override suspend fun flushPendingNewer(expectedEventIds: List<String>): PendingNewerFlushResult {
+        val response = CompletableDeferred<PendingNewerFlushResult>()
+        processor.dispatch(SessionCommand.ViewportAtTop(expectedEventIds, response))
+        return response.await()
+    }
+
+    override suspend fun acknowledgeDeltasThrough(batchId: Long) {
+        val response = CompletableDeferred<Unit>()
+        processor.dispatch(SessionCommand.AcknowledgeFeedDeltas(batchId, response))
+        response.await()
     }
 
     override fun markOptimisticAckPending(eventId: String) {

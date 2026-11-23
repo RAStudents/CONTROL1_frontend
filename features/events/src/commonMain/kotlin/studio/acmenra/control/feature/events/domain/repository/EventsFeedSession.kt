@@ -20,6 +20,11 @@ interface EventsFeedSession {
 
     fun onViewportAtTop()
 
+    suspend fun flushPendingNewer(expectedEventIds: List<String> = emptyList()): PendingNewerFlushResult =
+        PendingNewerFlushResult(0L, null, emptyList(), emptyList())
+
+    suspend fun acknowledgeDeltasThrough(batchId: Long) {}
+
     fun markOptimisticAckPending(eventId: String)
 
     fun clearOptimisticAckPending(eventId: String)

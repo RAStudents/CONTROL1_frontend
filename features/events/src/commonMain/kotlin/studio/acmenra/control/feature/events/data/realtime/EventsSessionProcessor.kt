@@ -27,10 +27,13 @@ import studio.acmenra.control.feature.events.domain.model.EventsSummary
 import studio.acmenra.control.feature.events.domain.model.OverlayEntry
 import studio.acmenra.control.feature.events.domain.model.OverlayMembership
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
+import studio.acmenra.control.feature.events.domain.model.RealtimeEventOrigin
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedDelta
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
+import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.domain.repository.RebootstrapState
+import studio.acmenra.control.feature.events.domain.repository.appendFeedDelta
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
@@ -132,7 +135,15 @@ sealed interface SessionCommand {
         val sequence: Long,
     ) : SessionCommand
 
-    data object ViewportAtTop : SessionCommand
+    data class ViewportAtTop(
+        val expectedEventIds: List<String> = emptyList(),
+        val response: CompletableDeferred<PendingNewerFlushResult>? = null,
+    ) : SessionCommand
+
+    data class AcknowledgeFeedDeltas(
+        val batchId: Long,
+        val response: CompletableDeferred<Unit>? = null,
+    ) : SessionCommand
 
     data object Close : SessionCommand
 }
@@ -246,6 +257,8 @@ class EventsSessionProcessor(
                         when (command) {
                             is SessionCommand.InstallBootstrap -> command.response.cancel(e)
                             is SessionCommand.NextReplayGeneration -> command.response.cancel(e)
+                            is SessionCommand.ViewportAtTop -> command.response?.cancel(e)
+                            is SessionCommand.AcknowledgeFeedDeltas -> command.response?.cancel(e)
                             else -> Unit
                         }
                         throw e
@@ -253,6 +266,8 @@ class EventsSessionProcessor(
                         when (command) {
                             is SessionCommand.InstallBootstrap -> command.response.completeExceptionally(e)
                             is SessionCommand.NextReplayGeneration -> command.response.completeExceptionally(e)
+                            is SessionCommand.ViewportAtTop -> command.response?.completeExceptionally(e)
+                            is SessionCommand.AcknowledgeFeedDeltas -> command.response?.completeExceptionally(e)
                             else -> Unit
                         }
                         // Prevent uncaught exceptions from killing the command processing loop
@@ -285,6 +300,17 @@ class EventsSessionProcessor(
                     remaining.response.completeExceptionally(
                         kotlinx.coroutines.CancellationException("Processor closed"),
                     )
+                is SessionCommand.ViewportAtTop ->
+                    remaining.response?.complete(
+                        PendingNewerFlushResult(
+                            batchId = 0L,
+                            snapshotId = null,
+                            materializedEventIds = emptyList(),
+                            createdEventIds = emptyList(),
+                        ),
+                    )
+                is SessionCommand.AcknowledgeFeedDeltas ->
+                    remaining.response?.complete(Unit)
                 else -> Unit
             }
         }
@@ -324,7 +350,7 @@ class EventsSessionProcessor(
                             asOfSequence = 0L,
                             pendingNewerCount = 0,
                             pendingHistoryCount = 0,
-                            feedDelta = null,
+                            pendingDeltas = emptyList(),
                         )
                     }
                     if (wasRead) {
@@ -348,7 +374,6 @@ class EventsSessionProcessor(
                                 _state.update {
                                     it.copy(
                                         connectionState = RealtimeConnectionState.FAILED,
-                                        feedDelta = null,
                                     )
                                 }
                         }
@@ -472,6 +497,17 @@ class EventsSessionProcessor(
                     command.response.completeExceptionally(
                         IllegalStateException("Processor is terminal: access invalidated"),
                     )
+                is SessionCommand.ViewportAtTop ->
+                    command.response?.complete(
+                        PendingNewerFlushResult(
+                            batchId = 0L,
+                            snapshotId = null,
+                            materializedEventIds = emptyList(),
+                            createdEventIds = emptyList(),
+                        ),
+                    )
+                is SessionCommand.AcknowledgeFeedDeltas ->
+                    command.response?.complete(Unit)
                 else -> Unit
             }
             return
@@ -480,7 +516,7 @@ class EventsSessionProcessor(
         if (accessFence.value.denied && command !is SessionCommand.AccessUpdated && command !is SessionCommand.Close) {
             when (command) {
                 is SessionCommand.ConnectionStateChanged -> {
-                    _state.update { it.copy(connectionState = command.state, feedDelta = null) }
+                    _state.update { it.copy(connectionState = command.state) }
                 }
                 is SessionCommand.InstallBootstrap -> {
                     command.response.complete(BootstrapApplyResult.Stale)
@@ -489,6 +525,19 @@ class EventsSessionProcessor(
                     command.response.completeExceptionally(
                         IllegalStateException("Read access is denied by latch"),
                     )
+                }
+                is SessionCommand.ViewportAtTop -> {
+                    command.response?.complete(
+                        PendingNewerFlushResult(
+                            batchId = 0L,
+                            snapshotId = null,
+                            materializedEventIds = emptyList(),
+                            createdEventIds = emptyList(),
+                        ),
+                    )
+                }
+                is SessionCommand.AcknowledgeFeedDeltas -> {
+                    command.response?.complete(Unit)
                 }
                 else -> {
                     // Ignore all other commands that could mutate or republish event data
@@ -509,7 +558,6 @@ class EventsSessionProcessor(
                         it.copy(
                             isInitialLoading = false,
                             initialLoadError = command.error,
-                            feedDelta = null,
                         )
                     }
                 }
@@ -519,12 +567,11 @@ class EventsSessionProcessor(
                     it.copy(
                         isLoadingNextPage = false,
                         paginationError = command.error,
-                        feedDelta = null,
                     )
                 }
             }
             is SessionCommand.SetLoadingNextPage -> {
-                _state.update { it.copy(isLoadingNextPage = command.isLoading, feedDelta = null) }
+                _state.update { it.copy(isLoadingNextPage = command.isLoading) }
             }
             is SessionCommand.WsConnectionActivated -> {
                 if (command.connectionId > activeConnectionId) {
@@ -550,7 +597,6 @@ class EventsSessionProcessor(
                             replayId = command.initialReplayId,
                             asOfSequence = command.afterSequence,
                             connectionState = RealtimeConnectionState.CONNECTING,
-                            feedDelta = null,
                         )
                     }
                     val earlyFrames = earlyFramesBuffer.remove(command.connectionId)
@@ -577,20 +623,20 @@ class EventsSessionProcessor(
                 }
             }
             is SessionCommand.ConnectionStateChanged -> {
-                _state.update { it.copy(connectionState = command.state, feedDelta = null) }
+                _state.update { it.copy(connectionState = command.state) }
             }
             is SessionCommand.RebootstrapStateChanged -> {
-                _state.update { it.copy(rebootstrapState = command.rebootstrapState, feedDelta = null) }
+                _state.update { it.copy(rebootstrapState = command.rebootstrapState) }
             }
             is SessionCommand.OptimisticAckPending -> {
                 val newPending = currentOverlay.pendingAckIds + command.eventId
                 currentOverlay = currentOverlay.copy(pendingAckIds = newPending)
-                _state.update { it.copy(realtimeOverlay = currentOverlay, feedDelta = null) }
+                _state.update { it.copy(realtimeOverlay = currentOverlay) }
             }
             is SessionCommand.ClearOptimisticAckPending -> {
                 val newPending = currentOverlay.pendingAckIds - command.eventId
                 currentOverlay = currentOverlay.copy(pendingAckIds = newPending)
-                _state.update { it.copy(realtimeOverlay = currentOverlay, feedDelta = null) }
+                _state.update { it.copy(realtimeOverlay = currentOverlay) }
             }
             is SessionCommand.AcknowledgeSucceeded -> handleAcknowledgeSucceeded(command.event)
             is SessionCommand.EventMutationApplied -> handleEventMutationApplied(command.event)
@@ -641,7 +687,7 @@ class EventsSessionProcessor(
                             pendingNewerCount = 0,
                             pendingHistoryCount = 0,
                             snapshotId = null,
-                            feedDelta = null,
+                            pendingDeltas = emptyList(),
                         )
                     }
                     if (wasRead) {
@@ -649,10 +695,10 @@ class EventsSessionProcessor(
                     }
                 } else {
                     if (!wasRead && command.access.eventsRead) {
-                        _state.update { it.copy(access = command.access, feedDelta = null) }
+                        _state.update { it.copy(access = command.access) }
                         onEventsReadGranted()
                     } else {
-                        _state.update { it.copy(access = command.access, feedDelta = null) }
+                        _state.update { it.copy(access = command.access) }
                     }
                 }
             }
@@ -662,7 +708,6 @@ class EventsSessionProcessor(
                     it.copy(
                         asOfSequence = sequenceProcessor.currentSequence,
                         replayId = command.replayId,
-                        feedDelta = null,
                     )
                 }
             }
@@ -674,7 +719,7 @@ class EventsSessionProcessor(
                             bufferReplayId = res.replayId
                             rebootstrapBuffer.clear()
                         }
-                        _state.update { it.copy(replayId = res.replayId, feedDelta = null) }
+                        _state.update { it.copy(replayId = res.replayId) }
                         command.response.complete(res)
                     }
                     is ReplayGenerationResult.RequiresFreshAuth -> {
@@ -684,7 +729,7 @@ class EventsSessionProcessor(
                             bufferReplayId = res.initialReplayId
                             rebootstrapBuffer.clear()
                         }
-                        _state.update { it.copy(replayId = res.initialReplayId, feedDelta = null) }
+                        _state.update { it.copy(replayId = res.initialReplayId) }
                         onFreshAuthNeeded?.invoke(sequenceProcessor.currentSequence, res.initialReplayId)
                         command.response.complete(res)
                     }
@@ -692,29 +737,57 @@ class EventsSessionProcessor(
             }
             is SessionCommand.ResetSequence -> {
                 sequenceProcessor.resetSequence(command.sequence)
-                _state.update { it.copy(asOfSequence = sequenceProcessor.currentSequence, feedDelta = null) }
+                _state.update { it.copy(asOfSequence = sequenceProcessor.currentSequence) }
             }
             is SessionCommand.ViewportAtTop -> {
-                if (!_state.value.access.eventsRead || accessFence.value.denied) return
+                if (!_state.value.access.eventsRead || accessFence.value.denied) {
+                    command.response?.complete(
+                        PendingNewerFlushResult(
+                            batchId = 0L,
+                            snapshotId = null,
+                            materializedEventIds = emptyList(),
+                            createdEventIds = emptyList(),
+                        ),
+                    )
+                    return
+                }
                 // User navigated to top: integrate all pending newer events into visible feed
-                val pendingNewerIds =
+                val pendingNewerEntries =
                     currentOverlay.entries
                         .filterValues { it.membership == OverlayMembership.PENDING_NEWER }
+
+                val createdIds =
+                    pendingNewerEntries
+                        .filterValues { it.origin == RealtimeEventOrigin.CREATED }
                         .keys
                         .toList()
+
+                val updatedIds =
+                    pendingNewerEntries
+                        .filterValues { it.origin == RealtimeEventOrigin.UPDATED }
+                        .keys
+                        .toList()
+
+                val allPendingIds = pendingNewerEntries.keys.toList()
+
                 currentOverlay = RealtimeOverlayReducer.integratePendingNewer(currentOverlay)
                 val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
                 val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
+
+                val deltaBatchId = if (allPendingIds.isNotEmpty()) ++feedDeltaBatchCounter else 0L
                 val delta =
-                    if (pendingNewerIds.isNotEmpty()) {
+                    if (allPendingIds.isNotEmpty()) {
                         EventsFeedDelta(
-                            batchId = ++feedDeltaBatchCounter,
+                            batchId = deltaBatchId,
                             tenantSequence = sequenceProcessor.currentSequence,
-                            createdEventIds = pendingNewerIds,
+                            createdEventIds = createdIds,
+                            updatedEventIds = updatedIds,
+                            removedEventIds = emptyList(),
                         )
                     } else {
                         null
                     }
+
                 _state.update {
                     it.copy(
                         visibleEvents = visible,
@@ -722,9 +795,25 @@ class EventsSessionProcessor(
                         snapshotTotalCount = currentTotalCount,
                         pendingNewerCount = newerCount,
                         pendingHistoryCount = historyCount,
-                        feedDelta = delta,
+                        pendingDeltas = appendFeedDelta(it.pendingDeltas, delta),
                     )
                 }
+
+                command.response?.complete(
+                    PendingNewerFlushResult(
+                        batchId = deltaBatchId,
+                        snapshotId = _state.value.snapshotId,
+                        materializedEventIds = allPendingIds,
+                        createdEventIds = createdIds,
+                    ),
+                )
+            }
+            is SessionCommand.AcknowledgeFeedDeltas -> {
+                _state.update { current ->
+                    val remaining = current.pendingDeltas.filter { it.batchId > command.batchId }
+                    current.copy(pendingDeltas = remaining)
+                }
+                command.response?.complete(Unit)
             }
             is SessionCommand.Close -> {
                 commandChannel.close()
@@ -986,7 +1075,7 @@ class EventsSessionProcessor(
                 summary = candidateSummary,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
-                feedDelta = null,
+                pendingDeltas = emptyList(),
             )
         }
 
@@ -1015,13 +1104,13 @@ class EventsSessionProcessor(
         snapshotId: String?,
     ) {
         if (!_state.value.access.eventsRead || accessFence.value.denied) {
-            _state.update { it.copy(isLoadingNextPage = false, feedDelta = null) }
+            _state.update { it.copy(isLoadingNextPage = false) }
             return
         }
 
         if (snapshotId != null && snapshotId != _state.value.snapshotId) {
             // Discard page from outdated snapshot
-            _state.update { it.copy(isLoadingNextPage = false, feedDelta = null) }
+            _state.update { it.copy(isLoadingNextPage = false) }
             return
         }
 
@@ -1031,7 +1120,6 @@ class EventsSessionProcessor(
                     isLoadingNextPage = false,
                     paginationError =
                         EventsPaginationError.Server("Contract violation: hasMore is true but nextCursor is null"),
-                    feedDelta = null,
                 )
             }
             return
@@ -1052,7 +1140,6 @@ class EventsSessionProcessor(
                 paginationError = null,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
-                feedDelta = null,
             )
         }
     }
@@ -1129,7 +1216,6 @@ class EventsSessionProcessor(
                 snapshotTotalCount = currentTotalCount,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
-                feedDelta = null,
             )
         }
     }
@@ -1212,7 +1298,6 @@ class EventsSessionProcessor(
                 snapshotTotalCount = currentTotalCount,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
-                feedDelta = null,
             )
         }
     }
@@ -1239,7 +1324,7 @@ class EventsSessionProcessor(
                     asOfSequence = 0L,
                     pendingNewerCount = 0,
                     pendingHistoryCount = 0,
-                    feedDelta = null,
+                    pendingDeltas = emptyList(),
                 )
             }
             return
@@ -1250,7 +1335,7 @@ class EventsSessionProcessor(
                 "TOKEN_EXPIRED" -> onTokenRefreshNeeded()
                 "SESSION_REVOKED" -> onSessionRevoked()
                 else -> {
-                    _state.update { it.copy(connectionState = RealtimeConnectionState.FAILED, feedDelta = null) }
+                    _state.update { it.copy(connectionState = RealtimeConnectionState.FAILED) }
                 }
             }
             return
@@ -1316,7 +1401,7 @@ class EventsSessionProcessor(
                         maxClosedReplayGeneration = maxOf(maxClosedReplayGeneration, sequenceProcessor.currentReplayId)
                         when (val genResult = sequenceProcessor.tryNextReplayGeneration()) {
                             is ReplayGenerationResult.Next -> {
-                                _state.update { it.copy(replayId = genResult.replayId, feedDelta = null) }
+                                _state.update { it.copy(replayId = genResult.replayId) }
                                 onSendReplayRequest(genResult.replayId, sequenceProcessor.currentSequence)
                             }
                             is ReplayGenerationResult.RequiresFreshAuth -> {
@@ -1325,7 +1410,7 @@ class EventsSessionProcessor(
                                     sequenceProcessor.currentSequence,
                                     genResult.initialReplayId,
                                 )
-                                _state.update { it.copy(replayId = genResult.initialReplayId, feedDelta = null) }
+                                _state.update { it.copy(replayId = genResult.initialReplayId) }
                                 onFreshAuthNeeded?.invoke(sequenceProcessor.currentSequence, genResult.initialReplayId)
                             }
                         }
@@ -1358,7 +1443,7 @@ class EventsSessionProcessor(
                     return
                 }
                 if (frame.frame.replayEmpty) {
-                    _state.update { it.copy(connectionState = RealtimeConnectionState.CONNECTED, feedDelta = null) }
+                    _state.update { it.copy(connectionState = RealtimeConnectionState.CONNECTED) }
                 }
             }
             is IncomingWsFrame.ReplayCompleted -> {
@@ -1373,7 +1458,7 @@ class EventsSessionProcessor(
                     onSendReplayRequest(sequenceProcessor.currentReplayId, sequenceProcessor.currentSequence)
                     return
                 }
-                _state.update { it.copy(connectionState = RealtimeConnectionState.CONNECTED, feedDelta = null) }
+                _state.update { it.copy(connectionState = RealtimeConnectionState.CONNECTED) }
             }
             is IncomingWsFrame.HeartbeatAck -> {
                 if (frame.frame.replayId != sequenceProcessor.currentReplayId ||
@@ -1538,12 +1623,15 @@ class EventsSessionProcessor(
 
         val delta =
             if (createdIds.isNotEmpty() || updatedIds.isNotEmpty() || removedIds.isNotEmpty()) {
+                val distinctCreated = createdIds.distinct()
+                val distinctUpdated = updatedIds.distinct().filter { it !in distinctCreated }
+                val distinctRemoved = removedIds.distinct().filter { it !in distinctCreated && it !in distinctUpdated }
                 EventsFeedDelta(
                     batchId = ++feedDeltaBatchCounter,
                     tenantSequence = sequenceProcessor.currentSequence,
-                    createdEventIds = createdIds,
-                    updatedEventIds = updatedIds,
-                    removedEventIds = removedIds,
+                    createdEventIds = distinctCreated,
+                    updatedEventIds = distinctUpdated,
+                    removedEventIds = distinctRemoved,
                 )
             } else {
                 null
@@ -1559,7 +1647,7 @@ class EventsSessionProcessor(
                 replayId = sequenceProcessor.currentReplayId,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
-                feedDelta = delta,
+                pendingDeltas = appendFeedDelta(it.pendingDeltas, delta),
             )
         }
 

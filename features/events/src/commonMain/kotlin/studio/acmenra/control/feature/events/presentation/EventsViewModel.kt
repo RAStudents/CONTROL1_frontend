@@ -50,6 +50,7 @@ import studio.acmenra.control.feature.events.domain.model.LocationToggleState
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 import studio.acmenra.control.feature.events.domain.model.locationToggleState
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
+import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.domain.usecase.AcknowledgeEventUseCase
 import studio.acmenra.control.feature.events.domain.usecase.CreateEventsExportUseCase
 import studio.acmenra.control.feature.events.domain.usecase.DownloadEventsExportUseCase
@@ -349,8 +350,22 @@ class EventsViewModel(
                     if (isNewBatch) {
                         lastProcessedDeltaBatchId = batchId
                     }
-                    val liveCreated: List<String> = if (isNewBatch) delta!!.createdEventIds else emptyList()
-                    val liveRemoved: Set<String> = if (isNewBatch) delta!!.removedEventIds else emptySet()
+                    val liveCreated: List<String> =
+                        if (isNewBatch &&
+                            delta != null
+                        ) {
+                            delta.createdEventIds
+                        } else {
+                            emptyList()
+                        }
+                    val liveRemoved: Set<String> =
+                        if (isNewBatch &&
+                            delta != null
+                        ) {
+                            delta.removedEventIds.toSet()
+                        } else {
+                            emptySet()
+                        }
                     val newLiveBatchId = if (isNewBatch) batchId else _state.value.liveBatchId
 
                     _state.update { current ->
@@ -368,7 +383,7 @@ class EventsViewModel(
                                     emptyList()
                                 },
                             realtimeOverlay = if (canRead) feedState.realtimeOverlay else RealtimeOverlay(),
-                            asOfSequence = if (canRead) (feedState.asOfSequence ?: 0L) else 0L,
+                            asOfSequence = if (canRead) feedState.asOfSequence else 0L,
                             snapshotId = if (canRead) feedState.snapshotId else null,
                             feedScopeKey = feedScopeKey,
                             liveCreatedIds = liveCreated,
@@ -613,13 +628,23 @@ class EventsViewModel(
         feedSession?.onViewportAtTop()
     }
 
+    suspend fun flushPendingNewer(expectedEventIds: List<String> = emptyList()): PendingNewerFlushResult =
+        feedSession?.flushPendingNewer(expectedEventIds)
+            ?: PendingNewerFlushResult(0L, null, emptyList(), emptyList())
+
+    fun onLiveDeltaConsumed(batchId: Long) {
+        viewModelScope.launch {
+            feedSession?.acknowledgeDeltasThrough(batchId)
+        }
+    }
+
     fun onOffscreenLiveEventsDetected(
         count: Int,
         key: String,
     ) {
         _state.update {
             it.copy(
-                errorNotice =
+                infoNotice =
                     Notice.info(
                         title = Res.string.events_offscreen_notice_title,
                         key = key,
@@ -634,12 +659,6 @@ class EventsViewModel(
                 selectedEventId = eventId,
                 isViewerOpenInCompact = eventId != null,
             )
-        }
-        if (eventId != null) {
-            val event = _state.value.visibleEvents.firstOrNull { it.id == eventId }
-            if (event != null && event.canAcknowledge(_state.value.access)) {
-                acknowledgeEvent(event)
-            }
         }
     }
 
@@ -1315,6 +1334,10 @@ class EventsViewModel(
 
     fun dismissErrorNotice() {
         _state.update { it.copy(errorNotice = null) }
+    }
+
+    fun dismissInfoNotice() {
+        _state.update { it.copy(infoNotice = null) }
     }
 
     fun openFilterDialog() {

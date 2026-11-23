@@ -286,4 +286,63 @@ class EventsKeyboardNavigationTest {
             )
         assertFalse(handled)
     }
+
+    @Test
+    fun testCalculateScrollAdjustment_ItemWithinSafeBounds_ReturnsZero() {
+        val adjustment =
+            EventsKeyboardNavigationHelper.calculateScrollAdjustment(
+                itemTop = 200,
+                itemBottom = 300,
+                safeTopOffset = 44,
+                safeBottomOffset = 700,
+            )
+        assertEquals(0f, adjustment)
+    }
+
+    @Test
+    fun testCalculateScrollAdjustment_ItemPartiallyUnderStickyHeader_ReturnsNegativeDelta() {
+        val adjustment =
+            EventsKeyboardNavigationHelper.calculateScrollAdjustment(
+                itemTop = 20,
+                itemBottom = 120,
+                safeTopOffset = 44,
+                safeBottomOffset = 700,
+            )
+        assertEquals(-24f, adjustment)
+    }
+
+    @Test
+    fun testCalculateScrollAdjustment_ItemClippedAtBottom_ReturnsPositiveDelta() {
+        val adjustment =
+            EventsKeyboardNavigationHelper.calculateScrollAdjustment(
+                itemTop = 650,
+                itemBottom = 750,
+                safeTopOffset = 44,
+                safeBottomOffset = 700,
+            )
+        assertEquals(50f, adjustment)
+    }
+
+    @Test
+    fun testCalculateScrollAdjustment_ItemTallerThanSafeViewport_PrioritizesTopAlignment() {
+        // Taller item (height = 800) with top partially under header (itemTop = 20 < safeTopOffset = 44)
+        val adjustmentUnderHeader =
+            EventsKeyboardNavigationHelper.calculateScrollAdjustment(
+                itemTop = 20,
+                itemBottom = 820,
+                safeTopOffset = 44,
+                safeBottomOffset = 700,
+            )
+        assertEquals(-24f, adjustmentUnderHeader)
+
+        // Taller item already positioned safely below header
+        val adjustmentSafelyPositioned =
+            EventsKeyboardNavigationHelper.calculateScrollAdjustment(
+                itemTop = 44,
+                itemBottom = 844,
+                safeTopOffset = 44,
+                safeBottomOffset = 700,
+            )
+        assertEquals(0f, adjustmentSafelyPositioned)
+    }
 }

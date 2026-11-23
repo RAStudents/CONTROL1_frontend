@@ -66,4 +66,37 @@ object EventsKeyboardNavigationHelper {
             else -> false
         }
     }
+
+    /**
+     * Calculates the pixel delta needed to scroll an item into the safe viewport area (§9).
+     *
+     * @param itemTop Top offset of the item in LazyColumn viewport coordinates.
+     * @param itemBottom Bottom offset of the item in LazyColumn viewport coordinates.
+     * @param safeTopOffset Top boundary below any sticky date headers and safety margins.
+     * @param safeBottomOffset Bottom boundary above any navigation bars and content padding.
+     * @return Negative delta to scroll content downwards (bring top into view),
+     *         positive delta to scroll content upwards (bring bottom into view),
+     *         or 0f if the item is already within safe viewport bounds.
+     */
+    fun calculateScrollAdjustment(
+        itemTop: Int,
+        itemBottom: Int,
+        safeTopOffset: Int,
+        safeBottomOffset: Int,
+    ): Float {
+        val itemHeight = itemBottom - itemTop
+        val safeHeight = safeBottomOffset - safeTopOffset
+        return when {
+            itemHeight > safeHeight -> {
+                if (itemTop != safeTopOffset) {
+                    (itemTop - safeTopOffset).toFloat()
+                } else {
+                    0f
+                }
+            }
+            itemTop < safeTopOffset -> (itemTop - safeTopOffset).toFloat()
+            itemBottom > safeBottomOffset -> (itemBottom - safeBottomOffset).toFloat()
+            else -> 0f
+        }
+    }
 }

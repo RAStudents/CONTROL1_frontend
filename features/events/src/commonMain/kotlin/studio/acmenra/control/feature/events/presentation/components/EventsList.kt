@@ -14,6 +14,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -65,6 +66,7 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -601,6 +603,66 @@ fun EventsList(
         }
     }
 
+    // Viewport geometry and safe offsets (§9)
+    val density = LocalDensity.current
+    val stickyHeaderHeightPx = with(density) { AmberDimens.EventsStickyDateHeight.roundToPx() }
+    val topGapPx = with(density) { AmberDimens.ListGap.roundToPx() }
+    val safeTopOffset = stickyHeaderHeightPx + topGapPx
+    val navBarHeightPx = with(density) { AmberDimens.NavBarHeight.roundToPx() }
+    val footerPaddingPx = with(density) { AmberDimens.EventsListFooterPadding.roundToPx() }
+    val bottomGapPx = with(density) { AmberDimens.ListGap.roundToPx() }
+
+    var keyboardScrollJob: Job? by remember { mutableStateOf<Job?>(null) }
+
+    val scrollEventIntoView: suspend (String) -> Unit = { eventId ->
+        val layoutInfo = listState.layoutInfo
+        val bottomPaddingPx =
+            if (layoutInfo.afterContentPadding > 0) {
+                layoutInfo.afterContentPadding
+            } else {
+                if (isCompact) navBarHeightPx else footerPaddingPx
+            }
+        val safeBottomOffset = layoutInfo.viewportEndOffset - bottomPaddingPx - bottomGapPx
+
+        val visibleItem = layoutInfo.visibleItemsInfo.firstOrNull { it.key == eventId }
+        if (visibleItem != null) {
+            val itemTop = visibleItem.offset
+            val itemBottom = visibleItem.offset + visibleItem.size
+            val adjustment =
+                EventsKeyboardNavigationHelper.calculateScrollAdjustment(
+                    itemTop = itemTop,
+                    itemBottom = itemBottom,
+                    safeTopOffset = safeTopOffset,
+                    safeBottomOffset = safeBottomOffset,
+                )
+            if (adjustment != 0f) {
+                listState.animateScrollBy(adjustment)
+            }
+        } else {
+            val targetIdx = eventIdToLazyIndex[eventId]
+            if (targetIdx != null) {
+                if (targetIdx <= 1) {
+                    listState.animateScrollToItem(0)
+                } else {
+                    listState.animateScrollToItem(maxOf(0, targetIdx - 1))
+                    val itemAfter = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == eventId }
+                    if (itemAfter != null) {
+                        val adjustment =
+                            EventsKeyboardNavigationHelper.calculateScrollAdjustment(
+                                itemTop = itemAfter.offset,
+                                itemBottom = itemAfter.offset + itemAfter.size,
+                                safeTopOffset = safeTopOffset,
+                                safeBottomOffset = safeBottomOffset,
+                            )
+                        if (adjustment != 0f) {
+                            listState.animateScrollBy(adjustment)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Keyboard navigation handler (§9, P2.5)
     val handleKeyEvent: (androidx.compose.ui.input.key.KeyEvent) -> Boolean = { keyEvent ->
         EventsKeyboardNavigationHelper.handleNavigationKey(
@@ -617,9 +679,11 @@ fun EventsList(
                 val eventToOpen = events.firstOrNull { it.id == newId }
                 if (eventToOpen != null) {
                     openEvent(eventToOpen)
-                    eventIdToLazyIndex[eventToOpen.id]?.let { idx ->
-                        coroutineScope.launch { listState.animateScrollToItem(idx) }
-                    }
+                    keyboardScrollJob?.cancel()
+                    keyboardScrollJob =
+                        coroutineScope.launch {
+                            scrollEventIntoView(eventToOpen.id)
+                        }
                 } else if (newId == null) {
                     onSelectEvent(null)
                 }
@@ -963,7 +1027,7 @@ fun EventsList(
                                         isJumpInFlight = true
                                         coroutineScope.launch {
                                             try {
-                                                listState.animateScrollToItem(currentHeadTarget.lazyItemIndex)
+                                                scrollEventIntoView(currentHeadTarget.eventId)
                                             } finally {
                                                 isJumpInFlight = false
                                             }

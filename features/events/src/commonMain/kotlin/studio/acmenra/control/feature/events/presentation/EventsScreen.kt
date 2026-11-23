@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -44,9 +46,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
@@ -167,6 +171,7 @@ fun EventsRouteContent(
         onOpenFilterDialog = viewModel::openFilterDialog,
         onCloseFilterDialog = viewModel::closeFilterDialog,
         onOpenVideo = mediaOpener::openMedia,
+        onOffscreenLiveEventsDetected = viewModel::onOffscreenLiveEventsDetected,
         modifier = modifier,
     )
 }
@@ -188,7 +193,7 @@ fun EventsScreen(
     onLoadNextPage: () -> Unit,
     onRefresh: () -> Unit,
     onViewportAtTop: () -> Unit,
-    onSelectEvent: (String) -> Unit,
+    onSelectEvent: (String?) -> Unit,
     onCloseViewerCompact: () -> Unit,
     onAcknowledgeEvent: (Event) -> Unit,
     onRequestMarkErroneous: (String) -> Unit,
@@ -207,6 +212,7 @@ fun EventsScreen(
     onEventTypesApplied: ((Set<String>) -> Unit)? = null,
     onDevicesApplied: ((Set<String>) -> Unit)? = null,
     onOpenVideo: ((String) -> Unit)? = null,
+    onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
 ) {
     val currentToggleExportMode by rememberUpdatedState(onToggleExportMode)
     val windowInfo = LocalWindowInfo.current
@@ -261,6 +267,7 @@ fun EventsScreen(
     )
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+        val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
         val usableContentWidth = maxWidth - AmberDimens.ScreenMargin * 2
         val layoutMode =
             calculateEventsLayoutMode(
@@ -272,6 +279,7 @@ fun EventsScreen(
             EventsLayoutMode.Wide -> {
                 WideEventsLayout(
                     state = state,
+                    listState = listState,
                     businessTimeZone = businessTimeZone,
                     onSearchIdChanged = onSearchIdChanged,
                     onSearchIdCommitted = onSearchIdCommitted ?: onSearchIdChanged,
@@ -294,11 +302,13 @@ fun EventsScreen(
                     onStartExport = onStartExport,
                     onDownloadExport = onDownloadExport,
                     onOpenVideo = onOpenVideo,
+                    onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                 )
             }
             EventsLayoutMode.Medium -> {
                 MediumEventsLayout(
                     state = state,
+                    listState = listState,
                     businessTimeZone = businessTimeZone,
                     onSearchIdChanged = onSearchIdChanged,
                     onSearchIdCommitted = onSearchIdCommitted ?: onSearchIdChanged,
@@ -321,11 +331,13 @@ fun EventsScreen(
                     onStartExport = onStartExport,
                     onDownloadExport = onDownloadExport,
                     onOpenVideo = onOpenVideo,
+                    onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                 )
             }
             EventsLayoutMode.Compact -> {
                 CompactEventsLayout(
                     state = state,
+                    listState = listState,
                     businessTimeZone = businessTimeZone,
                     onSearchIdChanged = onSearchIdChanged,
                     onSearchIdCommitted = onSearchIdCommitted ?: onSearchIdChanged,
@@ -351,6 +363,7 @@ fun EventsScreen(
                     onStartExport = onStartExport,
                     onDownloadExport = onDownloadExport,
                     onOpenVideo = onOpenVideo,
+                    onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                 )
             }
         }
@@ -401,7 +414,7 @@ private fun WideEventsLayout(
     onDevicesApplied: (Set<String>) -> Unit,
     onResetFilters: () -> Unit,
     onRefresh: () -> Unit,
-    onSelectEvent: (String) -> Unit,
+    onSelectEvent: (String?) -> Unit,
     onAcknowledgeEvent: (Event) -> Unit,
     onLoadNextPage: () -> Unit,
     onViewportAtTop: () -> Unit,
@@ -415,6 +428,8 @@ private fun WideEventsLayout(
     onDownloadExport: (String) -> Unit,
     onOpenVideo: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState(),
+    onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
 ) {
     Column(
         modifier =
@@ -466,7 +481,8 @@ private fun WideEventsLayout(
                 modifier =
                     Modifier
                         .width(AmberDimens.EventsListWide)
-                        .fillMaxHeight(),
+                        .fillMaxHeight()
+                        .clipToBounds(),
             ) {
                 if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
                     EventsEmptyState(
@@ -485,11 +501,18 @@ private fun WideEventsLayout(
                         pendingNewerCount = state.pendingNewerCount,
                         hasMore = state.hasMore,
                         isLoadingNextPage = state.isLoadingNextPage,
-                        timeZone = businessTimeZone,
+                        businessTimeZone = businessTimeZone,
+                        isCompact = false,
+                        listState = listState,
+                        pendingHistoryCount = state.pendingHistoryCount,
+                        requiresRefresh = state.requiresRefresh,
+                        paginationError = state.paginationError,
+                        onRefreshHistory = onRefresh,
                         onSelectEvent = onSelectEvent,
                         onAcknowledgeEvent = onAcknowledgeEvent,
                         onLoadNextPage = onLoadNextPage,
                         onViewportAtTop = onViewportAtTop,
+                        onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                     )
                 }
             }
@@ -528,7 +551,7 @@ private fun MediumEventsLayout(
     onDevicesApplied: (Set<String>) -> Unit,
     onResetFilters: () -> Unit,
     onRefresh: () -> Unit,
-    onSelectEvent: (String) -> Unit,
+    onSelectEvent: (String?) -> Unit,
     onAcknowledgeEvent: (Event) -> Unit,
     onLoadNextPage: () -> Unit,
     onViewportAtTop: () -> Unit,
@@ -542,6 +565,8 @@ private fun MediumEventsLayout(
     onDownloadExport: (String) -> Unit,
     onOpenVideo: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState(),
+    onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
 ) {
     Column(
         modifier =
@@ -579,7 +604,8 @@ private fun MediumEventsLayout(
                 modifier =
                     Modifier
                         .width(AmberDimens.EventsListMedium)
-                        .fillMaxHeight(),
+                        .fillMaxHeight()
+                        .clipToBounds(),
             ) {
                 if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
                     EventsEmptyState(
@@ -598,11 +624,18 @@ private fun MediumEventsLayout(
                         pendingNewerCount = state.pendingNewerCount,
                         hasMore = state.hasMore,
                         isLoadingNextPage = state.isLoadingNextPage,
-                        timeZone = businessTimeZone,
+                        businessTimeZone = businessTimeZone,
+                        isCompact = false,
+                        listState = listState,
+                        pendingHistoryCount = state.pendingHistoryCount,
+                        requiresRefresh = state.requiresRefresh,
+                        paginationError = state.paginationError,
+                        onRefreshHistory = onRefresh,
                         onSelectEvent = onSelectEvent,
                         onAcknowledgeEvent = onAcknowledgeEvent,
                         onLoadNextPage = onLoadNextPage,
                         onViewportAtTop = onViewportAtTop,
+                        onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                     )
                 }
             }
@@ -661,7 +694,7 @@ private fun CompactEventsLayout(
     onCloseFilterDialog: () -> Unit,
     onResetFilters: () -> Unit,
     onRefresh: () -> Unit,
-    onSelectEvent: (String) -> Unit,
+    onSelectEvent: (String?) -> Unit,
     onCloseViewerCompact: () -> Unit,
     onAcknowledgeEvent: (Event) -> Unit,
     onLoadNextPage: () -> Unit,
@@ -676,6 +709,8 @@ private fun CompactEventsLayout(
     onDownloadExport: (String) -> Unit,
     onOpenVideo: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState(),
+    onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
 ) {
     Column(
         modifier =
@@ -748,7 +783,8 @@ private fun CompactEventsLayout(
             modifier =
                 Modifier
                     .fillMaxWidth()
-                    .weight(1f),
+                    .weight(1f)
+                    .clipToBounds(),
         ) {
             if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
                 EventsEmptyState(
@@ -767,11 +803,18 @@ private fun CompactEventsLayout(
                     pendingNewerCount = state.pendingNewerCount,
                     hasMore = state.hasMore,
                     isLoadingNextPage = state.isLoadingNextPage,
-                    timeZone = businessTimeZone,
+                    businessTimeZone = businessTimeZone,
+                    isCompact = true,
+                    listState = listState,
+                    pendingHistoryCount = state.pendingHistoryCount,
+                    requiresRefresh = state.requiresRefresh,
+                    paginationError = state.paginationError,
+                    onRefreshHistory = onRefresh,
                     onSelectEvent = onSelectEvent,
                     onAcknowledgeEvent = onAcknowledgeEvent,
                     onLoadNextPage = onLoadNextPage,
                     onViewportAtTop = onViewportAtTop,
+                    onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                 )
             }
         }

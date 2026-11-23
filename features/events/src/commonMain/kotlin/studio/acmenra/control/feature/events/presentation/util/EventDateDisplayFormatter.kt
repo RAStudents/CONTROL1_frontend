@@ -8,10 +8,136 @@ import kotlinx.datetime.atStartOfDayIn
 import kotlinx.datetime.minus
 import kotlinx.datetime.number
 import kotlinx.datetime.toLocalDateTime
+import org.jetbrains.compose.resources.StringResource
+import studio.acmenra.control.core.ui.generated.resources.Res
+import studio.acmenra.control.core.ui.generated.resources.month_10_genitive
+import studio.acmenra.control.core.ui.generated.resources.month_11_genitive
+import studio.acmenra.control.core.ui.generated.resources.month_12_genitive
+import studio.acmenra.control.core.ui.generated.resources.month_1_genitive
+import studio.acmenra.control.core.ui.generated.resources.month_2_genitive
+import studio.acmenra.control.core.ui.generated.resources.month_3_genitive
+import studio.acmenra.control.core.ui.generated.resources.month_4_genitive
+import studio.acmenra.control.core.ui.generated.resources.month_5_genitive
+import studio.acmenra.control.core.ui.generated.resources.month_6_genitive
+import studio.acmenra.control.core.ui.generated.resources.month_7_genitive
+import studio.acmenra.control.core.ui.generated.resources.month_8_genitive
+import studio.acmenra.control.core.ui.generated.resources.month_9_genitive
 import studio.acmenra.control.feature.events.domain.model.DateFilterUtils
 import kotlin.time.Instant
 
 object EventDateDisplayFormatter {
+    fun monthGenitiveStringResource(monthNumber: Int): StringResource =
+        when (monthNumber) {
+            1 -> Res.string.month_1_genitive
+            2 -> Res.string.month_2_genitive
+            3 -> Res.string.month_3_genitive
+            4 -> Res.string.month_4_genitive
+            5 -> Res.string.month_5_genitive
+            6 -> Res.string.month_6_genitive
+            7 -> Res.string.month_7_genitive
+            8 -> Res.string.month_8_genitive
+            9 -> Res.string.month_9_genitive
+            10 -> Res.string.month_10_genitive
+            11 -> Res.string.month_11_genitive
+            12 -> Res.string.month_12_genitive
+            else -> throw IllegalArgumentException("Invalid month number: $monthNumber")
+        }
+
+    fun formatEventDayHeader(
+        date: LocalDate,
+        today: LocalDate,
+        monthName: String,
+        formatToday: (baseDate: String) -> String,
+        formatYesterday: (baseDate: String) -> String,
+        formatCurrentYear: (day: Int, month: String) -> String,
+        formatOtherYear: (day: Int, month: String, year: Int) -> String,
+    ): String {
+        val yesterday = LocalDate.fromEpochDays(today.toEpochDays() - 1)
+        return when (date) {
+            today -> {
+                val baseDate =
+                    if (date.year == today.year) {
+                        formatCurrentYear(date.day, monthName)
+                    } else {
+                        formatOtherYear(date.day, monthName, date.year)
+                    }
+                formatToday(baseDate)
+            }
+            yesterday -> {
+                val baseDate =
+                    if (date.year == today.year) {
+                        formatCurrentYear(date.day, monthName)
+                    } else {
+                        formatOtherYear(date.day, monthName, date.year)
+                    }
+                formatYesterday(baseDate)
+            }
+            else -> {
+                if (date.year == today.year) {
+                    formatCurrentYear(date.day, monthName)
+                } else {
+                    formatOtherYear(date.day, monthName, date.year)
+                }
+            }
+        }
+    }
+
+    fun formatEventDayHeader(
+        date: LocalDate,
+        today: LocalDate,
+        monthName: String,
+        todayPattern: String,
+        yesterdayPattern: String,
+        currentYearPattern: String,
+        otherYearPattern: String,
+    ): String =
+        formatEventDayHeader(
+            date = date,
+            today = today,
+            monthName = monthName,
+            formatToday = { base -> replacePattern(todayPattern, base) },
+            formatYesterday = { base -> replacePattern(yesterdayPattern, base) },
+            formatCurrentYear = { d, m -> replacePattern(currentYearPattern, d.toString(), m) },
+            formatOtherYear = { d, m, y -> replacePattern(otherYearPattern, d.toString(), m, y.toString()) },
+        )
+
+    private fun replacePattern(
+        pattern: String,
+        vararg args: String,
+    ): String {
+        var result = pattern
+        for (i in args.indices) {
+            val idx = i + 1
+            result =
+                result
+                    .replace("%$idx\$s", args[i])
+                    .replace("%$idx\$d", args[i])
+        }
+        return result
+    }
+
+    fun formatEventCardSupportingText(
+        occurredAt: Instant,
+        businessTimeZone: TimeZone,
+        locationName: String?,
+        deviceName: String?,
+    ): String {
+        val local = occurredAt.toLocalDateTime(businessTimeZone)
+        val h = local.hour.toString().padStart(2, '0')
+        val min = local.minute.toString().padStart(2, '0')
+        val time = "$h:$min"
+        val loc = locationName?.trim()?.takeIf { it.isNotEmpty() }
+        val dev = deviceName?.trim()?.takeIf { it.isNotEmpty() }
+        val meta =
+            when {
+                loc != null && dev != null -> "$loc, $dev"
+                loc != null -> loc
+                dev != null -> dev
+                else -> null
+            }
+        return if (meta != null) "$time • $meta" else time
+    }
+
     fun formatLocalDate(date: LocalDate): String {
         val d = date.day.toString().padStart(2, '0')
         val monthNumber = date.month.number

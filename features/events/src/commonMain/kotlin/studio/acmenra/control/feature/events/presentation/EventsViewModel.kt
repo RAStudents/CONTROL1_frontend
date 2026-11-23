@@ -29,6 +29,7 @@ import studio.acmenra.control.core.ui.generated.resources.events_mutation_generi
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_network_error
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_payload_mismatch
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_permission_denied
+import studio.acmenra.control.core.ui.generated.resources.events_offscreen_notice_title
 import studio.acmenra.control.core.ui.notice.Notice
 import studio.acmenra.control.feature.events.domain.model.DateFilterUtils
 import studio.acmenra.control.feature.events.domain.model.DateSelection
@@ -593,6 +594,21 @@ class EventsViewModel(
 
     fun onViewportAtTop() {
         feedSession?.onViewportAtTop()
+    }
+
+    fun onOffscreenLiveEventsDetected(
+        count: Int,
+        key: String,
+    ) {
+        _state.update {
+            it.copy(
+                errorNotice =
+                    Notice.info(
+                        title = Res.string.events_offscreen_notice_title,
+                        key = key,
+                    ),
+            )
+        }
     }
 
     fun selectEvent(eventId: String?) {

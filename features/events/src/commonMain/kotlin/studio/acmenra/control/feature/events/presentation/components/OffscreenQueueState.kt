@@ -52,6 +52,7 @@ internal sealed interface OffscreenHeadResolution {
     data class AwaitingLayout(
         val targetEventId: String,
         val fallbackDirection: OffscreenDirection = OffscreenDirection.UP,
+        val pendingCount: Int = 1,
     ) : OffscreenHeadResolution
 
     data class Ready(
@@ -93,13 +94,16 @@ internal enum class PendingNewerFlushPhase {
 }
 
 internal data class PendingNewerFlushContext(
+    val operationId: Long = 0L,
     val phase: PendingNewerFlushPhase = PendingNewerFlushPhase.IDLE,
     val reason: PendingNewerFlushReason = PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY,
     val capturedCount: Int,
     val feedScopeKey: String,
+    val capturedEventIds: List<String> = emptyList(),
     val preFlushEventIds: Set<String> = emptySet(),
     val expectedBatchId: Long? = null,
     val expectedSnapshotId: String? = null,
+    val result: studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult? = null,
 )
 
 internal data class OffscreenQueueState(
@@ -175,57 +179,86 @@ internal data class OffscreenQueueState(
         return if (updated.size == entries.size) this else copy(entries = updated)
     }
 
+    fun replaceLiveTargets(orderedIds: List<String>): OffscreenQueueState {
+        val retained = entries.filterNot { it is OffscreenQueueEntry.LoadedEvent }
+        val uniqueIds = orderedIds.distinct()
+        val loaded = uniqueIds.map { OffscreenQueueEntry.LoadedEvent(it) }
+        val historyIndex = retained.indexOfFirst { it is OffscreenQueueEntry.PendingHistory }
+        val next =
+            if (historyIndex < 0) {
+                retained + loaded
+            } else {
+                retained.subList(0, historyIndex) +
+                    loaded +
+                    retained.subList(historyIndex, retained.size)
+            }
+        return copy(entries = next)
+    }
+
     /**
      * Singleton invariant: at most one PendingNewerAtTop in entries.
-     * Updates in-place if already present; places before loaded events or at head.
+     * Merges eventIds and updates in-place if already present; places before loaded events or at head.
      */
     fun upsertPendingNewer(
         count: Int,
         eventIds: List<String> = emptyList(),
     ): OffscreenQueueState {
-        if (count <= 0 && eventIds.isEmpty()) {
+        val existing = entries.filterIsInstance<OffscreenQueueEntry.PendingNewerAtTop>().firstOrNull()
+        val mergedIds = (existing?.eventIds.orEmpty() + eventIds).distinct()
+        val nextCount = maxOf(count, mergedIds.size)
+
+        if (nextCount <= 0 && mergedIds.isEmpty()) {
             val updated = entries.filterNot { it is OffscreenQueueEntry.PendingNewerAtTop }
             return if (updated.size == entries.size) this else copy(entries = updated)
         }
-        val existingIndex = entries.indexOfFirst { it is OffscreenQueueEntry.PendingNewerAtTop }
-        val entry =
+
+        val marker =
             OffscreenQueueEntry.PendingNewerAtTop(
-                eventIds = eventIds,
-                reportedCount = maxOf(count, eventIds.size),
+                eventIds = mergedIds,
+                reportedCount = nextCount,
             )
-        val updatedEntries =
-            if (existingIndex != -1) {
-                entries.toMutableList().apply {
-                    set(existingIndex, entry)
-                }
-            } else {
-                listOf(entry) + entries
-            }
-        return copy(entries = updatedEntries)
+        val remaining = entries.filterNot { it is OffscreenQueueEntry.PendingNewerAtTop }
+        return copy(entries = listOf(marker) + remaining)
     }
 
     /**
      * Replaces the PendingNewerAtTop marker atomically with materialized loaded event IDs.
-     * Replaces the marker at its exact position in entries, preserving delivery order without badge drop.
+     * Preserves remaining pending IDs/count if any arrived during flush.
      */
     fun reconcilePendingNewer(
         materializedIds: List<String>,
         currentlyVisibleIds: Set<String>,
+        remainingCreatedIds: List<String> = emptyList(),
+        remainingCreatedCount: Int = remainingCreatedIds.size,
     ): OffscreenQueueState {
-        val markerIndex = entries.indexOfFirst { it is OffscreenQueueEntry.PendingNewerAtTop }
         val offscreenIds = materializedIds.filter { it !in currentlyVisibleIds }
         val existingLoadedIds = loadedEventIds.toSet()
         val toInsert = offscreenIds.filter { it !in existingLoadedIds }.map { OffscreenQueueEntry.LoadedEvent(it) }
 
-        if (markerIndex == -1) {
-            return enqueue(offscreenIds)
+        val remainingEntries = entries.filterNot { it is OffscreenQueueEntry.PendingNewerAtTop }
+        val nextEntries = mutableListOf<OffscreenQueueEntry>()
+
+        if (remainingCreatedCount > 0 || remainingCreatedIds.isNotEmpty()) {
+            nextEntries.add(
+                OffscreenQueueEntry.PendingNewerAtTop(
+                    eventIds = remainingCreatedIds,
+                    reportedCount = maxOf(remainingCreatedCount, remainingCreatedIds.size),
+                ),
+            )
         }
-        val newEntries =
-            entries.toMutableList().apply {
-                removeAt(markerIndex)
-                addAll(markerIndex, toInsert)
-            }
-        return copy(entries = newEntries)
+
+        // Materialized items from PendingNewerAtTop belong before older loaded events
+        nextEntries.addAll(toInsert)
+
+        val historyIndex = remainingEntries.indexOfFirst { it is OffscreenQueueEntry.PendingHistory }
+        if (historyIndex == -1) {
+            nextEntries.addAll(remainingEntries)
+        } else {
+            nextEntries.addAll(remainingEntries.subList(0, historyIndex))
+            nextEntries.addAll(remainingEntries.subList(historyIndex, remainingEntries.size))
+        }
+
+        return copy(entries = nextEntries)
     }
 
     fun reconcilePendingNewerWithMaterializedIds(
@@ -340,6 +373,7 @@ internal data class OffscreenQueueState(
                             OffscreenHeadResolution.AwaitingLayout(
                                 targetEventId = head.eventId,
                                 fallbackDirection = OffscreenDirection.UP,
+                                pendingCount = current.totalCount,
                             )
                     }
                     if (minVisibleEventLazyIndex == null || maxVisibleEventLazyIndex == null) {
@@ -347,6 +381,7 @@ internal data class OffscreenQueueState(
                             OffscreenHeadResolution.AwaitingLayout(
                                 targetEventId = head.eventId,
                                 fallbackDirection = OffscreenDirection.UP,
+                                pendingCount = current.totalCount,
                             )
                     }
                     when {

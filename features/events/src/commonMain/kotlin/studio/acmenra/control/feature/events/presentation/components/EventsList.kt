@@ -74,6 +74,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -107,6 +108,8 @@ import studio.acmenra.control.core.ui.theme.AmberDimens
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventsInitialLoadError
 import studio.acmenra.control.feature.events.domain.model.EventsPaginationError
+import studio.acmenra.control.feature.events.domain.repository.EventsFeedDelta
+import studio.acmenra.control.feature.events.domain.repository.HistoryRefreshResult
 import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.presentation.util.EventDateDisplayFormatter
 import studio.acmenra.control.feature.events.presentation.util.EventsKeyboardNavigationHelper
@@ -117,8 +120,10 @@ private const val TOP_OFFSET_TOLERANCE_PX = 2
 
 internal class EventsListPresentationState(
     initialQueueState: OffscreenQueueState = OffscreenQueueState(),
+    initialTrackerState: LiveEventTrackerState = LiveEventTrackerState(),
 ) {
     var queueState by mutableStateOf(initialQueueState)
+    var trackerState by mutableStateOf(initialTrackerState)
     var activeFlushContext by mutableStateOf<PendingNewerFlushContext?>(null)
     var isJumpInFlight by mutableStateOf(false)
     var isHistoryRefreshInFlight by mutableStateOf(false)
@@ -136,6 +141,9 @@ internal class EventsListPresentationState(
     var liveEnterIds by mutableStateOf<Set<String>>(emptySet())
     var liveEnterCascadeIndices by mutableStateOf<Map<String, Int>>(emptyMap())
     var liveEnterBatchSize by mutableStateOf(0)
+    var operationCounter by mutableStateOf(0L)
+    var lastAutoRequestedCursor by mutableStateOf<String?>(null)
+    var isAutoPaginationBlocked by mutableStateOf(false)
 }
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -171,8 +179,15 @@ internal fun EventsList(
     asOfSequence: Long = 0L,
     isInitialLoading: Boolean = false,
     initialLoadError: EventsInitialLoadError? = null,
+    feedSessionGeneration: Long = 0L,
+    feedRevision: Long = 0L,
+    nextCursor: String? = null,
+    pageGeneration: Long = 0L,
+    pendingPresentationDeltas: List<EventsFeedDelta> = emptyList(),
     onFlushPendingNewer: (suspend (List<String>) -> PendingNewerFlushResult)? = null,
     onLiveDeltaConsumed: ((Long) -> Unit)? = null,
+    onLiveDeltaRegistered: ((sessionGeneration: Long, batchId: Long) -> Unit)? = null,
+    onRefreshPendingHistory: (suspend () -> HistoryRefreshResult)? = null,
     presentationState: EventsListPresentationState = remember(feedScopeKey) { EventsListPresentationState() },
 ) {
     val effectiveTimeZone = businessTimeZone ?: timeZone ?: TimeZone.UTC
@@ -182,6 +197,7 @@ internal fun EventsList(
 
     // Delegated presentation state
     var queueState by presentationState::queueState
+    var trackerState by presentationState::trackerState
     var activeFlushContext by presentationState::activeFlushContext
     var isJumpInFlight by presentationState::isJumpInFlight
     var isHistoryRefreshInFlight by presentationState::isHistoryRefreshInFlight
@@ -199,6 +215,7 @@ internal fun EventsList(
     val currentSnapshotId by rememberUpdatedState(snapshotId)
     val currentAsOfSequence by rememberUpdatedState(asOfSequence)
     val currentLiveBatchId by rememberUpdatedState(liveBatchId)
+    val currentFeedRevision by rememberUpdatedState(feedRevision)
     val currentOnViewportAtTop by rememberUpdatedState(onViewportAtTop)
     val currentOnRefreshHistory by rememberUpdatedState(onRefreshHistory)
     val currentOnOffscreenLiveEventsDetected by rememberUpdatedState(onOffscreenLiveEventsDetected)
@@ -211,6 +228,7 @@ internal fun EventsList(
         if (currentObservedFeedScopeKey != feedScopeKey) {
             currentObservedFeedScopeKey = feedScopeKey
             queueState = OffscreenQueueState()
+            trackerState = LiveEventTrackerState()
             activeFlushContext = null
             isJumpInFlight = false
             isHistoryRefreshInFlight = false
@@ -222,18 +240,52 @@ internal fun EventsList(
             anchorEventId = null
             anchorOffsetPx = 0
             priorSnapshotIds = emptyList()
+            presentationState.lastAutoRequestedCursor = null
+            presentationState.isAutoPaginationBlocked = false
             coroutineScope.launch { listState.scrollToItem(0, 0) }
         }
     }
 
-    // Reset on snapshotId refresh if not actively flushing accumulated items
+    // Capture prior snapshot IDs on snapshotId update, but DO NOT clear queueState within same feedScope!
     LaunchedEffect(snapshotId) {
         if (currentObservedSnapshotId != snapshotId) {
             currentObservedSnapshotId = snapshotId
-            if (activeFlushContext == null) {
-                queueState = OffscreenQueueState()
-                priorSnapshotIds = currentEvents.map { it.id }
+            priorSnapshotIds = currentEvents.map { it.id }
+        }
+    }
+
+    // Register incoming live presentation deltas into trackerState
+    LaunchedEffect(pendingPresentationDeltas, feedSessionGeneration) {
+        if (pendingPresentationDeltas.isNotEmpty()) {
+            var updatedTracker = trackerState
+            for (delta in pendingPresentationDeltas) {
+                if (delta.batchId > updatedTracker.lastRegisteredBatchId) {
+                    updatedTracker = LiveEventTrackerReducer.registerBatch(updatedTracker, delta)
+                    onLiveDeltaRegistered?.invoke(feedSessionGeneration, delta.batchId)
+                    onLiveDeltaConsumed?.invoke(delta.batchId)
+                }
             }
+            if (updatedTracker != trackerState) {
+                trackerState = updatedTracker
+            }
+        }
+    }
+
+    // Fallback registration if liveBatchId / liveCreatedIds are provided without pendingPresentationDeltas
+    LaunchedEffect(liveBatchId, liveCreatedIds, liveRemovedIds) {
+        if (pendingPresentationDeltas.isEmpty() &&
+            liveBatchId > 0L &&
+            liveBatchId > trackerState.lastRegisteredBatchId
+        ) {
+            val delta =
+                EventsFeedDelta(
+                    batchId = liveBatchId,
+                    tenantSequence = currentAsOfSequence,
+                    createdEventIds = liveCreatedIds,
+                    removedEventIds = liveRemovedIds.toList(),
+                )
+            trackerState = LiveEventTrackerReducer.registerBatch(trackerState, delta)
+            onLiveDeltaConsumed?.invoke(liveBatchId)
         }
     }
 
@@ -262,7 +314,48 @@ internal fun EventsList(
             }
         }
 
-    // Viewport items inspection
+    // Viewport geometry and safe offsets for real visibility intersection
+    val density = LocalDensity.current
+    val stickyHeaderHeightPx = with(density) { AmberDimens.EventsStickyDateHeight.roundToPx() }
+    val topGapPx = with(density) { AmberDimens.ListGap.roundToPx() }
+    val safeTopOffset = stickyHeaderHeightPx + topGapPx
+    val navBarHeightPx = with(density) { AmberDimens.NavBarHeight.roundToPx() }
+    val footerPaddingPx = with(density) { AmberDimens.EventsListFooterPadding.roundToPx() }
+    val bottomGapPx = with(density) { AmberDimens.ListGap.roundToPx() }
+    val minVisibleCardHeightPx = with(density) { 24.dp.roundToPx() }
+
+    // Real visible event items intersection: excludes items obscured by sticky header or footer/nav bar
+    val actuallyVisibleEventKeys by remember(listState) {
+        derivedStateOf {
+            val layoutInfo = listState.layoutInfo
+            val bottomPaddingPx =
+                if (layoutInfo.afterContentPadding > 0) {
+                    layoutInfo.afterContentPadding
+                } else {
+                    if (isCompact) navBarHeightPx else footerPaddingPx
+                }
+            val viewportStart = safeTopOffset
+            val viewportEnd = layoutInfo.viewportEndOffset - bottomPaddingPx - bottomGapPx
+
+            layoutInfo.visibleItemsInfo
+                .filter { item ->
+                    val k = item.key as? String
+                    k != null &&
+                        !k.startsWith("header_") &&
+                        !k.startsWith("footer_") &&
+                        isItemActuallyVisible(
+                            itemOffset = item.offset,
+                            itemSize = item.size,
+                            viewportStart = viewportStart,
+                            viewportEnd = viewportEnd,
+                            minimumVisiblePixels = minVisibleCardHeightPx,
+                        )
+                }.mapNotNull { it.key as? String }
+                .toSet()
+        }
+    }
+
+    // Lazy indices for head direction calculation
     val minMaxVisibleEventLazyIndices =
         remember {
             derivedStateOf {
@@ -289,48 +382,28 @@ internal fun EventsList(
 
     val (minIdx, maxIdx) = minMaxVisibleEventLazyIndices.value
 
-    val viewportSnapshot =
-        remember(
-            listState.firstVisibleItemIndex,
-            listState.firstVisibleItemScrollOffset,
-            visibleEventKeys.value,
-            minIdx,
-            maxIdx,
-            isAtTopState.value,
-        ) {
-            EventsViewportSnapshot(
-                firstVisibleItemIndex = listState.firstVisibleItemIndex,
-                firstVisibleItemScrollOffset = listState.firstVisibleItemScrollOffset,
-                visibleItemIds = visibleEventKeys.value,
-                minVisibleItemIndex = minIdx,
-                maxVisibleItemIndex = maxIdx,
-                isAtTop = isAtTopState.value,
+    // Reconcile trackerState after each layout pass using actuallyVisibleEventKeys
+    LaunchedEffect(actuallyVisibleEventKeys, events) {
+        val currentFeedIds = events.map { it.id }.toSet()
+        val reconciledTracker =
+            LiveEventTrackerReducer.reconcileAfterLayout(
+                state = trackerState,
+                currentFeedIds = currentFeedIds,
+                visibleEventIds = actuallyVisibleEventKeys,
             )
+        if (reconciledTracker != trackerState) {
+            trackerState = reconciledTracker
         }
+    }
 
-    // Pure presentation plan calculated synchronously before LazyColumn composables render
-    val currentPlan =
-        remember(feedScopeKey, liveBatchId, events, viewportSnapshot) {
-            buildLivePresentationPlan(
-                batchId = liveBatchId,
-                createdEventIds = liveCreatedIds,
-                removedEventIds = liveRemovedIds,
-                events = events,
-                viewportSnapshot = viewportSnapshot,
-                animatedEventIds = animatedEventIds,
-            )
-        }
-
-    // Side-effects of live delta executed asynchronously via LaunchedEffect
-    LaunchedEffect(currentPlan.batchId) {
-        if (currentPlan.batchId > 0L) {
-            if (currentPlan.offscreenEventIds.isNotEmpty()) {
-                queueState = queueState.enqueue(currentPlan.offscreenEventIds)
-                val joined = currentPlan.offscreenEventIds.joinToString("_")
-                val key = "live_offscreen_${currentFeedScopeKey}_${currentAsOfSequence}_${currentPlan.batchId}_$joined"
-                currentOnOffscreenLiveEventsDetected?.invoke(currentPlan.offscreenEventIds.size, key)
-            }
-            onLiveDeltaConsumed?.invoke(currentPlan.batchId)
+    // Synchronize offscreen pending live events directly to queueState
+    LaunchedEffect(trackerState.offscreenPendingIds) {
+        val offscreenIds = trackerState.offscreenPendingIds
+        queueState = queueState.replaceLiveTargets(offscreenIds)
+        if (offscreenIds.isNotEmpty()) {
+            val joined = offscreenIds.joinToString("_")
+            val key = "live_offscreen_${currentFeedScopeKey}_${currentAsOfSequence}_${offscreenIds.size}_$joined"
+            currentOnOffscreenLiveEventsDetected?.invoke(offscreenIds.size, key)
         }
     }
 
@@ -492,22 +565,32 @@ internal fun EventsList(
     // Flush State Machine
     val startPendingNewerFlush: (Boolean) -> Unit = { scrollToTop ->
         if (activeFlushContext == null) {
+            val opId = ++presentationState.operationCounter
+            val marker =
+                queueState.entries
+                    .filterIsInstance<OffscreenQueueEntry.PendingNewerAtTop>()
+                    .firstOrNull()
+            val expectedIds = marker?.eventIds ?: emptyList()
+            val capturedCount = queueState.pendingNewerMarkerCount
+
+            activeFlushContext =
+                PendingNewerFlushContext(
+                    operationId = opId,
+                    phase =
+                        if (scrollToTop) {
+                            PendingNewerFlushPhase.SCROLLING_TO_TOP
+                        } else {
+                            PendingNewerFlushPhase.DISPATCHING_FLUSH
+                        },
+                    capturedCount = capturedCount,
+                    feedScopeKey = currentFeedScopeKey,
+                    capturedEventIds = expectedIds,
+                    preFlushEventIds = currentEvents.map { it.id }.toSet(),
+                )
+            isJumpInFlight = true
+
             coroutineScope.launch {
                 try {
-                    isJumpInFlight = true
-                    activeFlushContext =
-                        PendingNewerFlushContext(
-                            phase =
-                                if (scrollToTop) {
-                                    PendingNewerFlushPhase.SCROLLING_TO_TOP
-                                } else {
-                                    PendingNewerFlushPhase.DISPATCHING_FLUSH
-                                },
-                            capturedCount = queueState.pendingNewerMarkerCount,
-                            feedScopeKey = currentFeedScopeKey,
-                            preFlushEventIds = currentEvents.map { it.id }.toSet(),
-                        )
-
                     // 1. SCROLL_TO_TOP
                     if (scrollToTop) {
                         listState.animateScrollToItem(0, 0)
@@ -520,63 +603,93 @@ internal fun EventsList(
 
                     // 2. DISPATCH_FLUSH
                     activeFlushContext = activeFlushContext?.copy(phase = PendingNewerFlushPhase.DISPATCHING_FLUSH)
-                    val marker =
-                        queueState.entries
-                            .filterIsInstance<OffscreenQueueEntry.PendingNewerAtTop>()
-                            .firstOrNull()
-                    val expectedIds = marker?.eventIds ?: emptyList()
 
                     val flushResult =
                         if (onFlushPendingNewer != null) {
                             onFlushPendingNewer(expectedIds)
                         } else {
                             currentOnViewportAtTop()
-                            PendingNewerFlushResult(
+                            PendingNewerFlushResult.Completed(
                                 batchId = 0L,
                                 snapshotId = currentSnapshotId,
+                                feedRevision = currentFeedRevision,
                                 materializedEventIds = expectedIds,
                                 createdEventIds = expectedIds,
                             )
                         }
 
-                    // 3. AWAIT_MATERIALIZATION
-                    activeFlushContext =
-                        activeFlushContext?.copy(
-                            phase = PendingNewerFlushPhase.AWAITING_MATERIALIZATION,
-                            expectedBatchId = flushResult.batchId,
-                            expectedSnapshotId = flushResult.snapshotId,
-                        )
-
-                    // 4. AWAIT_LAYOUT
-                    activeFlushContext = activeFlushContext?.copy(phase = PendingNewerFlushPhase.AWAITING_LAYOUT)
-                    val materializedIds = flushResult.materializedEventIds
-                    if (materializedIds.isNotEmpty()) {
-                        snapshotFlow {
-                            !listState.isScrollInProgress &&
-                                (
-                                    listState.firstVisibleItemIndex == 0 ||
-                                        listState.layoutInfo.visibleItemsInfo.any {
-                                            (it.key as? String) in materializedIds
-                                        }
+                    when (flushResult) {
+                        is PendingNewerFlushResult.Rejected -> {
+                            // Rejection preserves marker in queue, leaves pending items untouched
+                            return@launch
+                        }
+                        is PendingNewerFlushResult.NoPendingEvents -> {
+                            queueState =
+                                queueState.reconcilePendingNewer(
+                                    materializedIds = emptyList(),
+                                    currentlyVisibleIds = emptySet(),
+                                    remainingCreatedIds = emptyList(),
+                                    remainingCreatedCount = 0,
                                 )
-                        }.filter { it }.first()
+                        }
+                        is PendingNewerFlushResult.Completed -> {
+                            // 3. AWAIT_MATERIALIZATION
+                            activeFlushContext =
+                                activeFlushContext?.copy(
+                                    phase = PendingNewerFlushPhase.AWAITING_MATERIALIZATION,
+                                    expectedBatchId = flushResult.batchId,
+                                    expectedSnapshotId = flushResult.snapshotId,
+                                    result = flushResult,
+                                )
+
+                            if (flushResult.feedRevision > 0L) {
+                                snapshotFlow { currentFeedRevision >= flushResult.feedRevision }
+                                    .filter { it }
+                                    .first()
+                            }
+
+                            // 4. AWAIT_LAYOUT
+                            activeFlushContext =
+                                activeFlushContext?.copy(phase = PendingNewerFlushPhase.AWAITING_LAYOUT)
+                            val idsToAwait =
+                                (flushResult.createdEventIds.ifEmpty { flushResult.materializedEventIds })
+                                    .toSet()
+                            if (idsToAwait.isNotEmpty()) {
+                                snapshotFlow {
+                                    !listState.isScrollInProgress &&
+                                        (
+                                            listState.firstVisibleItemIndex == 0 ||
+                                                listState.layoutInfo.visibleItemsInfo.any {
+                                                    (it.key as? String) in idsToAwait
+                                                }
+                                        )
+                                }.filter { it }.first()
+                            }
+
+                            // 5. RECONCILING
+                            activeFlushContext = activeFlushContext?.copy(phase = PendingNewerFlushPhase.RECONCILING)
+                            val currentVisibleKeys =
+                                listState.layoutInfo.visibleItemsInfo
+                                    .mapNotNull { it.key as? String }
+                                    .filterNot { it.startsWith("header_") || it.startsWith("footer_") }
+                                    .toSet()
+
+                            queueState =
+                                queueState.reconcilePendingNewer(
+                                    materializedIds =
+                                        flushResult.createdEventIds.ifEmpty {
+                                            flushResult.materializedEventIds
+                                        },
+                                    currentlyVisibleIds = currentVisibleKeys,
+                                    remainingCreatedIds = flushResult.remainingPendingEventIds,
+                                    remainingCreatedCount = flushResult.remainingPendingCount,
+                                )
+                        }
                     }
-
-                    // 5. RECONCILING
-                    activeFlushContext = activeFlushContext?.copy(phase = PendingNewerFlushPhase.RECONCILING)
-                    val currentVisibleKeys =
-                        listState.layoutInfo.visibleItemsInfo
-                            .mapNotNull { it.key as? String }
-                            .filterNot { it.startsWith("header_") || it.startsWith("footer_") }
-                            .toSet()
-
-                    queueState =
-                        queueState.reconcilePendingNewer(
-                            materializedIds = materializedIds,
-                            currentlyVisibleIds = currentVisibleKeys,
-                        )
                 } finally {
-                    activeFlushContext = null
+                    if (activeFlushContext?.operationId == opId) {
+                        activeFlushContext = null
+                    }
                     isJumpInFlight = false
                 }
             }
@@ -626,10 +739,25 @@ internal fun EventsList(
         }
     }
 
-    // Automatic pagination
-    val shouldLoadMore by remember(hasMore, isLoadingNextPage, paginationError, isInitialLoading, events) {
+    // Automatic pagination guarded by cursor gate
+    val shouldLoadMore by remember(
+        hasMore,
+        isLoadingNextPage,
+        paginationError,
+        isInitialLoading,
+        events,
+        nextCursor,
+        presentationState.isAutoPaginationBlocked,
+    ) {
         derivedStateOf {
-            if (!hasMore || isLoadingNextPage || paginationError != null || isInitialLoading || events.isEmpty()) {
+            if (!hasMore ||
+                isLoadingNextPage ||
+                paginationError != null ||
+                isInitialLoading ||
+                events.isEmpty() ||
+                presentationState.isAutoPaginationBlocked ||
+                (nextCursor != null && presentationState.lastAutoRequestedCursor == nextCursor)
+            ) {
                 false
             } else {
                 val lastVisibleEventId =
@@ -652,24 +780,21 @@ internal fun EventsList(
         }
     }
 
+    LaunchedEffect(nextCursor, pageGeneration) {
+        presentationState.isAutoPaginationBlocked = false
+    }
+
     val paginationRequestKey =
-        remember(events.size, hasMore, isLoadingNextPage) {
-            "${events.size}_${hasMore}_$isLoadingNextPage"
+        remember(events.size, hasMore, isLoadingNextPage, nextCursor) {
+            "${events.size}_${hasMore}_${isLoadingNextPage}_$nextCursor"
         }
     LaunchedEffect(shouldLoadMore, paginationRequestKey) {
         if (shouldLoadMore) {
+            presentationState.lastAutoRequestedCursor = nextCursor
+            presentationState.isAutoPaginationBlocked = true
             onLoadNextPage()
         }
     }
-
-    // Viewport geometry and safe offsets
-    val density = LocalDensity.current
-    val stickyHeaderHeightPx = with(density) { AmberDimens.EventsStickyDateHeight.roundToPx() }
-    val topGapPx = with(density) { AmberDimens.ListGap.roundToPx() }
-    val safeTopOffset = stickyHeaderHeightPx + topGapPx
-    val navBarHeightPx = with(density) { AmberDimens.NavBarHeight.roundToPx() }
-    val footerPaddingPx = with(density) { AmberDimens.EventsListFooterPadding.roundToPx() }
-    val bottomGapPx = with(density) { AmberDimens.ListGap.roundToPx() }
 
     var keyboardScrollJob: Job? by remember { mutableStateOf<Job?>(null) }
 
@@ -846,9 +971,24 @@ internal fun EventsList(
                             AmberDimens.ListGap
                         }
 
-                    val shouldAnimateEnter = event.id in currentPlan.enterEventIds
-                    val cascadeIndex = currentPlan.cascadeIndices[event.id] ?: 0
-                    val cascadeDelay = if (currentPlan.batchSize in 2..4) cascadeIndex * 45 else 0
+                    val trackerEntry = trackerState.entries.firstOrNull { it.eventId == event.id }
+                    val isLiveCandidate =
+                        trackerEntry != null &&
+                            (
+                                trackerEntry.phase == LiveEventPhase.AWAITING_LAYOUT ||
+                                    trackerEntry.phase == LiveEventPhase.ENTERING
+                            )
+                    val shouldAnimateEnter = isLiveCandidate && event.id !in animatedEventIds
+                    val cascadeIndex = trackerEntry?.batchOrder ?: 0
+                    val batchSize =
+                        if (trackerEntry !=
+                            null
+                        ) {
+                            trackerState.entries.count { it.batchId == trackerEntry.batchId }
+                        } else {
+                            0
+                        }
+                    val cascadeDelay = if (batchSize in 2..4) cascadeIndex * 45 else 0
 
                     val fastSpatial: FiniteAnimationSpec<IntOffset> =
                         if (cascadeDelay > 0) {
@@ -882,7 +1022,7 @@ internal fun EventsList(
                             shrinkVertically(animationSpec = motion.fastSpatialSpec())
 
                     val transitionState =
-                        remember(event.id, currentPlan.batchId) {
+                        remember(event.id) {
                             MutableTransitionState(initialState = !shouldAnimateEnter).apply {
                                 targetState = true
                             }
@@ -899,6 +1039,16 @@ internal fun EventsList(
                             .filter { it }
                             .first()
                         animatedEventIds.add(event.id)
+                        val isVisible = event.id in actuallyVisibleEventKeys
+                        if (trackerEntry != null && trackerEntry.phase == LiveEventPhase.ENTERING) {
+                            trackerState =
+                                LiveEventTrackerReducer.enterAnimationFinished(
+                                    state = trackerState,
+                                    eventId = event.id,
+                                    batchId = trackerEntry.batchId,
+                                    isCurrentlyVisible = isVisible,
+                                )
+                        }
                     }
 
                     val exitGen = presentationState.exitingEvents[event.id]?.generation ?: 0L
@@ -933,6 +1083,8 @@ internal fun EventsList(
                                 hasGluedAbove = hasGluedAbove,
                                 hasGluedBelow = hasGluedBelow,
                                 shape = if (isExiting) RoundedCornerShape(AmberCorners.ExtraLarge) else null,
+                                canAcknowledge = canAcknowledge,
+                                onAcknowledge = { onAcknowledgeEvent?.invoke(event) },
                                 onClick = { openEvent(event) },
                             )
                         }
@@ -979,7 +1131,11 @@ internal fun EventsList(
                         )
                         Spacer(modifier = Modifier.height(AmberDimens.GapSmall))
                         TextButton(
-                            onClick = onLoadNextPage,
+                            onClick = {
+                                presentationState.isAutoPaginationBlocked = false
+                                presentationState.lastAutoRequestedCursor = null
+                                onLoadNextPage()
+                            },
                             colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary),
                         ) {
                             Text(text = stringResource(Res.string.events_list_pagination_retry))
@@ -1122,7 +1278,11 @@ internal fun EventsList(
                                                 preRefreshSnapshotId = currentSnapshotId
                                                 coroutineScope.launch {
                                                     try {
-                                                        currentOnRefreshHistory?.invoke()
+                                                        if (onRefreshPendingHistory != null) {
+                                                            onRefreshPendingHistory()
+                                                        } else {
+                                                            currentOnRefreshHistory?.invoke()
+                                                        }
                                                     } finally {
                                                         isHistoryRefreshInFlight = false
                                                     }

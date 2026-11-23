@@ -31,6 +31,7 @@ import studio.acmenra.control.feature.events.domain.model.RealtimeEventOrigin
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedDelta
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
+import studio.acmenra.control.feature.events.domain.repository.FlushFailureReason
 import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.domain.repository.RebootstrapState
 import studio.acmenra.control.feature.events.domain.repository.appendFeedDelta
@@ -136,11 +137,13 @@ sealed interface SessionCommand {
     ) : SessionCommand
 
     data class ViewportAtTop(
+        val operationId: Long = 0L,
         val expectedEventIds: List<String> = emptyList(),
         val response: CompletableDeferred<PendingNewerFlushResult>? = null,
     ) : SessionCommand
 
     data class AcknowledgeFeedDeltas(
+        val sessionGeneration: Long = 0L,
         val batchId: Long,
         val response: CompletableDeferred<Unit>? = null,
     ) : SessionCommand
@@ -197,6 +200,7 @@ class EventsSessionProcessor(
     private var nextCursor: String? = null
     private var currentTotalCount: Int = 0
     private var feedDeltaBatchCounter: Long = 0L
+    private var feedRevisionCounter: Long = 0L
     private val earlyFramesBuffer = mutableMapOf<Long, MutableList<IncomingWsFrame>>()
 
     private data class AccessFence(
@@ -302,11 +306,9 @@ class EventsSessionProcessor(
                     )
                 is SessionCommand.ViewportAtTop ->
                     remaining.response?.complete(
-                        PendingNewerFlushResult(
-                            batchId = 0L,
-                            snapshotId = null,
-                            materializedEventIds = emptyList(),
-                            createdEventIds = emptyList(),
+                        PendingNewerFlushResult.Rejected(
+                            operationId = remaining.operationId,
+                            reason = FlushFailureReason.PROCESSOR_CLOSED,
                         ),
                     )
                 is SessionCommand.AcknowledgeFeedDeltas ->
@@ -499,11 +501,9 @@ class EventsSessionProcessor(
                     )
                 is SessionCommand.ViewportAtTop ->
                     command.response?.complete(
-                        PendingNewerFlushResult(
-                            batchId = 0L,
-                            snapshotId = null,
-                            materializedEventIds = emptyList(),
-                            createdEventIds = emptyList(),
+                        PendingNewerFlushResult.Rejected(
+                            operationId = command.operationId,
+                            reason = FlushFailureReason.PROCESSOR_CLOSED,
                         ),
                     )
                 is SessionCommand.AcknowledgeFeedDeltas ->
@@ -528,11 +528,9 @@ class EventsSessionProcessor(
                 }
                 is SessionCommand.ViewportAtTop -> {
                     command.response?.complete(
-                        PendingNewerFlushResult(
-                            batchId = 0L,
-                            snapshotId = null,
-                            materializedEventIds = emptyList(),
-                            createdEventIds = emptyList(),
+                        PendingNewerFlushResult.Rejected(
+                            operationId = command.operationId,
+                            reason = FlushFailureReason.ACCESS_DENIED,
                         ),
                     )
                 }
@@ -742,11 +740,9 @@ class EventsSessionProcessor(
             is SessionCommand.ViewportAtTop -> {
                 if (!_state.value.access.eventsRead || accessFence.value.denied) {
                     command.response?.complete(
-                        PendingNewerFlushResult(
-                            batchId = 0L,
-                            snapshotId = null,
-                            materializedEventIds = emptyList(),
-                            createdEventIds = emptyList(),
+                        PendingNewerFlushResult.Rejected(
+                            operationId = command.operationId,
+                            reason = FlushFailureReason.ACCESS_DENIED,
                         ),
                     )
                     return
@@ -755,6 +751,16 @@ class EventsSessionProcessor(
                 val pendingNewerEntries =
                     currentOverlay.entries
                         .filterValues { it.membership == OverlayMembership.PENDING_NEWER }
+
+                if (pendingNewerEntries.isEmpty()) {
+                    command.response?.complete(
+                        PendingNewerFlushResult.NoPendingEvents(
+                            operationId = command.operationId,
+                            feedRevision = _state.value.feedRevision,
+                        ),
+                    )
+                    return
+                }
 
                 val createdIds =
                     pendingNewerEntries
@@ -774,19 +780,17 @@ class EventsSessionProcessor(
                 val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
                 val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
 
-                val deltaBatchId = if (allPendingIds.isNotEmpty()) ++feedDeltaBatchCounter else 0L
+                val deltaBatchId = ++feedDeltaBatchCounter
                 val delta =
-                    if (allPendingIds.isNotEmpty()) {
-                        EventsFeedDelta(
-                            batchId = deltaBatchId,
-                            tenantSequence = sequenceProcessor.currentSequence,
-                            createdEventIds = createdIds,
-                            updatedEventIds = updatedIds,
-                            removedEventIds = emptyList(),
-                        )
-                    } else {
-                        null
-                    }
+                    EventsFeedDelta(
+                        batchId = deltaBatchId,
+                        tenantSequence = sequenceProcessor.currentSequence,
+                        createdEventIds = createdIds,
+                        updatedEventIds = updatedIds,
+                        removedEventIds = emptyList(),
+                    )
+
+                val nextRevision = ++feedRevisionCounter
 
                 _state.update {
                     it.copy(
@@ -796,21 +800,33 @@ class EventsSessionProcessor(
                         pendingNewerCount = newerCount,
                         pendingHistoryCount = historyCount,
                         pendingDeltas = appendFeedDelta(it.pendingDeltas, delta),
+                        feedRevision = nextRevision,
                     )
                 }
 
                 command.response?.complete(
-                    PendingNewerFlushResult(
+                    PendingNewerFlushResult.Completed(
+                        operationId = command.operationId,
                         batchId = deltaBatchId,
                         snapshotId = _state.value.snapshotId,
+                        feedRevision = nextRevision,
                         materializedEventIds = allPendingIds,
                         createdEventIds = createdIds,
+                        updatedEventIds = updatedIds,
+                        remainingPendingEventIds = emptyList(),
+                        remainingPendingCount = 0,
                     ),
                 )
             }
             is SessionCommand.AcknowledgeFeedDeltas -> {
                 _state.update { current ->
-                    val remaining = current.pendingDeltas.filter { it.batchId > command.batchId }
+                    val head = current.pendingDeltas.firstOrNull()
+                    val remaining =
+                        if (head != null && head.batchId <= command.batchId) {
+                            current.pendingDeltas.filter { it.batchId > command.batchId }
+                        } else {
+                            current.pendingDeltas
+                        }
                     current.copy(pendingDeltas = remaining)
                 }
                 command.response?.complete(Unit)
@@ -1076,6 +1092,9 @@ class EventsSessionProcessor(
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
                 pendingDeltas = emptyList(),
+                nextCursor = candidateNextCursor,
+                pageGeneration = 1L,
+                feedRevision = ++feedRevisionCounter,
             )
         }
 
@@ -1140,6 +1159,9 @@ class EventsSessionProcessor(
                 paginationError = null,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
+                nextCursor = page.nextCursor,
+                pageGeneration = it.pageGeneration + 1L,
+                feedRevision = ++feedRevisionCounter,
             )
         }
     }
@@ -1216,6 +1238,9 @@ class EventsSessionProcessor(
                 snapshotTotalCount = currentTotalCount,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
+                nextCursor = it.nextCursor,
+                pageGeneration = it.pageGeneration,
+                feedRevision = ++feedRevisionCounter,
             )
         }
     }
@@ -1298,6 +1323,9 @@ class EventsSessionProcessor(
                 snapshotTotalCount = currentTotalCount,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
+                nextCursor = it.nextCursor,
+                pageGeneration = it.pageGeneration,
+                feedRevision = ++feedRevisionCounter,
             )
         }
     }
@@ -1648,6 +1676,7 @@ class EventsSessionProcessor(
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
                 pendingDeltas = appendFeedDelta(it.pendingDeltas, delta),
+                feedRevision = if (delta != null) ++feedRevisionCounter else it.feedRevision,
             )
         }
 

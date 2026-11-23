@@ -34,6 +34,12 @@ data class EventsState(
     val liveCreatedIds: List<String> = emptyList(),
     val liveRemovedIds: Set<String> = emptySet(),
     val liveBatchId: Long = 0L,
+    val pendingPresentationDeltas: List<studio.acmenra.control.feature.events.domain.repository.EventsFeedDelta> =
+        emptyList(),
+    val feedSessionGeneration: Long = 0L,
+    val feedRevision: Long = 0L,
+    val nextCursor: String? = null,
+    val pageGeneration: Long = 0L,
     val snapshotTotalCount: Int? = null,
     val hasMore: Boolean = false,
     val isLoadingNextPage: Boolean = false,
@@ -87,18 +93,25 @@ data class EventsFeedScope(
     val key: String get() = canonicalFeedScopeKey(companyId, filter, sort)
 }
 
+private fun escapeFeedScopeToken(token: String): String =
+    token
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace(":", "\\:")
+        .replace(",", "\\,")
+
 fun canonicalFeedScopeKey(
     companyId: String,
     filter: EventsFilter,
     sort: EventsSort = EventsSort.OCCURRED_AT_DESC,
 ): String =
     buildString {
-        append("company:").append(companyId)
-        append("|types:").append(filter.eventTypeIds.sorted().joinToString(","))
-        append("|devices:").append(filter.deviceIds.sorted().joinToString(","))
+        append("company:").append(escapeFeedScopeToken(companyId))
+        append("|types:").append(filter.eventTypeIds.sorted().joinToString(",") { escapeFeedScopeToken(it) })
+        append("|devices:").append(filter.deviceIds.sorted().joinToString(",") { escapeFeedScopeToken(it) })
         append("|validity:").append(filter.validity.name)
         append("|sort:").append(sort.name)
-        append("|q:").append(filter.searchId.orEmpty())
+        append("|q:").append(escapeFeedScopeToken(filter.searchId.orEmpty()))
         append("|from:").append(filter.dateFrom?.toString().orEmpty())
         append("|to:").append(filter.dateTo?.toString().orEmpty())
     }

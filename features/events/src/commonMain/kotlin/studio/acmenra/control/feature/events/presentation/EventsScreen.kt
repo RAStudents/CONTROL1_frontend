@@ -89,6 +89,7 @@ import studio.acmenra.control.feature.events.domain.model.EventValidity
 import studio.acmenra.control.feature.events.domain.model.EventsAccessCapabilities
 import studio.acmenra.control.feature.events.domain.model.EventsExportFormatPreset
 import studio.acmenra.control.feature.events.domain.model.LocationFilterGroup
+import studio.acmenra.control.feature.events.domain.repository.HistoryRefreshResult
 import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.presentation.components.EventViewer
 import studio.acmenra.control.feature.events.presentation.components.EventsDatePickerDialog
@@ -167,7 +168,7 @@ fun EventsRouteContent(
         onLoadNextPage = viewModel::loadNextPage,
         onRefresh = viewModel::refresh,
         onViewportAtTop = viewModel::onViewportAtTop,
-        onFlushPendingNewer = viewModel::flushPendingNewer,
+        onFlushPendingNewer = { ids -> viewModel.flushPendingNewer(expectedEventIds = ids) },
         onLiveDeltaConsumed = viewModel::onLiveDeltaConsumed,
         onSelectEvent = viewModel::selectEvent,
         onCloseViewerCompact = viewModel::closeViewerCompact,
@@ -184,6 +185,8 @@ fun EventsRouteContent(
         onCloseFilterDialog = viewModel::closeFilterDialog,
         onOpenVideo = mediaOpener::openMedia,
         onOffscreenLiveEventsDetected = viewModel::onOffscreenLiveEventsDetected,
+        onLiveDeltaRegistered = viewModel::onLiveDeltaRegistered,
+        onRefreshPendingHistory = viewModel::refreshPendingHistory,
         modifier = modifier,
     )
 }
@@ -221,6 +224,8 @@ fun EventsScreen(
     modifier: Modifier = Modifier,
     onFlushPendingNewer: (suspend (List<String>) -> PendingNewerFlushResult)? = null,
     onLiveDeltaConsumed: ((Long) -> Unit)? = null,
+    onLiveDeltaRegistered: ((sessionGeneration: Long, batchId: Long) -> Unit)? = null,
+    onRefreshPendingHistory: (suspend () -> HistoryRefreshResult)? = null,
     onSearchIdCommitted: ((String) -> Unit)? = null,
     onResetDate: (() -> Unit)? = null,
     onEventTypesApplied: ((Set<String>) -> Unit)? = null,
@@ -321,6 +326,8 @@ fun EventsScreen(
                     onDownloadExport = onDownloadExport,
                     onOpenVideo = onOpenVideo,
                     onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
+                    onLiveDeltaRegistered = onLiveDeltaRegistered,
+                    onRefreshPendingHistory = onRefreshPendingHistory,
                 )
             }
             EventsLayoutMode.Medium -> {
@@ -353,6 +360,8 @@ fun EventsScreen(
                     onDownloadExport = onDownloadExport,
                     onOpenVideo = onOpenVideo,
                     onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
+                    onLiveDeltaRegistered = onLiveDeltaRegistered,
+                    onRefreshPendingHistory = onRefreshPendingHistory,
                 )
             }
             EventsLayoutMode.Compact -> {
@@ -388,6 +397,8 @@ fun EventsScreen(
                     onDownloadExport = onDownloadExport,
                     onOpenVideo = onOpenVideo,
                     onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
+                    onLiveDeltaRegistered = onLiveDeltaRegistered,
+                    onRefreshPendingHistory = onRefreshPendingHistory,
                 )
             }
         }
@@ -454,6 +465,8 @@ private fun WideEventsLayout(
     modifier: Modifier = Modifier,
     onFlushPendingNewer: (suspend (List<String>) -> PendingNewerFlushResult)? = null,
     onLiveDeltaConsumed: ((Long) -> Unit)? = null,
+    onLiveDeltaRegistered: ((sessionGeneration: Long, batchId: Long) -> Unit)? = null,
+    onRefreshPendingHistory: (suspend () -> HistoryRefreshResult)? = null,
     listState: LazyListState = rememberLazyListState(),
     presentationState: EventsListPresentationState = remember(state.feedScopeKey) { EventsListPresentationState() },
     onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
@@ -531,6 +544,11 @@ private fun WideEventsLayout(
                     asOfSequence = state.asOfSequence,
                     isInitialLoading = state.isInitialLoading,
                     initialLoadError = state.initialLoadError,
+                    feedSessionGeneration = state.feedSessionGeneration,
+                    feedRevision = state.feedRevision,
+                    nextCursor = state.nextCursor,
+                    pageGeneration = state.pageGeneration,
+                    pendingPresentationDeltas = state.pendingPresentationDeltas,
                     pendingHistoryCount = state.pendingHistoryCount,
                     requiresRefresh = state.requiresRefresh,
                     paginationError = state.paginationError,
@@ -541,6 +559,8 @@ private fun WideEventsLayout(
                     onViewportAtTop = onViewportAtTop,
                     onFlushPendingNewer = onFlushPendingNewer,
                     onLiveDeltaConsumed = onLiveDeltaConsumed,
+                    onLiveDeltaRegistered = onLiveDeltaRegistered,
+                    onRefreshPendingHistory = onRefreshPendingHistory,
                     onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                     presentationState = presentationState,
                 )
@@ -616,6 +636,8 @@ private fun MediumEventsLayout(
     modifier: Modifier = Modifier,
     onFlushPendingNewer: (suspend (List<String>) -> PendingNewerFlushResult)? = null,
     onLiveDeltaConsumed: ((Long) -> Unit)? = null,
+    onLiveDeltaRegistered: ((sessionGeneration: Long, batchId: Long) -> Unit)? = null,
+    onRefreshPendingHistory: (suspend () -> HistoryRefreshResult)? = null,
     listState: LazyListState = rememberLazyListState(),
     presentationState: EventsListPresentationState = remember(state.feedScopeKey) { EventsListPresentationState() },
     onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
@@ -679,6 +701,11 @@ private fun MediumEventsLayout(
                     asOfSequence = state.asOfSequence,
                     isInitialLoading = state.isInitialLoading,
                     initialLoadError = state.initialLoadError,
+                    feedSessionGeneration = state.feedSessionGeneration,
+                    feedRevision = state.feedRevision,
+                    nextCursor = state.nextCursor,
+                    pageGeneration = state.pageGeneration,
+                    pendingPresentationDeltas = state.pendingPresentationDeltas,
                     pendingHistoryCount = state.pendingHistoryCount,
                     requiresRefresh = state.requiresRefresh,
                     paginationError = state.paginationError,
@@ -689,6 +716,8 @@ private fun MediumEventsLayout(
                     onViewportAtTop = onViewportAtTop,
                     onFlushPendingNewer = onFlushPendingNewer,
                     onLiveDeltaConsumed = onLiveDeltaConsumed,
+                    onLiveDeltaRegistered = onLiveDeltaRegistered,
+                    onRefreshPendingHistory = onRefreshPendingHistory,
                     onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                     presentationState = presentationState,
                 )
@@ -785,6 +814,8 @@ private fun CompactEventsLayout(
     modifier: Modifier = Modifier,
     onFlushPendingNewer: (suspend (List<String>) -> PendingNewerFlushResult)? = null,
     onLiveDeltaConsumed: ((Long) -> Unit)? = null,
+    onLiveDeltaRegistered: ((sessionGeneration: Long, batchId: Long) -> Unit)? = null,
+    onRefreshPendingHistory: (suspend () -> HistoryRefreshResult)? = null,
     listState: LazyListState = rememberLazyListState(),
     presentationState: EventsListPresentationState = remember(state.feedScopeKey) { EventsListPresentationState() },
     onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
@@ -883,6 +914,11 @@ private fun CompactEventsLayout(
                 asOfSequence = state.asOfSequence,
                 isInitialLoading = state.isInitialLoading,
                 initialLoadError = state.initialLoadError,
+                feedSessionGeneration = state.feedSessionGeneration,
+                feedRevision = state.feedRevision,
+                nextCursor = state.nextCursor,
+                pageGeneration = state.pageGeneration,
+                pendingPresentationDeltas = state.pendingPresentationDeltas,
                 pendingHistoryCount = state.pendingHistoryCount,
                 requiresRefresh = state.requiresRefresh,
                 paginationError = state.paginationError,
@@ -893,6 +929,8 @@ private fun CompactEventsLayout(
                 onViewportAtTop = onViewportAtTop,
                 onFlushPendingNewer = onFlushPendingNewer,
                 onLiveDeltaConsumed = onLiveDeltaConsumed,
+                onLiveDeltaRegistered = onLiveDeltaRegistered,
+                onRefreshPendingHistory = onRefreshPendingHistory,
                 onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                 presentationState = presentationState,
             )

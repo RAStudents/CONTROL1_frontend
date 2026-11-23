@@ -10,6 +10,7 @@ enum class OverlayMembership {
 enum class RealtimeEventOrigin {
     CREATED,
     UPDATED,
+    UNKNOWN,
 }
 
 data class OverlayEntry(
@@ -17,7 +18,7 @@ data class OverlayEntry(
     val event: Event,
     val eventVersion: Long,
     val membership: OverlayMembership,
-    val origin: RealtimeEventOrigin = RealtimeEventOrigin.CREATED,
+    val origin: RealtimeEventOrigin = RealtimeEventOrigin.UNKNOWN,
 )
 
 data class RealtimeOverlay(

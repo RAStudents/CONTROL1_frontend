@@ -178,7 +178,11 @@ object RealtimeOverlayReducer {
             }
 
         val origin =
-            existingEntry?.origin ?: if (isEventCreated) RealtimeEventOrigin.CREATED else RealtimeEventOrigin.UPDATED
+            when {
+                existingEntry != null && existingEntry.origin != RealtimeEventOrigin.UNKNOWN -> existingEntry.origin
+                isEventCreated -> RealtimeEventOrigin.CREATED
+                else -> RealtimeEventOrigin.UPDATED
+            }
         val newEntries = currentOverlay.entries.toMutableMap()
         newEntries[effectiveEvent.id] =
             OverlayEntry(

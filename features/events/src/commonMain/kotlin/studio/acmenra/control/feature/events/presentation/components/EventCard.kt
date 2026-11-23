@@ -21,8 +21,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -38,7 +40,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.coerceAtLeast
 import kotlinx.datetime.TimeZone
 import org.jetbrains.compose.resources.painterResource
+import org.jetbrains.compose.resources.stringResource
 import studio.acmenra.control.core.ui.generated.resources.Res
+import studio.acmenra.control.core.ui.generated.resources.events_status_acknowledged
+import studio.acmenra.control.core.ui.generated.resources.ic_check_circle
 import studio.acmenra.control.core.ui.generated.resources.ic_chevron_right
 import studio.acmenra.control.core.ui.generated.resources.ic_event_alert
 import studio.acmenra.control.core.ui.generated.resources.ic_event_defect
@@ -49,6 +54,7 @@ import studio.acmenra.control.core.ui.generated.resources.ic_event_sleep
 import studio.acmenra.control.core.ui.theme.AmberCorners
 import studio.acmenra.control.core.ui.theme.AmberDimens
 import studio.acmenra.control.feature.events.domain.model.Event
+import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementStatus
 import studio.acmenra.control.feature.events.domain.model.EventIconKey
 import studio.acmenra.control.feature.events.presentation.util.EventDateDisplayFormatter
 
@@ -61,6 +67,8 @@ fun EventCard(
     businessTimeZone: TimeZone?,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    canAcknowledge: Boolean = false,
+    onAcknowledge: (() -> Unit)? = null,
     hasGluedAbove: Boolean = false,
     hasGluedBelow: Boolean = false,
     shape: Shape? = null,
@@ -282,6 +290,35 @@ fun EventCard(
                 }
 
                 Spacer(modifier = Modifier.width(AmberDimens.GapSmall))
+
+                // Acknowledge Action Button
+                val canAckThisEvent =
+                    canAcknowledge &&
+                        (
+                            event.status == EventAcknowledgementStatus.NEW ||
+                                event.status == EventAcknowledgementStatus.LEGACY_UNKNOWN
+                        )
+                if (canAckThisEvent) {
+                    if (isPendingAck) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(AmberDimens.ListIcon),
+                            strokeWidth = AmberDimens.ListGap,
+                        )
+                    } else if (onAcknowledge != null) {
+                        IconButton(
+                            onClick = onAcknowledge,
+                            modifier = Modifier.size(AmberDimens.ListIconCircle),
+                        ) {
+                            Icon(
+                                painter = painterResource(Res.drawable.ic_check_circle),
+                                contentDescription = stringResource(Res.string.events_status_acknowledged),
+                                modifier = Modifier.size(AmberDimens.ListIcon),
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(AmberDimens.GapSmall))
+                }
 
                 // Right: Chevron icon that scales when selected and shifts on hover
                 Icon(

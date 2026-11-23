@@ -50,6 +50,8 @@ import studio.acmenra.control.feature.events.domain.model.LocationToggleState
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 import studio.acmenra.control.feature.events.domain.model.locationToggleState
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
+import studio.acmenra.control.feature.events.domain.repository.FlushFailureReason
+import studio.acmenra.control.feature.events.domain.repository.HistoryRefreshResult
 import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.domain.usecase.AcknowledgeEventUseCase
 import studio.acmenra.control.feature.events.domain.usecase.CreateEventsExportUseCase
@@ -94,6 +96,7 @@ class EventsViewModel(
     private var filterOptionsGeneration: Long = 0L
     private var downloadGeneration: Long = 0L
     private var lastProcessedDeltaBatchId: Long = 0L
+    private var feedSessionGeneration: Long = 0L
 
     var onQueryHashChanged: ((String?) -> Unit)? = null
     private var activeQueryHash: String? = null
@@ -326,6 +329,7 @@ class EventsViewModel(
 
         val sessionCompanyGen = companyGeneration
         val currentGen = ++filterRequestGeneration
+        val sessionGen = ++feedSessionGeneration
         feedCollectJob?.cancel()
         feedNoticeJob?.cancel()
         feedFilterOptionsJob?.cancel()
@@ -343,10 +347,10 @@ class EventsViewModel(
                     val canRead = feedState.access.eventsRead && _state.value.access.eventsRead
                     val feedScopeKey = canonicalFeedScopeKey(companyId, _state.value.filter, _state.value.sort)
 
-                    // Strictly consume authoritative EventsFeedDelta (§1.5, §7.1, P3.1-P3.4)
-                    val delta = feedState.feedDelta
+                    val newDeltas = feedState.pendingDeltas
+                    val delta = newDeltas.firstOrNull()
                     val batchId = delta?.batchId ?: 0L
-                    val isNewBatch = delta != null && batchId != 0L && batchId > lastProcessedDeltaBatchId && canRead
+                    val isNewBatch = canRead && delta != null && batchId > lastProcessedDeltaBatchId
                     if (isNewBatch) {
                         lastProcessedDeltaBatchId = batchId
                     }
@@ -369,6 +373,10 @@ class EventsViewModel(
                     val newLiveBatchId = if (isNewBatch) batchId else _state.value.liveBatchId
 
                     _state.update { current ->
+                        val existingBatchIds = current.pendingPresentationDeltas.map { it.batchId }.toSet()
+                        val toAdd = if (canRead) newDeltas.filter { it.batchId !in existingBatchIds } else emptyList()
+                        val mergedDeltas = current.pendingPresentationDeltas + toAdd
+
                         val hasLoadedContent = current.summary != null || current.visibleEvents.isNotEmpty()
                         val isSessionInitial = feedState.isInitialLoading
                         current.copy(
@@ -386,6 +394,11 @@ class EventsViewModel(
                             asOfSequence = if (canRead) feedState.asOfSequence else 0L,
                             snapshotId = if (canRead) feedState.snapshotId else null,
                             feedScopeKey = feedScopeKey,
+                            feedSessionGeneration = sessionGen,
+                            feedRevision = feedState.feedRevision,
+                            nextCursor = feedState.nextCursor,
+                            pageGeneration = feedState.pageGeneration,
+                            pendingPresentationDeltas = mergedDeltas,
                             liveCreatedIds = liveCreated,
                             liveRemovedIds = liveRemoved,
                             liveBatchId = newLiveBatchId,
@@ -628,13 +641,61 @@ class EventsViewModel(
         feedSession?.onViewportAtTop()
     }
 
-    suspend fun flushPendingNewer(expectedEventIds: List<String> = emptyList()): PendingNewerFlushResult =
-        feedSession?.flushPendingNewer(expectedEventIds)
-            ?: PendingNewerFlushResult(0L, null, emptyList(), emptyList())
+    suspend fun flushPendingNewer(
+        operationId: Long = 0L,
+        expectedEventIds: List<String> = emptyList(),
+    ): PendingNewerFlushResult =
+        feedSession?.flushPendingNewer(operationId, expectedEventIds)
+            ?: PendingNewerFlushResult.Rejected(
+                operationId = operationId,
+                reason = FlushFailureReason.SESSION_CLOSED,
+            )
+
+    fun onLiveDeltaRegistered(
+        sessionGeneration: Long,
+        batchId: Long,
+    ) {
+        val session = feedSession ?: return
+        if (sessionGeneration != feedSessionGeneration) return
+
+        viewModelScope.launch {
+            try {
+                session.acknowledgeDeltasThrough(batchId, sessionGeneration)
+                _state.update { current ->
+                    if (current.feedSessionGeneration == sessionGeneration) {
+                        val remaining = current.pendingPresentationDeltas.filter { it.batchId > batchId }
+                        val nextHead = remaining.firstOrNull()
+                        current.copy(
+                            pendingPresentationDeltas = remaining,
+                            liveCreatedIds = nextHead?.createdEventIds ?: emptyList(),
+                            liveRemovedIds = nextHead?.removedEventIds?.toSet() ?: emptySet(),
+                            liveBatchId = nextHead?.batchId ?: current.liveBatchId,
+                        )
+                    } else {
+                        current
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                // Keep delta in pendingPresentationDeltas for retry
+            }
+        }
+    }
 
     fun onLiveDeltaConsumed(batchId: Long) {
-        viewModelScope.launch {
-            feedSession?.acknowledgeDeltasThrough(batchId)
+        onLiveDeltaRegistered(feedSessionGeneration, batchId)
+    }
+
+    suspend fun refreshPendingHistory(): HistoryRefreshResult {
+        val session = feedSession ?: return HistoryRefreshResult.Failed("Session closed")
+        return try {
+            session.refresh()
+            HistoryRefreshResult.Updated
+        } catch (c: CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            HistoryRefreshResult.Failed(t.message ?: "Refresh failed")
         }
     }
 

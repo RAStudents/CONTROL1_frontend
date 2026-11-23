@@ -27,7 +27,7 @@ sealed interface RebootstrapState {
 
 data class EventsFeedDelta(
     val batchId: Long,
-    val tenantSequence: Long,
+    val tenantSequence: Long = 0L,
     val createdEventIds: List<String> = emptyList(),
     val updatedEventIds: List<String> = emptyList(),
     val removedEventIds: List<String> = emptyList(),
@@ -73,6 +73,9 @@ data class EventsFeedState(
     val summary: EventsSummary? = null,
     val isSummaryLoading: Boolean = false,
     val pendingDeltas: List<EventsFeedDelta> = emptyList(),
+    val feedRevision: Long = 0L,
+    val nextCursor: String? = null,
+    val pageGeneration: Long = 0L,
 ) {
     constructor(
         visibleEvents: List<Event> = emptyList(),
@@ -122,10 +125,17 @@ data class EventsFeedState(
     val requiresRefresh: Boolean get() = realtimeOverlay.requiresRefresh
 }
 
+private const val MAX_PENDING_DELTAS = 100
+
 fun appendFeedDelta(
     current: List<EventsFeedDelta>,
     delta: EventsFeedDelta?,
 ): List<EventsFeedDelta> {
     if (delta == null || delta.isEmpty) return current
-    return current + delta
+    val next = current + delta
+    return if (next.size > MAX_PENDING_DELTAS) {
+        next.drop(next.size - MAX_PENDING_DELTAS)
+    } else {
+        next
+    }
 }

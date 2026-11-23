@@ -749,15 +749,27 @@ class EventsFeedSessionImpl(
         processor.dispatch(SessionCommand.ViewportAtTop())
     }
 
-    override suspend fun flushPendingNewer(expectedEventIds: List<String>): PendingNewerFlushResult {
+    override suspend fun flushPendingNewer(
+        operationId: Long,
+        expectedEventIds: List<String>,
+    ): PendingNewerFlushResult {
+        if (isClosed) {
+            return PendingNewerFlushResult.Rejected(
+                operationId = operationId,
+                reason = studio.acmenra.control.feature.events.domain.repository.FlushFailureReason.SESSION_CLOSED,
+            )
+        }
         val response = CompletableDeferred<PendingNewerFlushResult>()
-        processor.dispatch(SessionCommand.ViewportAtTop(expectedEventIds, response))
+        processor.dispatch(SessionCommand.ViewportAtTop(operationId, expectedEventIds, response))
         return response.await()
     }
 
-    override suspend fun acknowledgeDeltasThrough(batchId: Long) {
+    override suspend fun acknowledgeDeltasThrough(
+        batchId: Long,
+        sessionGeneration: Long,
+    ) {
         val response = CompletableDeferred<Unit>()
-        processor.dispatch(SessionCommand.AcknowledgeFeedDeltas(batchId, response))
+        processor.dispatch(SessionCommand.AcknowledgeFeedDeltas(sessionGeneration, batchId, response))
         response.await()
     }
 

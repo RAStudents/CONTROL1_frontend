@@ -80,6 +80,7 @@ import studio.acmenra.control.feature.events.domain.model.OverlayEntry
 import studio.acmenra.control.feature.events.domain.model.OverlayMembership
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
+import studio.acmenra.control.feature.events.domain.repository.EventsFeedDelta
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
 import studio.acmenra.control.feature.events.domain.repository.EventsRepository
@@ -91,6 +92,10 @@ import studio.acmenra.control.feature.events.domain.usecase.LoadEventsBootstrapU
 import studio.acmenra.control.feature.events.domain.usecase.MarkEventErroneousUseCase
 import studio.acmenra.control.feature.events.domain.usecase.ObserveEventsExportStatusUseCase
 import studio.acmenra.control.feature.events.domain.usecase.ObserveEventsFeedUseCase
+import studio.acmenra.control.feature.events.presentation.components.EventsListPresentationState
+import studio.acmenra.control.feature.events.presentation.components.OffscreenQueueState
+import studio.acmenra.control.feature.events.presentation.components.PendingNewerFlushContext
+import studio.acmenra.control.feature.events.presentation.components.PendingNewerFlushReason
 import studio.acmenra.control.feature.events.presentation.platform.ExportFileSaver
 import studio.acmenra.control.feature.events.presentation.util.EventDateDisplayFormatter
 import kotlin.test.AfterTest
@@ -1513,6 +1518,128 @@ class EventsReviewFixesTests {
                 "Materialized pending newer event must be in liveCreatedIds",
             )
         }
+
+    @Test
+    fun testLiveCreatedEventWithEventVersion2IsClassifiedAsLiveCreated() =
+        runTest {
+            val event1 = sampleEvent("ev-1").copy(occurredAt = kotlinx.datetime.Instant.parse("2026-03-01T10:00:00Z"))
+            val event2 =
+                sampleEvent(
+                    "ev-2",
+                ).copy(occurredAt = kotlinx.datetime.Instant.parse("2026-03-01T10:01:00Z"), eventVersion = 2L)
+
+            val session = TestFeedSession()
+            val initialFeed =
+                EventsFeedState(
+                    isInitialLoading = false,
+                    visibleEvents = listOf(event1),
+                    snapshotId = "snap-1",
+                    asOfSequence = 10L,
+                    access = EventsAccessCapabilities(eventsRead = true),
+                )
+            session.emitState(initialFeed)
+
+            val vm = createTestViewModel(session)
+            vm.initialize("comp-1", EventsAccessCapabilities(eventsRead = true))
+            advanceUntilIdle()
+
+            // 1. Direct live creation with eventVersion = 2L via explicit feed delta
+            session.emitState(
+                initialFeed.copy(
+                    asOfSequence = 11L,
+                    visibleEvents = listOf(event2, event1),
+                    feedDelta =
+                        EventsFeedDelta(
+                            batchId = 1L,
+                            tenantSequence = 11L,
+                            createdEventIds = listOf(event2.id),
+                        ),
+                ),
+            )
+            runCurrent()
+            assertTrue(
+                "ev-2" in vm.state.value.liveCreatedIds,
+                "Event with eventVersion 2 must be classified as liveCreated via feedDelta",
+            )
+            assertEquals(1L, vm.state.value.liveBatchId)
+
+            // 2. Direct live creation with eventVersion = 2L without explicit feed delta (fallback advance)
+            val event3 =
+                sampleEvent("ev-3").copy(
+                    occurredAt = kotlinx.datetime.Instant.parse("2026-03-01T10:02:00Z"),
+                    eventVersion = 2L,
+                )
+            val overlayWithEvent3 =
+                RealtimeOverlay(
+                    entries =
+                        mapOf(
+                            event3.id to
+                                OverlayEntry(
+                                    eventId = event3.id,
+                                    event = event3,
+                                    eventVersion = 2L,
+                                    membership = OverlayMembership.INCLUDED,
+                                ),
+                        ),
+                )
+            session.emitState(
+                initialFeed.copy(
+                    asOfSequence = 12L,
+                    visibleEvents = listOf(event3, event2, event1),
+                    realtimeOverlay = overlayWithEvent3,
+                    feedDelta = null,
+                ),
+            )
+            runCurrent()
+            assertTrue(
+                "ev-3" in vm.state.value.liveCreatedIds,
+                "Fallback classifier must not require eventVersion == 1L",
+            )
+        }
+
+    @Test
+    fun testReconcilePendingNewerPreservesBackdatedEvents() {
+        val queue = OffscreenQueueState().upsertPendingNewer(2)
+        assertEquals(2, queue.pendingNewerMarkerCount)
+
+        // flushCandidates contains backdated event "ev-backdated" and newest "ev-new"
+        val candidateIds = listOf("ev-new", "ev-backdated")
+        // Only "ev-new" is currently visible in layout
+        val visibleKeys = setOf("ev-new")
+
+        val reconciled =
+            queue.reconcilePendingNewerWithMaterializedIds(
+                materializedIds = candidateIds,
+                currentlyVisibleIds = visibleKeys,
+            )
+
+        // Marker was removed and non-visible "ev-backdated" was preserved in queue!
+        assertFalse(reconciled.hasPendingNewerMarker)
+        assertTrue(
+            reconciled.entries.any {
+                it is studio.acmenra.control.feature.events.presentation.components.OffscreenQueueEntry.LoadedEvent &&
+                    it.eventId == "ev-backdated"
+            },
+        )
+    }
+
+    @Test
+    fun testEventsListPresentationStateHoistingPreservesQueueAcrossScopes() {
+        val presentationState = EventsListPresentationState()
+        presentationState.queueState = presentationState.queueState.upsertPendingNewer(3)
+        presentationState.activeFlushContext =
+            PendingNewerFlushContext(
+                reason = PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY,
+                capturedCount = 3,
+                feedScopeKey = "scope-1",
+            )
+        presentationState.exitingIds = setOf("ev-exit")
+
+        // Recreating layout within same feed scope retains presentationState
+        assertEquals(3, presentationState.queueState.pendingNewerMarkerCount)
+        assertEquals(PendingNewerFlushReason.ACCUMULATED_WHILE_AWAY, presentationState.activeFlushContext?.reason)
+        assertTrue("ev-exit" in presentationState.exitingIds)
+    }
 
     private fun sampleEvent(
         id: String,

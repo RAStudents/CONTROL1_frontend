@@ -10,6 +10,7 @@ import studio.acmenra.control.feature.events.domain.model.EventsFilter
 import studio.acmenra.control.feature.events.domain.model.EventsFilterOptions
 import studio.acmenra.control.feature.events.domain.model.EventsInitialLoadError
 import studio.acmenra.control.feature.events.domain.model.EventsPaginationError
+import studio.acmenra.control.feature.events.domain.model.EventsSort
 import studio.acmenra.control.feature.events.domain.model.EventsSummary
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
@@ -32,6 +33,7 @@ data class EventsState(
     val feedScopeKey: String = "",
     val liveCreatedIds: Set<String> = emptySet(),
     val liveRemovedIds: Set<String> = emptySet(),
+    val liveBatchId: Long = 0L,
     val snapshotTotalCount: Int? = null,
     val hasMore: Boolean = false,
     val isLoadingNextPage: Boolean = false,
@@ -43,6 +45,7 @@ data class EventsState(
     val filterOptions: EventsFilterOptions? = null,
     val isFilterOptionsLoading: Boolean = false,
     val filter: EventsFilter = EventsFilter(),
+    val sort: EventsSort = EventsSort.OCCURRED_AT_DESC,
     val selectedEventId: String? = null,
     val isViewerOpenInCompact: Boolean = false,
     val isExportModeActive: Boolean = false,
@@ -75,12 +78,14 @@ data class EventsState(
 fun canonicalFeedScopeKey(
     companyId: String,
     filter: EventsFilter,
+    sort: EventsSort = EventsSort.OCCURRED_AT_DESC,
 ): String =
     buildString {
         append("company:").append(companyId)
         append("|types:").append(filter.eventTypeIds.sorted().joinToString(","))
         append("|devices:").append(filter.deviceIds.sorted().joinToString(","))
         append("|validity:").append(filter.validity.name)
+        append("|sort:").append(sort.name)
         append("|q:").append(filter.searchId.orEmpty())
         append("|from:").append(filter.dateFrom?.toString().orEmpty())
         append("|to:").append(filter.dateTo?.toString().orEmpty())

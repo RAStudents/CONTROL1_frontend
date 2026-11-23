@@ -94,6 +94,7 @@ import studio.acmenra.control.feature.events.presentation.components.EventsDateP
 import studio.acmenra.control.feature.events.presentation.components.EventsEmptyState
 import studio.acmenra.control.feature.events.presentation.components.EventsFilters
 import studio.acmenra.control.feature.events.presentation.components.EventsList
+import studio.acmenra.control.feature.events.presentation.components.EventsListPresentationState
 import studio.acmenra.control.feature.events.presentation.components.EventsSummaryExportSlot
 import studio.acmenra.control.feature.events.presentation.platform.ExternalMediaOpener
 
@@ -269,6 +270,7 @@ fun EventsScreen(
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val listState = rememberSaveable(state.feedScopeKey, saver = LazyListState.Saver) { LazyListState() }
+        val presentationState = remember(state.feedScopeKey) { EventsListPresentationState() }
         val usableContentWidth = maxWidth - AmberDimens.ScreenMargin * 2
         val layoutMode =
             calculateEventsLayoutMode(
@@ -281,6 +283,7 @@ fun EventsScreen(
                 WideEventsLayout(
                     state = state,
                     listState = listState,
+                    presentationState = presentationState,
                     businessTimeZone = businessTimeZone,
                     onSearchIdChanged = onSearchIdChanged,
                     onSearchIdCommitted = onSearchIdCommitted ?: onSearchIdChanged,
@@ -310,6 +313,7 @@ fun EventsScreen(
                 MediumEventsLayout(
                     state = state,
                     listState = listState,
+                    presentationState = presentationState,
                     businessTimeZone = businessTimeZone,
                     onSearchIdChanged = onSearchIdChanged,
                     onSearchIdCommitted = onSearchIdCommitted ?: onSearchIdChanged,
@@ -339,6 +343,7 @@ fun EventsScreen(
                 CompactEventsLayout(
                     state = state,
                     listState = listState,
+                    presentationState = presentationState,
                     businessTimeZone = businessTimeZone,
                     onSearchIdChanged = onSearchIdChanged,
                     onSearchIdCommitted = onSearchIdCommitted ?: onSearchIdChanged,
@@ -430,6 +435,7 @@ private fun WideEventsLayout(
     onOpenVideo: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
+    presentationState: EventsListPresentationState = remember(state.feedScopeKey) { EventsListPresentationState() },
     onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
 ) {
     Column(
@@ -501,7 +507,10 @@ private fun WideEventsLayout(
                     snapshotId = state.snapshotId,
                     liveCreatedIds = state.liveCreatedIds,
                     liveRemovedIds = state.liveRemovedIds,
+                    liveBatchId = state.liveBatchId,
+                    asOfSequence = state.asOfSequence,
                     isInitialLoading = state.isInitialLoading,
+                    initialLoadError = state.initialLoadError,
                     pendingHistoryCount = state.pendingHistoryCount,
                     requiresRefresh = state.requiresRefresh,
                     paginationError = state.paginationError,
@@ -511,6 +520,7 @@ private fun WideEventsLayout(
                     onLoadNextPage = onLoadNextPage,
                     onViewportAtTop = onViewportAtTop,
                     onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
+                    presentationState = presentationState,
                 )
                 if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
                     Box(
@@ -579,6 +589,7 @@ private fun MediumEventsLayout(
     onOpenVideo: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
+    presentationState: EventsListPresentationState = remember(state.feedScopeKey) { EventsListPresentationState() },
     onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
 ) {
     Column(
@@ -636,7 +647,10 @@ private fun MediumEventsLayout(
                     snapshotId = state.snapshotId,
                     liveCreatedIds = state.liveCreatedIds,
                     liveRemovedIds = state.liveRemovedIds,
+                    liveBatchId = state.liveBatchId,
+                    asOfSequence = state.asOfSequence,
                     isInitialLoading = state.isInitialLoading,
+                    initialLoadError = state.initialLoadError,
                     pendingHistoryCount = state.pendingHistoryCount,
                     requiresRefresh = state.requiresRefresh,
                     paginationError = state.paginationError,
@@ -646,6 +660,7 @@ private fun MediumEventsLayout(
                     onLoadNextPage = onLoadNextPage,
                     onViewportAtTop = onViewportAtTop,
                     onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
+                    presentationState = presentationState,
                 )
                 if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
                     Box(
@@ -735,6 +750,7 @@ private fun CompactEventsLayout(
     onOpenVideo: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
+    presentationState: EventsListPresentationState = remember(state.feedScopeKey) { EventsListPresentationState() },
     onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
 ) {
     Column(
@@ -827,7 +843,10 @@ private fun CompactEventsLayout(
                 snapshotId = state.snapshotId,
                 liveCreatedIds = state.liveCreatedIds,
                 liveRemovedIds = state.liveRemovedIds,
+                liveBatchId = state.liveBatchId,
+                asOfSequence = state.asOfSequence,
                 isInitialLoading = state.isInitialLoading,
+                initialLoadError = state.initialLoadError,
                 pendingHistoryCount = state.pendingHistoryCount,
                 requiresRefresh = state.requiresRefresh,
                 paginationError = state.paginationError,
@@ -837,6 +856,7 @@ private fun CompactEventsLayout(
                 onLoadNextPage = onLoadNextPage,
                 onViewportAtTop = onViewportAtTop,
                 onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
+                presentationState = presentationState,
             )
             if (state.isInitialLoading || state.initialLoadError != null || state.visibleEvents.isEmpty()) {
                 Box(

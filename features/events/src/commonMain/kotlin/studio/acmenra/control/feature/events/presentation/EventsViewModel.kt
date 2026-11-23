@@ -341,9 +341,9 @@ class EventsViewModel(
                 session.state.collect { feedState ->
                     if (currentGen != filterRequestGeneration || sessionCompanyGen != companyGeneration) return@collect
                     val canRead = feedState.access.eventsRead && _state.value.access.eventsRead
-                    val feedScopeKey = canonicalFeedScopeKey(companyId, _state.value.filter)
+                    val feedScopeKey = canonicalFeedScopeKey(companyId, _state.value.filter, _state.value.sort)
 
-                    // Classify feed change provenance (§1.5, §7.1, P1.1)
+                    // Classify feed change provenance (§1.5, §7.1, P1.1, P1.2)
                     val liveCreated = mutableSetOf<String>()
                     val liveRemoved = mutableSetOf<String>()
 
@@ -360,19 +360,20 @@ class EventsViewModel(
                             currentSequence > previousSequence
 
                     val isFeedDelta = !isBootstrapOrRefresh && canRead && prevFeedState != null
-                    if (isFeedDelta) {
+                    if (feedState.feedDelta != null) {
+                        liveCreated.addAll(feedState.feedDelta.createdEventIds)
+                        liveRemoved.addAll(feedState.feedDelta.removedEventIds)
+                    } else if (isFeedDelta) {
                         val prev = prevFeedState!!
                         for ((id, entry) in feedState.realtimeOverlay.entries) {
                             val isDirectLiveIncluded =
                                 hasSequenceAdvance &&
                                     entry.membership == OverlayMembership.INCLUDED &&
-                                    entry.eventVersion == 1L &&
                                     !prev.realtimeOverlay.entries.containsKey(id) &&
                                     prev.visibleEvents.none { it.id == id }
 
                             val isPendingNewerMaterialized =
                                 entry.membership == OverlayMembership.INCLUDED &&
-                                    entry.eventVersion == 1L &&
                                     prev.realtimeOverlay.entries[id]?.membership == OverlayMembership.PENDING_NEWER &&
                                     prev.visibleEvents.none { it.id == id } &&
                                     feedState.visibleEvents.any { it.id == id }
@@ -390,6 +391,14 @@ class EventsViewModel(
                         }
                     }
                     prevFeedState = feedState
+
+                    val newLiveBatchId =
+                        feedState.feedDelta?.batchId
+                            ?: if (liveCreated.isNotEmpty() || liveRemoved.isNotEmpty()) {
+                                _state.value.liveBatchId + 1L
+                            } else {
+                                _state.value.liveBatchId
+                            }
 
                     if (liveCreated.isNotEmpty() || liveRemoved.isNotEmpty()) {
                         liveEventsCleanupJob?.cancel()
@@ -420,6 +429,7 @@ class EventsViewModel(
                             feedScopeKey = feedScopeKey,
                             liveCreatedIds = liveCreated,
                             liveRemovedIds = liveRemoved,
+                            liveBatchId = newLiveBatchId,
                             snapshotTotalCount =
                                 if (canRead) {
                                     if (isSessionInitial &&

@@ -25,6 +25,14 @@ sealed interface RebootstrapState {
     ) : RebootstrapState
 }
 
+data class EventsFeedDelta(
+    val batchId: Long = 0L,
+    val tenantSequence: Long = 0L,
+    val createdEventIds: List<String> = emptyList(),
+    val updatedEventIds: Set<String> = emptySet(),
+    val removedEventIds: Set<String> = emptySet(),
+)
+
 data class EventsFeedState(
     val visibleEvents: List<Event> = emptyList(),
     val realtimeOverlay: RealtimeOverlay = RealtimeOverlay(),
@@ -45,6 +53,7 @@ data class EventsFeedState(
     val pendingHistoryCount: Int = 0,
     val summary: EventsSummary? = null,
     val isSummaryLoading: Boolean = false,
+    val feedDelta: EventsFeedDelta? = null,
 ) {
     val pendingAckIds: Set<String> get() = realtimeOverlay.pendingAckIds
     val requiresRefresh: Boolean get() = realtimeOverlay.requiresRefresh

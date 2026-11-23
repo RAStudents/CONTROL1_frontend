@@ -28,6 +28,7 @@ import studio.acmenra.control.feature.events.domain.model.OverlayEntry
 import studio.acmenra.control.feature.events.domain.model.OverlayMembership
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
+import studio.acmenra.control.feature.events.domain.repository.EventsFeedDelta
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
 import studio.acmenra.control.feature.events.domain.repository.RebootstrapState
 import kotlin.time.Duration.Companion.seconds
@@ -184,6 +185,7 @@ class EventsSessionProcessor(
     private var activeConnectionId: Long = 0L
     private var nextCursor: String? = null
     private var currentTotalCount: Int = 0
+    private var feedDeltaBatchCounter: Long = 0L
     private val earlyFramesBuffer = mutableMapOf<Long, MutableList<IncomingWsFrame>>()
 
     private data class AccessFence(
@@ -683,9 +685,24 @@ class EventsSessionProcessor(
             is SessionCommand.ViewportAtTop -> {
                 if (!_state.value.access.eventsRead || accessFence.value.denied) return
                 // User navigated to top: integrate all pending newer events into visible feed
+                val pendingNewerIds =
+                    currentOverlay.entries
+                        .filterValues { it.membership == OverlayMembership.PENDING_NEWER }
+                        .keys
+                        .toList()
                 currentOverlay = RealtimeOverlayReducer.integratePendingNewer(currentOverlay)
                 val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
                 val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
+                val delta =
+                    if (pendingNewerIds.isNotEmpty()) {
+                        EventsFeedDelta(
+                            batchId = ++feedDeltaBatchCounter,
+                            tenantSequence = sequenceProcessor.currentSequence,
+                            createdEventIds = pendingNewerIds,
+                        )
+                    } else {
+                        null
+                    }
                 _state.update {
                     it.copy(
                         visibleEvents = visible,
@@ -693,6 +710,7 @@ class EventsSessionProcessor(
                         snapshotTotalCount = currentTotalCount,
                         pendingNewerCount = newerCount,
                         pendingHistoryCount = historyCount,
+                        feedDelta = delta,
                     )
                 }
             }
@@ -956,6 +974,7 @@ class EventsSessionProcessor(
                 summary = candidateSummary,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
+                feedDelta = null,
             )
         }
 
@@ -1377,6 +1396,10 @@ class EventsSessionProcessor(
         val updatedDto = commit.eventUpdated
         val currentHasMore = (nextCursor != null)
 
+        val createdIds = mutableListOf<String>()
+        val updatedIds = mutableSetOf<String>()
+        val removedIds = mutableSetOf<String>()
+
         if (createdDto != null) {
             val event = EventsDtoMapper.mapEvent(createdDto)
             val existingEntry = tentativeOverlay.entries[event.id]
@@ -1399,6 +1422,11 @@ class EventsSessionProcessor(
                     hasMore = currentHasMore,
                 )
             tentativeOverlay = newOverlay
+            if (membership == OverlayMembership.INCLUDED) {
+                createdIds.add(event.id)
+            } else if (membership == OverlayMembership.REMOVED) {
+                removedIds.add(event.id)
+            }
             if (!tentativeOverlay.requiresRefresh) {
                 val isMatching =
                     membership != OverlayMembership.REMOVED && RealtimeOverlayReducer.matchesFilter(event, query.filter)
@@ -1437,6 +1465,11 @@ class EventsSessionProcessor(
                         hasMore = currentHasMore,
                     )
                 tentativeOverlay = newOverlay
+                if (membership == OverlayMembership.REMOVED) {
+                    removedIds.add(event.id)
+                } else {
+                    updatedIds.add(event.id)
+                }
                 if (!tentativeOverlay.requiresRefresh) {
                     val isMatching =
                         membership != OverlayMembership.REMOVED &&
@@ -1486,6 +1519,19 @@ class EventsSessionProcessor(
         val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
         val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
 
+        val delta =
+            if (createdIds.isNotEmpty() || updatedIds.isNotEmpty() || removedIds.isNotEmpty()) {
+                EventsFeedDelta(
+                    batchId = ++feedDeltaBatchCounter,
+                    tenantSequence = sequenceProcessor.currentSequence,
+                    createdEventIds = createdIds,
+                    updatedEventIds = updatedIds,
+                    removedEventIds = removedIds,
+                )
+            } else {
+                null
+            }
+
         _state.update {
             it.copy(
                 visibleEvents = visible,
@@ -1496,6 +1542,7 @@ class EventsSessionProcessor(
                 replayId = sequenceProcessor.currentReplayId,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
+                feedDelta = delta,
             )
         }
 

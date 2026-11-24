@@ -179,9 +179,24 @@ internal data class OffscreenQueueState(
         return if (updated.size == entries.size) this else copy(entries = updated)
     }
 
+    /**
+     * Clears the pending newer marker without losing live events.
+     */
+    fun clearPendingNewerMarker(): OffscreenQueueState =
+        if (hasPendingNewerMarker) {
+            val updated = entries.filterNot { it is OffscreenQueueEntry.PendingNewerAtTop }
+            copy(entries = updated)
+        } else {
+            this
+        }
+
     fun replaceLiveTargets(orderedIds: List<String>): OffscreenQueueState {
-        val retained = entries.filterNot { it is OffscreenQueueEntry.LoadedEvent }
+        val currentLoadedIds = loadedEventIds
         val uniqueIds = orderedIds.distinct()
+        if (currentLoadedIds == uniqueIds) {
+            return this
+        }
+        val retained = entries.filterNot { it is OffscreenQueueEntry.LoadedEvent }
         val loaded = uniqueIds.map { OffscreenQueueEntry.LoadedEvent(it) }
         val historyIndex = retained.indexOfFirst { it is OffscreenQueueEntry.PendingHistory }
         val next =
@@ -249,14 +264,7 @@ internal data class OffscreenQueueState(
 
         // Materialized items from PendingNewerAtTop belong before older loaded events
         nextEntries.addAll(toInsert)
-
-        val historyIndex = remainingEntries.indexOfFirst { it is OffscreenQueueEntry.PendingHistory }
-        if (historyIndex == -1) {
-            nextEntries.addAll(remainingEntries)
-        } else {
-            nextEntries.addAll(remainingEntries.subList(0, historyIndex))
-            nextEntries.addAll(remainingEntries.subList(historyIndex, remainingEntries.size))
-        }
+        nextEntries.addAll(remainingEntries)
 
         return copy(entries = nextEntries)
     }
@@ -316,9 +324,6 @@ internal data class OffscreenQueueState(
                         } else if (direction == OffscreenDirection.DOWN && idx > maxVisibleIndex) {
                             count++
                         }
-                    } else {
-                        // If not yet measured in layout, assume UP
-                        if (direction == OffscreenDirection.UP) count++
                     }
                 }
                 is OffscreenQueueEntry.PendingHistory -> {
@@ -341,7 +346,17 @@ internal data class OffscreenQueueState(
         eventIdToLazyIndex: Map<String, Int>,
         allFeedEventIds: Set<String>? = null,
     ): Pair<OffscreenQueueState, OffscreenHeadResolution> {
-        var current = this
+        var current =
+            if (allFeedEventIds != null) {
+                val filtered =
+                    entries.filterNot {
+                        it is OffscreenQueueEntry.LoadedEvent &&
+                            it.eventId !in allFeedEventIds
+                    }
+                if (filtered.size == entries.size) this else copy(entries = filtered)
+            } else {
+                this
+            }
         while (current.entries.isNotEmpty()) {
             when (val head = current.entries.first()) {
                 is OffscreenQueueEntry.PendingNewerAtTop -> {

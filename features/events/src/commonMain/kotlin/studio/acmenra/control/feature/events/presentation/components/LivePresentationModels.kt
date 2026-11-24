@@ -20,7 +20,17 @@ internal data class LiveEventPresentationEntry(
 internal data class LiveEventTrackerState(
     val entries: List<LiveEventPresentationEntry> = emptyList(),
     val lastRegisteredBatchId: Long = 0L,
+    val sessionGeneration: Long = 0L,
 ) {
+    fun onSessionGenerationChanged(newGeneration: Long): LiveEventTrackerState {
+        if (newGeneration == sessionGeneration) return this
+        val preserved = entries.filter { it.phase == LiveEventPhase.OFFSCREEN_PENDING }
+        return copy(
+            sessionGeneration = newGeneration,
+            entries = preserved,
+        )
+    }
+
     val enteringIds: Set<String>
         get() =
             entries
@@ -50,6 +60,8 @@ internal data class LiveEventTrackerState(
                 ).map { it.eventId }
 }
 
+internal const val MAX_PRESENTED_ENTRIES = 200
+
 internal object LiveEventTrackerReducer {
     fun registerBatch(
         state: LiveEventTrackerState,
@@ -66,7 +78,7 @@ internal object LiveEventTrackerReducer {
         val additions =
             delta.createdEventIds
                 .distinct()
-                .filter { id -> knownIds.add(id) }
+                .filter { id -> id !in removedIds && knownIds.add(id) }
                 .mapIndexed { index, id ->
                     LiveEventPresentationEntry(
                         eventId = id,
@@ -76,7 +88,7 @@ internal object LiveEventTrackerReducer {
                     )
                 }
 
-        return LiveEventTrackerState(
+        return state.copy(
             entries = remaining + additions,
             lastRegisteredBatchId = delta.batchId,
         )
@@ -84,30 +96,27 @@ internal object LiveEventTrackerReducer {
 
     fun reconcileAfterLayout(
         state: LiveEventTrackerState,
-        currentFeedIds: Set<String>,
-        visibleEventIds: Set<String>,
+        actuallyVisibleKeys: Set<String>,
+        expandingInViewportIds: Set<String> = emptySet(),
     ): LiveEventTrackerState {
         val next =
-            state.entries.mapNotNull { entry ->
-                // Event has been removed from the current feed
-                if (entry.eventId !in currentFeedIds) {
-                    return@mapNotNull null
-                }
-
-                val isVisible = entry.eventId in visibleEventIds
+            state.entries.map { entry ->
+                val isVisible = entry.eventId in actuallyVisibleKeys
+                val isExpanding = entry.eventId in expandingInViewportIds
 
                 val nextPhase =
                     when (entry.phase) {
                         LiveEventPhase.AWAITING_LAYOUT -> {
                             if (isVisible) {
                                 LiveEventPhase.ENTERING
+                            } else if (isExpanding) {
+                                LiveEventPhase.AWAITING_LAYOUT
                             } else {
                                 LiveEventPhase.OFFSCREEN_PENDING
                             }
                         }
                         LiveEventPhase.ENTERING -> {
-                            // If user scrolled away before enter animation completed, immediately become OFFSCREEN_PENDING
-                            if (isVisible) {
+                            if (isVisible || isExpanding) {
                                 LiveEventPhase.ENTERING
                             } else {
                                 LiveEventPhase.OFFSCREEN_PENDING
@@ -123,10 +132,20 @@ internal object LiveEventTrackerReducer {
                         LiveEventPhase.PRESENTED -> LiveEventPhase.PRESENTED
                     }
 
-                entry.copy(phase = nextPhase)
+                if (nextPhase == entry.phase) entry else entry.copy(phase = nextPhase)
             }
 
-        return if (next == state.entries) state else state.copy(entries = next)
+        val presentedEntries = next.filter { it.phase == LiveEventPhase.PRESENTED }
+        val finalEntries =
+            if (presentedEntries.size > MAX_PRESENTED_ENTRIES) {
+                val excess = presentedEntries.size - MAX_PRESENTED_ENTRIES
+                val toDropIds = presentedEntries.take(excess).map { it.eventId }.toSet()
+                next.filterNot { it.eventId in toDropIds }
+            } else {
+                next
+            }
+
+        return if (finalEntries == state.entries) state else state.copy(entries = finalEntries)
     }
 
     fun enterAnimationFinished(
@@ -148,14 +167,28 @@ internal object LiveEventTrackerReducer {
             )
         return state.copy(entries = next)
     }
+}
 
-    fun pruneRemovedEvents(
-        state: LiveEventTrackerState,
-        currentFeedIds: Set<String>,
-    ): LiveEventTrackerState {
-        val next = state.entries.filter { it.eventId in currentFeedIds }
-        return if (next == state.entries) state else state.copy(entries = next)
+fun extractRemovedEventBatches(
+    pendingPresentationDeltas: List<EventsFeedDelta>,
+    liveRemovedIds: Set<String>,
+    liveBatchId: Long,
+): Map<String, Long> {
+    if (liveRemovedIds.isEmpty()) return emptyMap()
+    val result = LinkedHashMap<String, Long>()
+    for (delta in pendingPresentationDeltas) {
+        for (removedId in delta.removedEventIds) {
+            if (removedId in liveRemovedIds && !result.containsKey(removedId)) {
+                result[removedId] = delta.batchId
+            }
+        }
     }
+    for (removedId in liveRemovedIds) {
+        if (!result.containsKey(removedId)) {
+            result[removedId] = liveBatchId
+        }
+    }
+    return result
 }
 
 internal fun isItemActuallyVisible(
@@ -172,74 +205,13 @@ internal fun isItemActuallyVisible(
     return visibleHeight >= minimumVisiblePixels
 }
 
-internal data class EventsViewportSnapshot(
-    val firstVisibleItemIndex: Int = 0,
-    val firstVisibleItemScrollOffset: Int = 0,
-    val visibleItemIds: Set<String> = emptySet(),
-    val minVisibleItemIndex: Int? = null,
-    val maxVisibleItemIndex: Int? = null,
-    val isAtTop: Boolean = true,
-)
-
-internal data class LivePresentationPlan(
-    val batchId: Long = 0L,
-    val enterEventIds: Set<String> = emptySet(),
-    val offscreenEventIds: List<String> = emptyList(),
-    val removedEventIds: Set<String> = emptySet(),
-    val cascadeIndices: Map<String, Int> = emptyMap(),
-    val batchSize: Int = 0,
-)
-
 internal data class ExitingEventRecord(
     val event: Event,
     val generation: Long,
     val originalIndex: Int = -1,
     val predecessorId: String? = null,
+    val wasFirstInDayGroup: Boolean = false,
 )
-
-internal fun buildLivePresentationPlan(
-    batchId: Long,
-    createdEventIds: List<String>,
-    removedEventIds: Set<String>,
-    events: List<Event>,
-    viewportSnapshot: EventsViewportSnapshot,
-    animatedEventIds: Set<String>,
-): LivePresentationPlan {
-    if ((createdEventIds.isEmpty() && removedEventIds.isEmpty()) || batchId <= 0L) {
-        return LivePresentationPlan(
-            batchId = batchId,
-            removedEventIds = removedEventIds,
-        )
-    }
-
-    val newCandidateIds = createdEventIds.filter { it !in animatedEventIds }
-    val enterIds = mutableSetOf<String>()
-    val offscreenIds = mutableListOf<String>()
-
-    for (id in newCandidateIds) {
-        if (viewportSnapshot.isAtTop || id in viewportSnapshot.visibleItemIds) {
-            enterIds.add(id)
-        } else {
-            offscreenIds.add(id)
-        }
-    }
-
-    val cascadeMap =
-        if (enterIds.size in 1..4) {
-            enterIds.mapIndexed { idx, id -> id to idx }.toMap()
-        } else {
-            emptyMap()
-        }
-
-    return LivePresentationPlan(
-        batchId = batchId,
-        enterEventIds = enterIds,
-        offscreenEventIds = offscreenIds,
-        removedEventIds = removedEventIds,
-        cascadeIndices = cascadeMap,
-        batchSize = enterIds.size,
-    )
-}
 
 internal fun mergeExitingEvents(
     currentEvents: List<Event>,

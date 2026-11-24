@@ -26,6 +26,12 @@ import studio.acmenra.control.feature.events.domain.model.DateFilterUtils
 import kotlin.time.Instant
 
 object EventDateDisplayFormatter {
+    fun resolveEffectiveTimeZone(
+        businessTimeZone: TimeZone?,
+        fallbackTimeZone: TimeZone? = null,
+        systemDefaultProvider: () -> TimeZone = { TimeZone.currentSystemDefault() },
+    ): TimeZone = businessTimeZone ?: fallbackTimeZone ?: systemDefaultProvider()
+
     fun monthGenitiveStringResource(monthNumber: Int): StringResource =
         when (monthNumber) {
             1 -> Res.string.month_1_genitive

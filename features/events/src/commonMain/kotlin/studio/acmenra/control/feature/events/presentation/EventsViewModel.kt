@@ -8,10 +8,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.datetime.TimeZone
 import org.jetbrains.compose.resources.StringResource
 import studio.acmenra.control.core.ui.generated.resources.Res
@@ -24,6 +26,7 @@ import studio.acmenra.control.core.ui.generated.resources.events_export_expired_
 import studio.acmenra.control.core.ui.generated.resources.events_export_media_links_warning
 import studio.acmenra.control.core.ui.generated.resources.events_export_polling_timeout
 import studio.acmenra.control.core.ui.generated.resources.events_export_status_failed
+import studio.acmenra.control.core.ui.generated.resources.events_list_pagination_error
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_conflict
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_generic_error
 import studio.acmenra.control.core.ui.generated.resources.events_mutation_network_error
@@ -49,6 +52,7 @@ import studio.acmenra.control.feature.events.domain.model.LocationFilterGroup
 import studio.acmenra.control.feature.events.domain.model.LocationToggleState
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 import studio.acmenra.control.feature.events.domain.model.locationToggleState
+import studio.acmenra.control.feature.events.domain.repository.DeltaDeliveryState
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.FlushFailureReason
 import studio.acmenra.control.feature.events.domain.repository.HistoryRefreshResult
@@ -62,6 +66,8 @@ import studio.acmenra.control.feature.events.domain.usecase.ObserveEventsExportS
 import studio.acmenra.control.feature.events.domain.usecase.ObserveEventsFeedUseCase
 import studio.acmenra.control.feature.events.presentation.platform.ExportFileSaver
 import kotlin.time.Clock
+
+private const val HISTORY_REFRESH_WAITER_TIMEOUT_MS = 20_000L
 
 class EventsViewModel(
     private val observeEventsFeedUseCase: ObserveEventsFeedUseCase,
@@ -95,7 +101,15 @@ class EventsViewModel(
     private var filterRequestGeneration: Long = 0L
     private var filterOptionsGeneration: Long = 0L
     private var downloadGeneration: Long = 0L
-    private var lastProcessedDeltaBatchId: Long = 0L
+    private val feedSessionGenerationFlow = MutableStateFlow(0L)
+    private var refreshOperationCounter: Long = 0L
+    private var lastMergedDeltaBatchId: Long = 0L
+    private var lastBootstrapGeneration: Long = 0L
+    private var highestRegisteredBatchId: Long = 0L
+    private var lastAckedBatchId: Long = 0L
+    private var deltaAckJob: Job? = null
+    private var overflowRecoveryJob: Job? = null
+    private var handledOverflowFirstMissingId: Long? = null
     private var feedSessionGeneration: Long = 0L
 
     var onQueryHashChanged: ((String?) -> Unit)? = null
@@ -241,7 +255,16 @@ class EventsViewModel(
         activeExportKey = null
         activeExportRequest = null
         autoDownloadAttemptedExportId = null
-        lastProcessedDeltaBatchId = 0L
+        feedSessionGenerationFlow.value = 0L
+        deltaAckJob?.cancel()
+        deltaAckJob = null
+        overflowRecoveryJob?.cancel()
+        overflowRecoveryJob = null
+        lastMergedDeltaBatchId = 0L
+        lastBootstrapGeneration = 0L
+        highestRegisteredBatchId = 0L
+        lastAckedBatchId = 0L
+        handledOverflowFirstMissingId = null
         feedSession?.close()
         feedSession = null
 
@@ -330,15 +353,38 @@ class EventsViewModel(
         val sessionCompanyGen = companyGeneration
         val currentGen = ++filterRequestGeneration
         val sessionGen = ++feedSessionGeneration
+        feedSessionGenerationFlow.value = sessionGen
+        deltaAckJob?.cancel()
+        deltaAckJob = null
+        overflowRecoveryJob?.cancel()
+        overflowRecoveryJob = null
+        lastMergedDeltaBatchId = 0L
+        lastBootstrapGeneration = 0L
+        highestRegisteredBatchId = 0L
+        lastAckedBatchId = 0L
+        handledOverflowFirstMissingId = null
+
         feedCollectJob?.cancel()
         feedNoticeJob?.cancel()
         feedFilterOptionsJob?.cancel()
-        lastProcessedDeltaBatchId = 0L
         feedSession?.close()
 
         val query = EventsQuery(filter = _state.value.filter)
         val session = observeEventsFeedUseCase(companyId, query, _state.value.access)
         feedSession = session
+
+        _state.update { current ->
+            current.copy(
+                feedScopeKey = canonicalFeedScopeKey(companyId, current.filter, current.sort),
+                feedSessionGeneration = sessionGen,
+                feedBootstrapGeneration = 0L,
+                pendingPresentationDeltas = emptyList(),
+                deltaDeliveryState = DeltaDeliveryState.Healthy,
+                liveCreatedIds = emptyList(),
+                liveRemovedIds = emptySet(),
+                liveBatchId = 0L,
+            )
+        }
 
         feedCollectJob =
             viewModelScope.launch {
@@ -347,35 +393,50 @@ class EventsViewModel(
                     val canRead = feedState.access.eventsRead && _state.value.access.eventsRead
                     val feedScopeKey = canonicalFeedScopeKey(companyId, _state.value.filter, _state.value.sort)
 
-                    val newDeltas = feedState.pendingDeltas
-                    val delta = newDeltas.firstOrNull()
-                    val batchId = delta?.batchId ?: 0L
-                    val isNewBatch = canRead && delta != null && batchId > lastProcessedDeltaBatchId
-                    if (isNewBatch) {
-                        lastProcessedDeltaBatchId = batchId
+                    val isNewBootstrap = canRead && feedState.bootstrapGeneration > lastBootstrapGeneration
+                    if (isNewBootstrap) {
+                        lastBootstrapGeneration = feedState.bootstrapGeneration
+                        deltaAckJob?.cancel()
+                        deltaAckJob = null
+                        lastAckedBatchId = maxOf(lastAckedBatchId, highestRegisteredBatchId)
+                        if (feedState.deltaDeliveryState == DeltaDeliveryState.Healthy) {
+                            overflowRecoveryJob?.cancel()
+                            overflowRecoveryJob = null
+                            handledOverflowFirstMissingId = null
+                        }
                     }
-                    val liveCreated: List<String> =
-                        if (isNewBatch &&
-                            delta != null
-                        ) {
-                            delta.createdEventIds
+
+                    val toAdd =
+                        if (canRead) {
+                            feedState.pendingDeltas.filter { it.batchId > lastMergedDeltaBatchId }
                         } else {
                             emptyList()
                         }
-                    val liveRemoved: Set<String> =
-                        if (isNewBatch &&
-                            delta != null
-                        ) {
-                            delta.removedEventIds.toSet()
+                    if (toAdd.isNotEmpty()) {
+                        lastMergedDeltaBatchId = toAdd.maxOf { it.batchId }
+                    }
+                    val liveRemoved =
+                        if (toAdd.isNotEmpty()) {
+                            toAdd.flatMapTo(LinkedHashSet()) { it.removedEventIds }
                         } else {
                             emptySet()
                         }
-                    val newLiveBatchId = if (isNewBatch) batchId else _state.value.liveBatchId
+                    val liveCreated =
+                        if (toAdd.isNotEmpty()) {
+                            toAdd.flatMap { it.createdEventIds }.distinct().filter { it !in liveRemoved }
+                        } else {
+                            emptyList()
+                        }
+                    val newLiveBatchId = if (toAdd.isNotEmpty()) toAdd.last().batchId else _state.value.liveBatchId
 
                     _state.update { current ->
-                        val existingBatchIds = current.pendingPresentationDeltas.map { it.batchId }.toSet()
-                        val toAdd = if (canRead) newDeltas.filter { it.batchId !in existingBatchIds } else emptyList()
-                        val mergedDeltas = current.pendingPresentationDeltas + toAdd
+                        val baseDeltas =
+                            if (canRead && current.feedSessionGeneration == sessionGen && !isNewBootstrap) {
+                                current.pendingPresentationDeltas
+                            } else {
+                                emptyList()
+                            }
+                        val mergedDeltas = if (canRead) baseDeltas + toAdd else emptyList()
 
                         val hasLoadedContent = current.summary != null || current.visibleEvents.isNotEmpty()
                         val isSessionInitial = feedState.isInitialLoading
@@ -395,10 +456,17 @@ class EventsViewModel(
                             snapshotId = if (canRead) feedState.snapshotId else null,
                             feedScopeKey = feedScopeKey,
                             feedSessionGeneration = sessionGen,
+                            feedBootstrapGeneration = if (canRead) feedState.bootstrapGeneration else 0L,
                             feedRevision = feedState.feedRevision,
                             nextCursor = feedState.nextCursor,
                             pageGeneration = feedState.pageGeneration,
                             pendingPresentationDeltas = mergedDeltas,
+                            deltaDeliveryState =
+                                if (canRead) {
+                                    feedState.deltaDeliveryState
+                                } else {
+                                    DeltaDeliveryState.Healthy
+                                },
                             liveCreatedIds = liveCreated,
                             liveRemovedIds = liveRemoved,
                             liveBatchId = newLiveBatchId,
@@ -426,6 +494,11 @@ class EventsViewModel(
                             summary = if (canRead) (feedState.summary ?: current.summary) else null,
                             access = current.access,
                         )
+                    }
+
+                    val overflow = feedState.deltaDeliveryState as? DeltaDeliveryState.Overflowed
+                    if (canRead && overflow != null && handledOverflowFirstMissingId != overflow.firstMissingBatchId) {
+                        triggerOverflowRecovery(session, sessionGen, overflow.firstMissingBatchId)
                     }
                 }
             }
@@ -630,6 +703,7 @@ class EventsViewModel(
     }
 
     fun refresh() {
+        handledOverflowFirstMissingId = null
         feedSession?.refresh()
     }
 
@@ -641,11 +715,8 @@ class EventsViewModel(
         feedSession?.onViewportAtTop()
     }
 
-    suspend fun flushPendingNewer(
-        operationId: Long = 0L,
-        expectedEventIds: List<String> = emptyList(),
-    ): PendingNewerFlushResult =
-        feedSession?.flushPendingNewer(operationId, expectedEventIds)
+    suspend fun flushPendingNewer(operationId: Long = 0L): PendingNewerFlushResult =
+        feedSession?.flushPendingNewer(operationId)
             ?: PendingNewerFlushResult.Rejected(
                 operationId = operationId,
                 reason = FlushFailureReason.SESSION_CLOSED,
@@ -658,51 +729,178 @@ class EventsViewModel(
         val session = feedSession ?: return
         if (sessionGeneration != feedSessionGeneration) return
 
-        viewModelScope.launch {
-            try {
-                session.acknowledgeDeltasThrough(batchId, sessionGeneration)
-                _state.update { current ->
-                    if (current.feedSessionGeneration == sessionGeneration) {
-                        val remaining = current.pendingPresentationDeltas.filter { it.batchId > batchId }
-                        val nextHead = remaining.firstOrNull()
-                        current.copy(
-                            pendingPresentationDeltas = remaining,
-                            liveCreatedIds = nextHead?.createdEventIds ?: emptyList(),
-                            liveRemovedIds = nextHead?.removedEventIds?.toSet() ?: emptySet(),
-                            liveBatchId = nextHead?.batchId ?: current.liveBatchId,
-                        )
+        highestRegisteredBatchId = maxOf(highestRegisteredBatchId, batchId)
+        deltaAckJob?.cancel()
+        deltaAckJob =
+            viewModelScope.launch {
+                while (lastAckedBatchId < highestRegisteredBatchId) {
+                    val targetBatchId = highestRegisteredBatchId
+                    var ackSucceeded = false
+                    var attempt = 1
+                    while (attempt <= 5 && !ackSucceeded) {
+                        try {
+                            ackSucceeded = session.acknowledgeDeltasThrough(targetBatchId)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: kotlin.Error) {
+                            throw e
+                        } catch (_: Throwable) {
+                            // Retry
+                        }
+                        if (!ackSucceeded) {
+                            if (attempt == 5) {
+                                break
+                            }
+                            val backoff = minOf(100L * attempt, 500L)
+                            delay(backoff)
+                            attempt++
+                        }
+                    }
+
+                    if (ackSucceeded) {
+                        lastAckedBatchId = maxOf(lastAckedBatchId, targetBatchId)
+                        _state.update { current ->
+                            if (current.feedSessionGeneration == sessionGeneration) {
+                                val remaining = current.pendingPresentationDeltas.filter { it.batchId > targetBatchId }
+                                val nextHead = remaining.firstOrNull()
+                                current.copy(
+                                    pendingPresentationDeltas = remaining,
+                                    liveCreatedIds = nextHead?.createdEventIds ?: emptyList(),
+                                    liveRemovedIds = nextHead?.removedEventIds?.toSet() ?: emptySet(),
+                                    liveBatchId = nextHead?.batchId ?: current.liveBatchId,
+                                )
+                            } else {
+                                current
+                            }
+                        }
                     } else {
-                        current
+                        refreshSessionForRecovery(session, sessionGeneration, showErrorNoticeOnFailure = false)
+                        break
                     }
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Throwable) {
-                // Keep delta in pendingPresentationDeltas for retry
             }
-        }
     }
 
-    fun onLiveDeltaConsumed(batchId: Long) {
-        onLiveDeltaRegistered(feedSessionGeneration, batchId)
+    private fun triggerOverflowRecovery(
+        session: EventsFeedSession,
+        sessionGeneration: Long,
+        firstMissingBatchId: Long,
+    ) {
+        overflowRecoveryJob?.cancel()
+        handledOverflowFirstMissingId = firstMissingBatchId
+        overflowRecoveryJob =
+            viewModelScope.launch {
+                var recovered = false
+                for (attempt in 1..3) {
+                    if (attempt > 1) {
+                        delay(150L * attempt)
+                    }
+                    if (sessionGeneration != feedSessionGeneration || feedSession !== session) return@launch
+
+                    val result =
+                        try {
+                            session.refreshForHistory(++refreshOperationCounter)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: kotlin.Error) {
+                            throw e
+                        } catch (t: Throwable) {
+                            HistoryRefreshResult.Failed(t.message ?: "Overflow recovery refresh failed")
+                        }
+
+                    when (result) {
+                        is HistoryRefreshResult.Updated,
+                        is HistoryRefreshResult.Unchanged,
+                        -> {
+                            val healthy =
+                                withTimeoutOrNull(1500L) {
+                                    _state.first {
+                                        it.feedSessionGeneration == sessionGeneration &&
+                                            it.deltaDeliveryState == DeltaDeliveryState.Healthy
+                                    }
+                                } != null
+                            if (healthy) {
+                                recovered = true
+                                break
+                            }
+                        }
+                        is HistoryRefreshResult.Failed -> {
+                            // Retry next attempt
+                        }
+                    }
+                }
+
+                if (!recovered && sessionGeneration == feedSessionGeneration) {
+                    showHistoryRefreshErrorNotice()
+                }
+            }
     }
 
     suspend fun refreshPendingHistory(): HistoryRefreshResult {
         val session = feedSession ?: return HistoryRefreshResult.Failed("Session closed")
-        return try {
-            session.refresh()
-            HistoryRefreshResult.Updated
-        } catch (c: CancellationException) {
-            throw c
-        } catch (t: Throwable) {
-            HistoryRefreshResult.Failed(t.message ?: "Refresh failed")
+        val operationId = ++refreshOperationCounter
+        val result =
+            try {
+                session.refreshForHistory(operationId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: kotlin.Error) {
+                throw e
+            } catch (t: Throwable) {
+                HistoryRefreshResult.Failed(t.message ?: "History refresh failed")
+            }
+
+        when (result) {
+            is HistoryRefreshResult.Updated,
+            is HistoryRefreshResult.Unchanged,
+            -> {
+                val waitResult =
+                    withTimeoutOrNull(HISTORY_REFRESH_WAITER_TIMEOUT_MS) {
+                        session.state.first { state ->
+                            !state.isInitialLoading && state.initialLoadError == null
+                        }
+                    }
+                if (waitResult == null) {
+                    showHistoryRefreshErrorNotice()
+                    return HistoryRefreshResult.Failed("History refresh timed out waiting for feed state")
+                }
+                return result
+            }
+            is HistoryRefreshResult.Failed -> {
+                showHistoryRefreshErrorNotice()
+                return result
+            }
         }
     }
 
-    fun onOffscreenLiveEventsDetected(
-        count: Int,
-        key: String,
+    private fun refreshSessionForRecovery(
+        session: EventsFeedSession,
+        sessionGeneration: Long,
+        showErrorNoticeOnFailure: Boolean,
     ) {
+        viewModelScope.launch {
+            if (sessionGeneration != feedSessionGeneration || feedSession !== session) return@launch
+            val result =
+                try {
+                    session.refreshForHistory(++refreshOperationCounter)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: kotlin.Error) {
+                    throw e
+                } catch (t: Throwable) {
+                    HistoryRefreshResult.Failed(t.message ?: "Recovery refresh failed")
+                }
+            if (result is HistoryRefreshResult.Failed && showErrorNoticeOnFailure) {
+                showHistoryRefreshErrorNotice()
+            }
+        }
+    }
+
+    private fun showHistoryRefreshErrorNotice() {
+        _state.update { it.copy(errorNotice = Notice.error(Res.string.events_list_pagination_error)) }
+    }
+
+    fun onOffscreenLiveEventsDetected(key: String) {
         _state.update {
             it.copy(
                 infoNotice =

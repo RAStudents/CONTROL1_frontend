@@ -36,13 +36,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.coerceAtLeast
 import kotlinx.datetime.TimeZone
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
 import studio.acmenra.control.core.ui.generated.resources.Res
-import studio.acmenra.control.core.ui.generated.resources.events_status_acknowledged
+import studio.acmenra.control.core.ui.generated.resources.events_action_acknowledge
 import studio.acmenra.control.core.ui.generated.resources.ic_check_circle
 import studio.acmenra.control.core.ui.generated.resources.ic_chevron_right
 import studio.acmenra.control.core.ui.generated.resources.ic_event_alert
@@ -202,7 +204,7 @@ fun EventCard(
         }
 
     // Supporting text format (§1.2): "HH:mm • locationName, deviceName"
-    val effectiveTz = businessTimeZone ?: TimeZone.UTC
+    val effectiveTz = EventDateDisplayFormatter.resolveEffectiveTimeZone(businessTimeZone)
     val supportingText =
         EventDateDisplayFormatter.formatEventCardSupportingText(
             occurredAt = event.occurredAt,
@@ -222,11 +224,25 @@ fun EventCard(
         label = "event-card-hover-overlay",
     )
 
+    val cardSemanticDescription =
+        buildString {
+            if (event.isErroneous) {
+                append("Erroneous event. ")
+            }
+            if (event.status == EventAcknowledgementStatus.ACKNOWLEDGED) {
+                append("Acknowledged. ")
+            }
+        }
+
     Card(
         modifier =
             modifier
                 .fillMaxWidth()
-                .clickable(
+                .semantics {
+                    if (cardSemanticDescription.isNotEmpty()) {
+                        stateDescription = cardSemanticDescription.trim()
+                    }
+                }.clickable(
                     interactionSource = interactionSource,
                     indication = null,
                     onClick = onClick,
@@ -294,10 +310,8 @@ fun EventCard(
                 // Acknowledge Action Button
                 val canAckThisEvent =
                     canAcknowledge &&
-                        (
-                            event.status == EventAcknowledgementStatus.NEW ||
-                                event.status == EventAcknowledgementStatus.LEGACY_UNKNOWN
-                        )
+                        !event.isErroneous &&
+                        event.status != EventAcknowledgementStatus.ACKNOWLEDGED
                 if (canAckThisEvent) {
                     if (isPendingAck) {
                         CircularProgressIndicator(
@@ -311,7 +325,7 @@ fun EventCard(
                         ) {
                             Icon(
                                 painter = painterResource(Res.drawable.ic_check_circle),
-                                contentDescription = stringResource(Res.string.events_status_acknowledged),
+                                contentDescription = stringResource(Res.string.events_action_acknowledge),
                                 modifier = Modifier.size(AmberDimens.ListIcon),
                                 tint = MaterialTheme.colorScheme.primary,
                             )

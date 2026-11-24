@@ -121,29 +121,33 @@ fun EventsRouteContent(
     val noticeController = koinInject<NoticeController>()
     val mediaOpener = koinInject<ExternalMediaOpener>()
 
-    LaunchedEffect(state.clipboardNotice) {
-        state.clipboardNotice?.let {
+    val clipboardNotice by rememberUpdatedState(state.clipboardNotice)
+    LaunchedEffect(clipboardNotice) {
+        clipboardNotice?.let {
             noticeController.show(Notice.success(title = Res.string.events_viewer_id_copied))
             viewModel.dismissClipboardNotice()
         }
     }
 
-    LaunchedEffect(state.mutationErrorNotice) {
-        state.mutationErrorNotice?.let { res ->
+    val mutationErrorNotice by rememberUpdatedState(state.mutationErrorNotice)
+    LaunchedEffect(mutationErrorNotice) {
+        mutationErrorNotice?.let { res ->
             noticeController.show(Notice.error(title = res))
             viewModel.dismissMutationNotice()
         }
     }
 
-    LaunchedEffect(state.errorNotice) {
-        state.errorNotice?.let { notice ->
+    val errorNotice by rememberUpdatedState(state.errorNotice)
+    LaunchedEffect(errorNotice) {
+        errorNotice?.let { notice ->
             noticeController.show(notice)
             viewModel.dismissErrorNotice()
         }
     }
 
-    LaunchedEffect(state.infoNotice) {
-        state.infoNotice?.let { notice ->
+    val infoNotice by rememberUpdatedState(state.infoNotice)
+    LaunchedEffect(infoNotice) {
+        infoNotice?.let { notice ->
             noticeController.show(notice)
             viewModel.dismissInfoNotice()
         }
@@ -168,8 +172,7 @@ fun EventsRouteContent(
         onLoadNextPage = viewModel::loadNextPage,
         onRefresh = viewModel::refresh,
         onViewportAtTop = viewModel::onViewportAtTop,
-        onFlushPendingNewer = { ids -> viewModel.flushPendingNewer(expectedEventIds = ids) },
-        onLiveDeltaConsumed = viewModel::onLiveDeltaConsumed,
+        onFlushPendingNewer = viewModel::flushPendingNewer,
         onSelectEvent = viewModel::selectEvent,
         onCloseViewerCompact = viewModel::closeViewerCompact,
         onAcknowledgeEvent = viewModel::acknowledgeEvent,
@@ -222,8 +225,7 @@ fun EventsScreen(
     onOpenFilterDialog: () -> Unit,
     onCloseFilterDialog: () -> Unit,
     modifier: Modifier = Modifier,
-    onFlushPendingNewer: (suspend (List<String>) -> PendingNewerFlushResult)? = null,
-    onLiveDeltaConsumed: ((Long) -> Unit)? = null,
+    onFlushPendingNewer: (suspend (Long) -> PendingNewerFlushResult)? = null,
     onLiveDeltaRegistered: ((sessionGeneration: Long, batchId: Long) -> Unit)? = null,
     onRefreshPendingHistory: (suspend () -> HistoryRefreshResult)? = null,
     onSearchIdCommitted: ((String) -> Unit)? = null,
@@ -231,7 +233,7 @@ fun EventsScreen(
     onEventTypesApplied: ((Set<String>) -> Unit)? = null,
     onDevicesApplied: ((Set<String>) -> Unit)? = null,
     onOpenVideo: ((String) -> Unit)? = null,
-    onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
+    onOffscreenLiveEventsDetected: ((key: String) -> Unit)? = null,
 ) {
     val currentToggleExportMode by rememberUpdatedState(onToggleExportMode)
     val windowInfo = LocalWindowInfo.current
@@ -315,7 +317,6 @@ fun EventsScreen(
                     onLoadNextPage = onLoadNextPage,
                     onViewportAtTop = onViewportAtTop,
                     onFlushPendingNewer = onFlushPendingNewer,
-                    onLiveDeltaConsumed = onLiveDeltaConsumed,
                     onCopyEventId = onCopyEventId,
                     onRequestMarkErroneous = onRequestMarkErroneous,
                     onConfirmMarkErroneous = onConfirmMarkErroneous,
@@ -349,7 +350,6 @@ fun EventsScreen(
                     onLoadNextPage = onLoadNextPage,
                     onViewportAtTop = onViewportAtTop,
                     onFlushPendingNewer = onFlushPendingNewer,
-                    onLiveDeltaConsumed = onLiveDeltaConsumed,
                     onCopyEventId = onCopyEventId,
                     onRequestMarkErroneous = onRequestMarkErroneous,
                     onConfirmMarkErroneous = onConfirmMarkErroneous,
@@ -386,7 +386,6 @@ fun EventsScreen(
                     onLoadNextPage = onLoadNextPage,
                     onViewportAtTop = onViewportAtTop,
                     onFlushPendingNewer = onFlushPendingNewer,
-                    onLiveDeltaConsumed = onLiveDeltaConsumed,
                     onCopyEventId = onCopyEventId,
                     onRequestMarkErroneous = onRequestMarkErroneous,
                     onConfirmMarkErroneous = onConfirmMarkErroneous,
@@ -463,13 +462,12 @@ private fun WideEventsLayout(
     onDownloadExport: (String) -> Unit,
     onOpenVideo: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
-    onFlushPendingNewer: (suspend (List<String>) -> PendingNewerFlushResult)? = null,
-    onLiveDeltaConsumed: ((Long) -> Unit)? = null,
+    onFlushPendingNewer: (suspend (Long) -> PendingNewerFlushResult)? = null,
     onLiveDeltaRegistered: ((sessionGeneration: Long, batchId: Long) -> Unit)? = null,
     onRefreshPendingHistory: (suspend () -> HistoryRefreshResult)? = null,
     listState: LazyListState = rememberLazyListState(),
     presentationState: EventsListPresentationState = remember(state.feedScopeKey) { EventsListPresentationState() },
-    onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
+    onOffscreenLiveEventsDetected: ((key: String) -> Unit)? = null,
 ) {
     Column(
         modifier =
@@ -517,74 +515,28 @@ private fun WideEventsLayout(
                     .weight(1f),
             horizontalArrangement = Arrangement.spacedBy(AmberDimens.GapMedium),
         ) {
-            Box(
+            EventsListPane(
+                state = state,
+                businessTimeZone = businessTimeZone,
+                isCompact = false,
+                listState = listState,
+                presentationState = presentationState,
+                onSelectEvent = onSelectEvent,
+                onAcknowledgeEvent = onAcknowledgeEvent,
+                onLoadNextPage = onLoadNextPage,
+                onRefresh = onRefresh,
+                onViewportAtTop = onViewportAtTop,
+                onResetFilters = onResetFilters,
+                onFlushPendingNewer = onFlushPendingNewer,
+                onLiveDeltaRegistered = onLiveDeltaRegistered,
+                onRefreshPendingHistory = onRefreshPendingHistory,
+                onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                 modifier =
                     Modifier
                         .width(AmberDimens.EventsListWide)
                         .fillMaxHeight()
                         .clipToBounds(),
-            ) {
-                EventsList(
-                    events = state.visibleEvents,
-                    selectedEventId = state.selectedEventId,
-                    pendingAckIds = state.pendingAckIds,
-                    canAcknowledge = state.access.canAcknowledge,
-                    pendingNewerCount = state.pendingNewerCount,
-                    hasMore = state.hasMore,
-                    isLoadingNextPage = state.isLoadingNextPage,
-                    businessTimeZone = businessTimeZone,
-                    isCompact = false,
-                    isViewerOpenInCompact = state.isViewerOpenInCompact,
-                    listState = listState,
-                    feedScopeKey = state.feedScopeKey,
-                    snapshotId = state.snapshotId,
-                    liveCreatedIds = state.liveCreatedIds,
-                    liveRemovedIds = state.liveRemovedIds,
-                    liveBatchId = state.liveBatchId,
-                    asOfSequence = state.asOfSequence,
-                    isInitialLoading = state.isInitialLoading,
-                    initialLoadError = state.initialLoadError,
-                    feedSessionGeneration = state.feedSessionGeneration,
-                    feedRevision = state.feedRevision,
-                    nextCursor = state.nextCursor,
-                    pageGeneration = state.pageGeneration,
-                    pendingPresentationDeltas = state.pendingPresentationDeltas,
-                    pendingHistoryCount = state.pendingHistoryCount,
-                    requiresRefresh = state.requiresRefresh,
-                    paginationError = state.paginationError,
-                    onRefreshHistory = onRefresh,
-                    onSelectEvent = onSelectEvent,
-                    onAcknowledgeEvent = onAcknowledgeEvent,
-                    onLoadNextPage = onLoadNextPage,
-                    onViewportAtTop = onViewportAtTop,
-                    onFlushPendingNewer = onFlushPendingNewer,
-                    onLiveDeltaConsumed = onLiveDeltaConsumed,
-                    onLiveDeltaRegistered = onLiveDeltaRegistered,
-                    onRefreshPendingHistory = onRefreshPendingHistory,
-                    onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
-                    presentationState = presentationState,
-                )
-                val showEmptyState =
-                    state.isInitialLoading ||
-                        state.initialLoadError != null ||
-                        (state.visibleEvents.isEmpty() && presentationState.exitingIds.isEmpty())
-                if (showEmptyState) {
-                    Box(
-                        modifier =
-                            Modifier
-                                .fillMaxSize()
-                                .background(MaterialTheme.colorScheme.surface),
-                    ) {
-                        EventsEmptyState(
-                            isLoading = state.isInitialLoading,
-                            initialLoadError = state.initialLoadError,
-                            hasActiveFilters = state.filter.hasActiveFilters,
-                            onResetFilters = onResetFilters,
-                            onRetry = onRefresh,
-                        )
-                    }
-                }
-            }
+            )
 
             // Reserved EventViewer container
             ReservedEventViewerContainer(
@@ -634,13 +586,12 @@ private fun MediumEventsLayout(
     onDownloadExport: (String) -> Unit,
     onOpenVideo: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
-    onFlushPendingNewer: (suspend (List<String>) -> PendingNewerFlushResult)? = null,
-    onLiveDeltaConsumed: ((Long) -> Unit)? = null,
+    onFlushPendingNewer: (suspend (Long) -> PendingNewerFlushResult)? = null,
     onLiveDeltaRegistered: ((sessionGeneration: Long, batchId: Long) -> Unit)? = null,
     onRefreshPendingHistory: (suspend () -> HistoryRefreshResult)? = null,
     listState: LazyListState = rememberLazyListState(),
     presentationState: EventsListPresentationState = remember(state.feedScopeKey) { EventsListPresentationState() },
-    onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
+    onOffscreenLiveEventsDetected: ((key: String) -> Unit)? = null,
 ) {
     Column(
         modifier =
@@ -674,74 +625,28 @@ private fun MediumEventsLayout(
                     .weight(1f),
             horizontalArrangement = Arrangement.spacedBy(AmberDimens.GapMedium),
         ) {
-            Box(
+            EventsListPane(
+                state = state,
+                businessTimeZone = businessTimeZone,
+                isCompact = false,
+                listState = listState,
+                presentationState = presentationState,
+                onSelectEvent = onSelectEvent,
+                onAcknowledgeEvent = onAcknowledgeEvent,
+                onLoadNextPage = onLoadNextPage,
+                onRefresh = onRefresh,
+                onViewportAtTop = onViewportAtTop,
+                onResetFilters = onResetFilters,
+                onFlushPendingNewer = onFlushPendingNewer,
+                onLiveDeltaRegistered = onLiveDeltaRegistered,
+                onRefreshPendingHistory = onRefreshPendingHistory,
+                onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
                 modifier =
                     Modifier
                         .width(AmberDimens.EventsListMedium)
                         .fillMaxHeight()
                         .clipToBounds(),
-            ) {
-                EventsList(
-                    events = state.visibleEvents,
-                    selectedEventId = state.selectedEventId,
-                    pendingAckIds = state.pendingAckIds,
-                    canAcknowledge = state.access.canAcknowledge,
-                    pendingNewerCount = state.pendingNewerCount,
-                    hasMore = state.hasMore,
-                    isLoadingNextPage = state.isLoadingNextPage,
-                    businessTimeZone = businessTimeZone,
-                    isCompact = false,
-                    isViewerOpenInCompact = state.isViewerOpenInCompact,
-                    listState = listState,
-                    feedScopeKey = state.feedScopeKey,
-                    snapshotId = state.snapshotId,
-                    liveCreatedIds = state.liveCreatedIds,
-                    liveRemovedIds = state.liveRemovedIds,
-                    liveBatchId = state.liveBatchId,
-                    asOfSequence = state.asOfSequence,
-                    isInitialLoading = state.isInitialLoading,
-                    initialLoadError = state.initialLoadError,
-                    feedSessionGeneration = state.feedSessionGeneration,
-                    feedRevision = state.feedRevision,
-                    nextCursor = state.nextCursor,
-                    pageGeneration = state.pageGeneration,
-                    pendingPresentationDeltas = state.pendingPresentationDeltas,
-                    pendingHistoryCount = state.pendingHistoryCount,
-                    requiresRefresh = state.requiresRefresh,
-                    paginationError = state.paginationError,
-                    onRefreshHistory = onRefresh,
-                    onSelectEvent = onSelectEvent,
-                    onAcknowledgeEvent = onAcknowledgeEvent,
-                    onLoadNextPage = onLoadNextPage,
-                    onViewportAtTop = onViewportAtTop,
-                    onFlushPendingNewer = onFlushPendingNewer,
-                    onLiveDeltaConsumed = onLiveDeltaConsumed,
-                    onLiveDeltaRegistered = onLiveDeltaRegistered,
-                    onRefreshPendingHistory = onRefreshPendingHistory,
-                    onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
-                    presentationState = presentationState,
-                )
-                val showEmptyState =
-                    state.isInitialLoading ||
-                        state.initialLoadError != null ||
-                        (state.visibleEvents.isEmpty() && presentationState.exitingIds.isEmpty())
-                if (showEmptyState) {
-                    Box(
-                        modifier =
-                            Modifier
-                                .fillMaxSize()
-                                .background(MaterialTheme.colorScheme.surface),
-                    ) {
-                        EventsEmptyState(
-                            isLoading = state.isInitialLoading,
-                            initialLoadError = state.initialLoadError,
-                            hasActiveFilters = state.filter.hasActiveFilters,
-                            onResetFilters = onResetFilters,
-                            onRetry = onRefresh,
-                        )
-                    }
-                }
-            }
+            )
 
             Column(
                 modifier =
@@ -812,13 +717,12 @@ private fun CompactEventsLayout(
     onDownloadExport: (String) -> Unit,
     onOpenVideo: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
-    onFlushPendingNewer: (suspend (List<String>) -> PendingNewerFlushResult)? = null,
-    onLiveDeltaConsumed: ((Long) -> Unit)? = null,
+    onFlushPendingNewer: (suspend (Long) -> PendingNewerFlushResult)? = null,
     onLiveDeltaRegistered: ((sessionGeneration: Long, batchId: Long) -> Unit)? = null,
     onRefreshPendingHistory: (suspend () -> HistoryRefreshResult)? = null,
     listState: LazyListState = rememberLazyListState(),
     presentationState: EventsListPresentationState = remember(state.feedScopeKey) { EventsListPresentationState() },
-    onOffscreenLiveEventsDetected: ((count: Int, key: String) -> Unit)? = null,
+    onOffscreenLiveEventsDetected: ((key: String) -> Unit)? = null,
 ) {
     Column(
         modifier =
@@ -887,74 +791,28 @@ private fun CompactEventsLayout(
         Spacer(modifier = Modifier.height(AmberDimens.GapSmall))
 
         // EventsList occupies remaining height
-        Box(
+        EventsListPane(
+            state = state,
+            businessTimeZone = businessTimeZone,
+            isCompact = true,
+            listState = listState,
+            presentationState = presentationState,
+            onSelectEvent = onSelectEvent,
+            onAcknowledgeEvent = onAcknowledgeEvent,
+            onLoadNextPage = onLoadNextPage,
+            onRefresh = onRefresh,
+            onViewportAtTop = onViewportAtTop,
+            onResetFilters = onResetFilters,
+            onFlushPendingNewer = onFlushPendingNewer,
+            onLiveDeltaRegistered = onLiveDeltaRegistered,
+            onRefreshPendingHistory = onRefreshPendingHistory,
+            onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
             modifier =
                 Modifier
                     .fillMaxWidth()
                     .weight(1f)
                     .clipToBounds(),
-        ) {
-            EventsList(
-                events = state.visibleEvents,
-                selectedEventId = state.selectedEventId,
-                pendingAckIds = state.pendingAckIds,
-                canAcknowledge = state.access.canAcknowledge,
-                pendingNewerCount = state.pendingNewerCount,
-                hasMore = state.hasMore,
-                isLoadingNextPage = state.isLoadingNextPage,
-                businessTimeZone = businessTimeZone,
-                isCompact = true,
-                isViewerOpenInCompact = state.isViewerOpenInCompact,
-                listState = listState,
-                feedScopeKey = state.feedScopeKey,
-                snapshotId = state.snapshotId,
-                liveCreatedIds = state.liveCreatedIds,
-                liveRemovedIds = state.liveRemovedIds,
-                liveBatchId = state.liveBatchId,
-                asOfSequence = state.asOfSequence,
-                isInitialLoading = state.isInitialLoading,
-                initialLoadError = state.initialLoadError,
-                feedSessionGeneration = state.feedSessionGeneration,
-                feedRevision = state.feedRevision,
-                nextCursor = state.nextCursor,
-                pageGeneration = state.pageGeneration,
-                pendingPresentationDeltas = state.pendingPresentationDeltas,
-                pendingHistoryCount = state.pendingHistoryCount,
-                requiresRefresh = state.requiresRefresh,
-                paginationError = state.paginationError,
-                onRefreshHistory = onRefresh,
-                onSelectEvent = onSelectEvent,
-                onAcknowledgeEvent = onAcknowledgeEvent,
-                onLoadNextPage = onLoadNextPage,
-                onViewportAtTop = onViewportAtTop,
-                onFlushPendingNewer = onFlushPendingNewer,
-                onLiveDeltaConsumed = onLiveDeltaConsumed,
-                onLiveDeltaRegistered = onLiveDeltaRegistered,
-                onRefreshPendingHistory = onRefreshPendingHistory,
-                onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
-                presentationState = presentationState,
-            )
-            val showEmptyState =
-                state.isInitialLoading ||
-                    state.initialLoadError != null ||
-                    (state.visibleEvents.isEmpty() && presentationState.exitingIds.isEmpty())
-            if (showEmptyState) {
-                Box(
-                    modifier =
-                        Modifier
-                            .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.surface),
-                ) {
-                    EventsEmptyState(
-                        isLoading = state.isInitialLoading,
-                        initialLoadError = state.initialLoadError,
-                        hasActiveFilters = state.filter.hasActiveFilters,
-                        onResetFilters = onResetFilters,
-                        onRetry = onRefresh,
-                    )
-                }
-            }
-        }
+        )
 
         // Compact Viewer Modal
         if (state.isViewerOpenInCompact && state.selectedEvent != null) {
@@ -976,6 +834,90 @@ private fun CompactEventsLayout(
                     onCancelMarkErroneous = onCancelMarkErroneous,
                     onCloseCompact = onCloseViewerCompact,
                     onOpenVideo = onOpenVideo,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+internal fun EventsListPane(
+    state: EventsState,
+    businessTimeZone: kotlinx.datetime.TimeZone?,
+    isCompact: Boolean,
+    listState: LazyListState,
+    presentationState: EventsListPresentationState,
+    onSelectEvent: (String?) -> Unit,
+    onAcknowledgeEvent: (Event) -> Unit,
+    onLoadNextPage: () -> Unit,
+    onRefresh: () -> Unit,
+    onViewportAtTop: () -> Unit,
+    onResetFilters: () -> Unit,
+    modifier: Modifier = Modifier,
+    onFlushPendingNewer: (suspend (Long) -> PendingNewerFlushResult)? = null,
+    onLiveDeltaRegistered: ((sessionGeneration: Long, batchId: Long) -> Unit)? = null,
+    onRefreshPendingHistory: (suspend () -> HistoryRefreshResult)? = null,
+    onOffscreenLiveEventsDetected: ((key: String) -> Unit)? = null,
+) {
+    Box(modifier = modifier) {
+        val showEmptyState =
+            state.isInitialLoading ||
+                state.initialLoadError != null ||
+                (state.visibleEvents.isEmpty() && presentationState.exitingIds.isEmpty())
+
+        EventsList(
+            events = state.visibleEvents,
+            selectedEventId = state.selectedEventId,
+            pendingAckIds = state.pendingAckIds,
+            canAcknowledge = state.access.canAcknowledge,
+            pendingNewerCount = state.pendingNewerCount,
+            hasMore = state.hasMore,
+            isLoadingNextPage = state.isLoadingNextPage,
+            businessTimeZone = businessTimeZone,
+            isCompact = isCompact,
+            isViewerOpenInCompact = state.isViewerOpenInCompact,
+            listState = listState,
+            feedScopeKey = state.feedScopeKey,
+            snapshotId = state.snapshotId,
+            liveCreatedIds = state.liveCreatedIds,
+            liveRemovedIds = state.liveRemovedIds,
+            liveBatchId = state.liveBatchId,
+            asOfSequence = state.asOfSequence,
+            isInitialLoading = state.isInitialLoading,
+            initialLoadError = state.initialLoadError,
+            feedSessionGeneration = state.feedSessionGeneration,
+            feedRevision = state.feedRevision,
+            nextCursor = state.nextCursor,
+            pageGeneration = state.pageGeneration,
+            pendingPresentationDeltas = state.pendingPresentationDeltas,
+            pendingHistoryCount = state.pendingHistoryCount,
+            requiresRefresh = state.requiresRefresh,
+            paginationError = state.paginationError,
+            onRefreshHistory = onRefresh,
+            onSelectEvent = onSelectEvent,
+            onAcknowledgeEvent = onAcknowledgeEvent,
+            onLoadNextPage = onLoadNextPage,
+            onViewportAtTop = onViewportAtTop,
+            onFlushPendingNewer = onFlushPendingNewer,
+            onLiveDeltaRegistered = onLiveDeltaRegistered,
+            onRefreshPendingHistory = onRefreshPendingHistory,
+            onOffscreenLiveEventsDetected = onOffscreenLiveEventsDetected,
+            presentationState = presentationState,
+        )
+
+        if (showEmptyState) {
+            Box(
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surface),
+            ) {
+                EventsEmptyState(
+                    isLoading = state.isInitialLoading,
+                    initialLoadError = state.initialLoadError,
+                    hasActiveFilters = state.filter.hasActiveFilters,
+                    onResetFilters = onResetFilters,
+                    onRetry = onRefresh,
                 )
             }
         }

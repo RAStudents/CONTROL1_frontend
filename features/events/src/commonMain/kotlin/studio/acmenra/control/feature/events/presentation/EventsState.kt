@@ -14,6 +14,8 @@ import studio.acmenra.control.feature.events.domain.model.EventsSort
 import studio.acmenra.control.feature.events.domain.model.EventsSummary
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
+import studio.acmenra.control.feature.events.domain.repository.DeltaDeliveryState
+import studio.acmenra.control.feature.events.domain.repository.EventsFeedDelta
 
 data class ErroneousConfirmationTarget(
     val eventId: String,
@@ -34,9 +36,10 @@ data class EventsState(
     val liveCreatedIds: List<String> = emptyList(),
     val liveRemovedIds: Set<String> = emptySet(),
     val liveBatchId: Long = 0L,
-    val pendingPresentationDeltas: List<studio.acmenra.control.feature.events.domain.repository.EventsFeedDelta> =
-        emptyList(),
+    val pendingPresentationDeltas: List<EventsFeedDelta> = emptyList(),
+    val deltaDeliveryState: DeltaDeliveryState = DeltaDeliveryState.Healthy,
     val feedSessionGeneration: Long = 0L,
+    val feedBootstrapGeneration: Long = 0L,
     val feedRevision: Long = 0L,
     val nextCursor: String? = null,
     val pageGeneration: Long = 0L,

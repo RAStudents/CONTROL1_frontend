@@ -100,6 +100,7 @@
     <string name="events_list_pending_new_events">+%1$d new events</string>
     <string name="events_list_requires_refresh">New events available. Click to refresh.</string>
     <string name="events_refresh">Refresh</string>
+    <string name="events_action_acknowledge">Acknowledge event</string>
 
     <!-- Offscreen Queue & Indicator -->
     <string name="events_offscreen_pill_plus_99">+99+</string>

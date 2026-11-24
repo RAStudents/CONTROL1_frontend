@@ -100,6 +100,7 @@
     <string name="events_list_pending_new_events">+%1$d новых событий ↑</string>
     <string name="events_list_requires_refresh">Доступны новые события. Нажмите для обновления.</string>
     <string name="events_refresh">Обновить</string>
+    <string name="events_action_acknowledge">Подтвердить событие</string>
 
     <!-- Offscreen Queue & Indicator -->
     <string name="events_offscreen_pill_plus_99">+99+</string>

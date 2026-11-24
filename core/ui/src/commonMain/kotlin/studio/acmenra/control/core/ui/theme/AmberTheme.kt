@@ -245,6 +245,7 @@ object AmberDimens {
     val EventsDaySectionSpacing = 12.dp
     val EventsListFooterPadding = 16.dp
     val EventsOffscreenPillElevation = 2.dp
+    val EventsMinVisibleCardHeight = 24.dp
 }
 
 object AmberBreakpoints {

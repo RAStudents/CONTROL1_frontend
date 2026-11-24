@@ -1,5 +1,7 @@
 package studio.acmenra.control.feature.events.presentation.components
 
+internal const val MAX_OFFSCREEN_QUEUE_ENTRIES = 500
+
 internal enum class OffscreenDirection {
     UP,
     DOWN,
@@ -162,7 +164,16 @@ internal data class OffscreenQueueState(
             } else {
                 entries.subList(0, historyIndex) + toAdd + entries.subList(historyIndex, entries.size)
             }
-        return copy(entries = newEntries)
+        val capped =
+            if (newEntries.size > MAX_OFFSCREEN_QUEUE_ENTRIES) {
+                val nonLoaded = newEntries.filterNot { it is OffscreenQueueEntry.LoadedEvent }
+                val loaded = newEntries.filterIsInstance<OffscreenQueueEntry.LoadedEvent>()
+                val allowed = (MAX_OFFSCREEN_QUEUE_ENTRIES - nonLoaded.size).coerceAtLeast(0)
+                nonLoaded + loaded.take(allowed)
+            } else {
+                newEntries
+            }
+        return copy(entries = capped)
     }
 
     /**
@@ -197,7 +208,7 @@ internal data class OffscreenQueueState(
             return this
         }
         val retained = entries.filterNot { it is OffscreenQueueEntry.LoadedEvent }
-        val loaded = uniqueIds.map { OffscreenQueueEntry.LoadedEvent(it) }
+        val loaded = uniqueIds.take(MAX_OFFSCREEN_QUEUE_ENTRIES).map { OffscreenQueueEntry.LoadedEvent(it) }
         val historyIndex = retained.indexOfFirst { it is OffscreenQueueEntry.PendingHistory }
         val next =
             if (historyIndex < 0) {
@@ -266,7 +277,17 @@ internal data class OffscreenQueueState(
         nextEntries.addAll(toInsert)
         nextEntries.addAll(remainingEntries)
 
-        return copy(entries = nextEntries)
+        val capped =
+            if (nextEntries.size > MAX_OFFSCREEN_QUEUE_ENTRIES) {
+                val nonLoaded = nextEntries.filterNot { it is OffscreenQueueEntry.LoadedEvent }
+                val loaded = nextEntries.filterIsInstance<OffscreenQueueEntry.LoadedEvent>()
+                val allowed = (MAX_OFFSCREEN_QUEUE_ENTRIES - nonLoaded.size).coerceAtLeast(0)
+                nonLoaded + loaded.take(allowed)
+            } else {
+                nextEntries
+            }
+
+        return copy(entries = capped)
     }
 
     fun reconcilePendingNewerWithMaterializedIds(
@@ -345,6 +366,7 @@ internal data class OffscreenQueueState(
         maxVisibleEventLazyIndex: Int?,
         eventIdToLazyIndex: Map<String, Int>,
         allFeedEventIds: Set<String>? = null,
+        actuallyVisibleIds: Set<String> = emptySet(),
     ): Pair<OffscreenQueueState, OffscreenHeadResolution> {
         var current =
             if (allFeedEventIds != null) {
@@ -379,6 +401,10 @@ internal data class OffscreenQueueState(
                 }
                 is OffscreenQueueEntry.LoadedEvent -> {
                     if (allFeedEventIds != null && head.eventId !in allFeedEventIds) {
+                        current = current.removeLoaded(head.eventId)
+                        continue
+                    }
+                    if (head.eventId in actuallyVisibleIds) {
                         current = current.removeLoaded(head.eventId)
                         continue
                     }
@@ -483,4 +509,27 @@ internal data class OffscreenQueueState(
             }
         return q to target
     }
+}
+
+internal fun reconcileQueue(
+    currentState: OffscreenQueueState,
+    trackerState: LiveEventTrackerState,
+    actuallyVisibleKeys: Set<String>,
+    allFeedEventIds: Set<String>,
+): OffscreenQueueState {
+    var state = currentState.removeLoadedAll(actuallyVisibleKeys)
+    if (allFeedEventIds.isNotEmpty()) {
+        val filtered =
+            state.entries.filterNot {
+                it is OffscreenQueueEntry.LoadedEvent && it.eventId !in allFeedEventIds
+            }
+        if (filtered.size != state.entries.size) {
+            state = state.copy(entries = filtered)
+        }
+    }
+    val trackerOffscreen =
+        trackerState.offscreenPendingIds.filter {
+            it in allFeedEventIds && it !in actuallyVisibleKeys
+        }
+    return state.replaceLiveTargets(trackerOffscreen)
 }

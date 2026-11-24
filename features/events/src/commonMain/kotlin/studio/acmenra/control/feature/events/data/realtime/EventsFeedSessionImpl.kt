@@ -940,9 +940,9 @@ class EventsFeedSessionImpl(
                 )
         }
         return withTimeoutOrNull(SESSION_COMMAND_TIMEOUT_MS) { response.await() }
-            ?: PendingNewerFlushResult.Rejected(
+            ?: PendingNewerFlushResult.OutcomeUnknown(
                 operationId = operationId,
-                reason = FlushFailureReason.INTERNAL_ERROR,
+                reason = "Flush command enqueued but timed out waiting for processor response",
             )
     }
 

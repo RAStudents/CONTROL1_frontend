@@ -209,6 +209,7 @@ class EventsSessionProcessor(
     private var feedRevisionCounter: Long = 0L
     private var bootstrapGenerationCounter: Long = 0L
     private val earlyFramesBuffer = mutableMapOf<Long, MutableList<IncomingWsFrame>>()
+    private val completedFlushOperations = LinkedHashMap<Long, PendingNewerFlushResult>()
 
     private data class AccessFence(
         val generation: Long = 0L,
@@ -346,6 +347,19 @@ class EventsSessionProcessor(
                 }
             }
             else -> Unit
+        }
+    }
+
+    private fun recordCompletedFlush(
+        operationId: Long,
+        result: PendingNewerFlushResult,
+    ) {
+        if (operationId > 0L) {
+            if (completedFlushOperations.size >= 32) {
+                val firstKey = completedFlushOperations.keys.first()
+                completedFlushOperations.remove(firstKey)
+            }
+            completedFlushOperations[operationId] = result
         }
     }
 
@@ -844,13 +858,23 @@ class EventsSessionProcessor(
                 _state.update { it.copy(asOfSequence = sequenceProcessor.currentSequence) }
             }
             is SessionCommand.ViewportAtTop -> {
+                if (command.operationId > 0L) {
+                    val cached = completedFlushOperations[command.operationId]
+                    if (cached != null) {
+                        command.response?.complete(cached)
+                        return
+                    }
+                }
                 if (!_state.value.access.eventsRead || accessFence.value.denied) {
-                    command.response?.complete(
+                    val rejected =
                         PendingNewerFlushResult.Rejected(
                             operationId = command.operationId,
                             reason = FlushFailureReason.ACCESS_DENIED,
-                        ),
-                    )
+                        )
+                    if (command.operationId > 0L) {
+                        recordCompletedFlush(command.operationId, rejected)
+                    }
+                    command.response?.complete(rejected)
                     return
                 }
                 // User navigated to top: integrate all pending newer events into visible feed
@@ -859,12 +883,15 @@ class EventsSessionProcessor(
                         .filterValues { it.membership == OverlayMembership.PENDING_NEWER }
 
                 if (pendingNewerEntries.isEmpty()) {
-                    command.response?.complete(
+                    val noPending =
                         PendingNewerFlushResult.NoPendingEvents(
                             operationId = command.operationId,
                             feedRevision = _state.value.feedRevision,
-                        ),
-                    )
+                        )
+                    if (command.operationId > 0L) {
+                        recordCompletedFlush(command.operationId, noPending)
+                    }
+                    command.response?.complete(noPending)
                     return
                 }
 
@@ -914,7 +941,7 @@ class EventsSessionProcessor(
                     )
                 }
 
-                command.response?.complete(
+                val completed =
                     PendingNewerFlushResult.Completed(
                         operationId = command.operationId,
                         batchId = delta?.batchId ?: 0L,
@@ -925,8 +952,11 @@ class EventsSessionProcessor(
                         updatedEventIds = updatedIds,
                         remainingPendingEventIds = emptyList(),
                         remainingPendingCount = 0,
-                    ),
-                )
+                    )
+                if (command.operationId > 0L) {
+                    recordCompletedFlush(command.operationId, completed)
+                }
+                command.response?.complete(completed)
             }
             is SessionCommand.AcknowledgeFeedDeltas -> {
                 _state.update { current ->

@@ -22,6 +22,11 @@ sealed interface PendingNewerFlushResult {
         val operationId: Long = 0L,
         val reason: FlushFailureReason,
     ) : PendingNewerFlushResult
+
+    data class OutcomeUnknown(
+        val operationId: Long = 0L,
+        val reason: String = "Operation timed out after command was enqueued",
+    ) : PendingNewerFlushResult
 }
 
 enum class FlushFailureReason {

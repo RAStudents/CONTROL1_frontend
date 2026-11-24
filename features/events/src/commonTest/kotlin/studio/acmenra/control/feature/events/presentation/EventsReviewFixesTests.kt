@@ -84,6 +84,9 @@ import studio.acmenra.control.feature.events.domain.repository.EventsFeedDelta
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
 import studio.acmenra.control.feature.events.domain.repository.EventsRepository
+import studio.acmenra.control.feature.events.domain.repository.FlushFailureReason
+import studio.acmenra.control.feature.events.domain.repository.HistoryRefreshResult
+import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.domain.usecase.AcknowledgeEventUseCase
 import studio.acmenra.control.feature.events.domain.usecase.CreateEventsExportUseCase
 import studio.acmenra.control.feature.events.domain.usecase.DownloadEventsExportUseCase
@@ -93,12 +96,10 @@ import studio.acmenra.control.feature.events.domain.usecase.MarkEventErroneousUs
 import studio.acmenra.control.feature.events.domain.usecase.ObserveEventsExportStatusUseCase
 import studio.acmenra.control.feature.events.domain.usecase.ObserveEventsFeedUseCase
 import studio.acmenra.control.feature.events.presentation.components.EventsListPresentationState
-import studio.acmenra.control.feature.events.presentation.components.EventsViewportSnapshot
 import studio.acmenra.control.feature.events.presentation.components.ExitingEventRecord
 import studio.acmenra.control.feature.events.presentation.components.OffscreenQueueState
 import studio.acmenra.control.feature.events.presentation.components.PendingNewerFlushContext
 import studio.acmenra.control.feature.events.presentation.components.PendingNewerFlushReason
-import studio.acmenra.control.feature.events.presentation.components.buildLivePresentationPlan
 import studio.acmenra.control.feature.events.presentation.components.mergeExitingEvents
 import studio.acmenra.control.feature.events.presentation.platform.ExportFileSaver
 import studio.acmenra.control.feature.events.presentation.util.EventDateDisplayFormatter
@@ -168,6 +169,19 @@ class EventsReviewFixesTests {
         }
 
         override fun onViewportAtTop() {}
+
+        var flushResultToReturn: PendingNewerFlushResult? = null
+
+        override suspend fun flushPendingNewer(operationId: Long): PendingNewerFlushResult =
+            flushResultToReturn ?: PendingNewerFlushResult.Rejected(operationId, FlushFailureReason.INTERNAL_ERROR)
+
+        var ackResultToReturn: Boolean = true
+
+        override suspend fun acknowledgeDeltasThrough(batchId: Long): Boolean = ackResultToReturn
+
+        var historyRefreshResultToReturn: HistoryRefreshResult = HistoryRefreshResult.Updated
+
+        override suspend fun refreshForHistory(operationId: Long): HistoryRefreshResult = historyRefreshResultToReturn
 
         override fun markOptimisticAckPending(eventId: String) {}
 
@@ -1543,11 +1557,11 @@ class EventsReviewFixesTests {
     @Test
     fun testLiveCreatedEventWithEventVersion2IsClassifiedAsLiveCreated() =
         runTest {
-            val event1 = sampleEvent("ev-1").copy(occurredAt = kotlinx.datetime.Instant.parse("2026-03-01T10:00:00Z"))
+            val event1 = sampleEvent("ev-1").copy(occurredAt = Instant.parse("2026-03-01T10:00:00Z"))
             val event2 =
                 sampleEvent(
                     "ev-2",
-                ).copy(occurredAt = kotlinx.datetime.Instant.parse("2026-03-01T10:01:00Z"), eventVersion = 2L)
+                ).copy(occurredAt = Instant.parse("2026-03-01T10:01:00Z"), eventVersion = 2L)
 
             val session = TestFeedSession()
             val initialFeed =
@@ -1589,7 +1603,7 @@ class EventsReviewFixesTests {
             // 2. Unrelated feed emission with feedDelta = null must clear liveCreatedIds
             val event3 =
                 sampleEvent("ev-3").copy(
-                    occurredAt = kotlinx.datetime.Instant.parse("2026-03-01T10:02:00Z"),
+                    occurredAt = Instant.parse("2026-03-01T10:02:00Z"),
                     eventVersion = 2L,
                 )
             session.emitState(
@@ -1865,86 +1879,6 @@ class EventsReviewFixesTests {
             assertEquals(listOf("ev-4"), vm.state.value.liveCreatedIds)
             assertEquals(6L, vm.state.value.liveBatchId)
         }
-
-    @Test
-    fun testBuildLivePresentationPlanAtTopSingleItem() {
-        val plan =
-            buildLivePresentationPlan(
-                batchId = 1L,
-                createdEventIds = listOf("ev-1"),
-                removedEventIds = emptySet(),
-                events = listOf(sampleEvent("ev-1")),
-                viewportSnapshot = EventsViewportSnapshot(isAtTop = true),
-                animatedEventIds = emptySet(),
-            )
-
-        assertEquals(1L, plan.batchId)
-        assertEquals(setOf("ev-1"), plan.enterEventIds)
-        assertEquals(emptyList(), plan.offscreenEventIds)
-        assertEquals(mapOf("ev-1" to 0), plan.cascadeIndices)
-        assertEquals(1, plan.batchSize)
-    }
-
-    @Test
-    fun testBuildLivePresentationPlanCascadeForFewItems() {
-        val plan =
-            buildLivePresentationPlan(
-                batchId = 2L,
-                createdEventIds = listOf("ev-1", "ev-2", "ev-3"),
-                removedEventIds = emptySet(),
-                events = listOf(sampleEvent("ev-1"), sampleEvent("ev-2"), sampleEvent("ev-3")),
-                viewportSnapshot = EventsViewportSnapshot(isAtTop = true),
-                animatedEventIds = emptySet(),
-            )
-
-        assertEquals(setOf("ev-1", "ev-2", "ev-3"), plan.enterEventIds)
-        assertEquals(
-            mapOf("ev-1" to 0, "ev-2" to 1, "ev-3" to 2),
-            plan.cascadeIndices,
-        )
-        assertEquals(3, plan.batchSize)
-    }
-
-    @Test
-    fun testBuildLivePresentationPlanLargeBatchDisablesCascade() {
-        val ids = (1..6).map { "ev-$it" }
-        val plan =
-            buildLivePresentationPlan(
-                batchId = 3L,
-                createdEventIds = ids,
-                removedEventIds = emptySet(),
-                events = ids.map { sampleEvent(it) },
-                viewportSnapshot = EventsViewportSnapshot(isAtTop = true),
-                animatedEventIds = emptySet(),
-            )
-
-        assertEquals(ids.toSet(), plan.enterEventIds)
-        // More than 4 items: cascadeMap is empty to animate simultaneously
-        assertTrue(plan.cascadeIndices.isEmpty())
-        assertEquals(6, plan.batchSize)
-    }
-
-    @Test
-    fun testBuildLivePresentationPlanOffscreenWhenNotAtTop() {
-        val plan =
-            buildLivePresentationPlan(
-                batchId = 4L,
-                createdEventIds = listOf("ev-new-1", "ev-new-2"),
-                removedEventIds = emptySet(),
-                events = listOf(sampleEvent("ev-old-1")),
-                viewportSnapshot =
-                    EventsViewportSnapshot(
-                        firstVisibleItemIndex = 5,
-                        firstVisibleItemScrollOffset = 100,
-                        visibleItemIds = setOf("ev-old-1"),
-                        isAtTop = false,
-                    ),
-                animatedEventIds = emptySet(),
-            )
-
-        assertTrue(plan.enterEventIds.isEmpty())
-        assertEquals(listOf("ev-new-1", "ev-new-2"), plan.offscreenEventIds)
-    }
 
     @Test
     fun testMergeExitingEventsPreservesCorrectChronologicalPosition() {

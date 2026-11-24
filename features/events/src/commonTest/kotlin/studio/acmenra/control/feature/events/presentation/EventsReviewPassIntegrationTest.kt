@@ -1,7 +1,6 @@
 package studio.acmenra.control.feature.events.presentation
 
 import androidx.compose.ui.input.key.Key
-import kotlinx.datetime.Instant
 import kotlinx.datetime.TimeZone
 import studio.acmenra.control.feature.events.domain.model.Event
 import studio.acmenra.control.feature.events.domain.model.EventAcknowledgementStatus
@@ -25,6 +24,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.time.Instant
 
 class EventsReviewPassIntegrationTest {
     private fun createSampleEvent(

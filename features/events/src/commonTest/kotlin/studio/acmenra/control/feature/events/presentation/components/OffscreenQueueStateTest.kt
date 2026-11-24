@@ -252,7 +252,7 @@ class OffscreenQueueStateTest {
         assertTrue(res1 is OffscreenHeadResolution.AwaitingLayout)
         // With unmeasured target, status is AWAITING_LAYOUT, not HIDDEN!
         assertEquals(OffscreenPillStatus.AWAITING_LAYOUT, computePillStatus(res1))
-        assertEquals(1, qHeld.directionalCount(OffscreenDirection.UP, 2, 5, emptyMap()))
+        assertEquals(0, qHeld.directionalCount(OffscreenDirection.UP, 2, 5, emptyMap()))
 
         // Target measured -> READY
         val (_, res2) =

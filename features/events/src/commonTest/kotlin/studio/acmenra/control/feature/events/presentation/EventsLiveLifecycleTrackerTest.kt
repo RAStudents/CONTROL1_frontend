@@ -20,6 +20,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.time.Instant
 
 class EventsLiveLifecycleTrackerTest {
     private fun sampleEvent(id: String): Event =
@@ -36,8 +37,8 @@ class EventsLiveLifecycleTrackerTest {
             locationName = "Workshop 1",
             deviceId = "dev-1",
             deviceName = "Camera 1",
-            occurredAt = kotlinx.datetime.Instant.parse("2026-03-01T10:00:00Z"),
-            receivedAt = kotlinx.datetime.Instant.parse("2026-03-01T10:00:01Z"),
+            occurredAt = Instant.parse("2026-03-01T10:00:00Z"),
+            receivedAt = Instant.parse("2026-03-01T10:00:01Z"),
             status = EventAcknowledgementStatus.NEW,
             acknowledgedAt = null,
             acknowledgedBy = null,
@@ -70,8 +71,7 @@ class EventsLiveLifecycleTrackerTest {
         tracker =
             LiveEventTrackerReducer.reconcileAfterLayout(
                 state = tracker,
-                currentFeedIds = setOf("ev-1"),
-                visibleEventIds = setOf("ev-1"),
+                actuallyVisibleKeys = setOf("ev-1"),
             )
         assertEquals(LiveEventPhase.ENTERING, tracker.entries.first().phase)
         assertEquals(setOf("ev-1"), tracker.enteringIds)
@@ -81,8 +81,7 @@ class EventsLiveLifecycleTrackerTest {
         tracker =
             LiveEventTrackerReducer.reconcileAfterLayout(
                 state = tracker,
-                currentFeedIds = setOf("ev-1"),
-                visibleEventIds = emptySet(),
+                actuallyVisibleKeys = emptySet(),
             )
         assertEquals(LiveEventPhase.OFFSCREEN_PENDING, tracker.entries.first().phase)
         assertEquals(listOf("ev-1"), tracker.offscreenPendingIds)
@@ -111,8 +110,7 @@ class EventsLiveLifecycleTrackerTest {
         tracker =
             LiveEventTrackerReducer.reconcileAfterLayout(
                 state = tracker,
-                currentFeedIds = setOf("ev-1"),
-                visibleEventIds = setOf("ev-1"),
+                actuallyVisibleKeys = setOf("ev-1"),
             )
         assertEquals(LiveEventPhase.ENTERING, tracker.entries.first().phase)
 
@@ -131,8 +129,7 @@ class EventsLiveLifecycleTrackerTest {
         tracker =
             LiveEventTrackerReducer.reconcileAfterLayout(
                 state = tracker,
-                currentFeedIds = setOf("ev-1"),
-                visibleEventIds = emptySet(),
+                actuallyVisibleKeys = emptySet(),
             )
         assertEquals(LiveEventPhase.PRESENTED, tracker.entries.first().phase)
         assertTrue(tracker.offscreenPendingIds.isEmpty())
@@ -161,8 +158,7 @@ class EventsLiveLifecycleTrackerTest {
         tracker =
             LiveEventTrackerReducer.reconcileAfterLayout(
                 state = tracker,
-                currentFeedIds = setOf("ev-offscreen"),
-                visibleEventIds = setOf("ev-visible-1", "ev-visible-2"),
+                actuallyVisibleKeys = setOf("ev-visible-1", "ev-visible-2"),
             )
         assertEquals(LiveEventPhase.OFFSCREEN_PENDING, tracker.entries.first().phase)
         assertEquals(listOf("ev-offscreen"), tracker.offscreenPendingIds)
@@ -171,8 +167,7 @@ class EventsLiveLifecycleTrackerTest {
         tracker =
             LiveEventTrackerReducer.reconcileAfterLayout(
                 state = tracker,
-                currentFeedIds = setOf("ev-offscreen"),
-                visibleEventIds = setOf("ev-offscreen"),
+                actuallyVisibleKeys = setOf("ev-offscreen"),
             )
         assertEquals(LiveEventPhase.PRESENTED, tracker.entries.first().phase)
         assertTrue(tracker.offscreenPendingIds.isEmpty())
@@ -221,8 +216,7 @@ class EventsLiveLifecycleTrackerTest {
         tracker =
             LiveEventTrackerReducer.reconcileAfterLayout(
                 state = tracker,
-                currentFeedIds = allIds.toSet(),
-                visibleEventIds = visibleIds,
+                actuallyVisibleKeys = visibleIds,
             )
 
         assertEquals(visibleIds, tracker.enteringIds)

@@ -38,6 +38,9 @@ import studio.acmenra.control.feature.events.domain.model.EventsSummary
 import studio.acmenra.control.feature.events.domain.model.ScoreTrend
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
+import studio.acmenra.control.feature.events.domain.repository.FlushFailureReason
+import studio.acmenra.control.feature.events.domain.repository.HistoryRefreshResult
+import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.domain.usecase.AcknowledgeEventUseCase
 import studio.acmenra.control.feature.events.domain.usecase.CreateEventsExportUseCase
 import studio.acmenra.control.feature.events.domain.usecase.DownloadEventsExportUseCase
@@ -94,6 +97,14 @@ class EventsPass2Tests {
         override fun refresh() {}
 
         override fun onViewportAtTop() {}
+
+        override suspend fun flushPendingNewer(operationId: Long): PendingNewerFlushResult =
+            PendingNewerFlushResult.Rejected(operationId, FlushFailureReason.INTERNAL_ERROR)
+
+        override suspend fun acknowledgeDeltasThrough(batchId: Long): Boolean = true
+
+        override suspend fun refreshForHistory(operationId: Long): HistoryRefreshResult =
+            HistoryRefreshResult.Failed("Not implemented")
 
         override fun markOptimisticAckPending(eventId: String) {}
 

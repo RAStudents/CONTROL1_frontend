@@ -112,6 +112,9 @@ import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
 import studio.acmenra.control.feature.events.domain.repository.EventsConnectivityProvider
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
+import studio.acmenra.control.feature.events.domain.repository.FlushFailureReason
+import studio.acmenra.control.feature.events.domain.repository.HistoryRefreshResult
+import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.domain.usecase.AcknowledgeEventUseCase
 import studio.acmenra.control.feature.events.domain.usecase.CreateEventsExportUseCase
 import studio.acmenra.control.feature.events.domain.usecase.DownloadEventsExportUseCase
@@ -995,6 +998,14 @@ class EventsContractV292MandatoryTests {
 
                     override fun onViewportAtTop() {}
 
+                    override suspend fun flushPendingNewer(operationId: Long): PendingNewerFlushResult =
+                        PendingNewerFlushResult.Rejected(operationId, FlushFailureReason.INTERNAL_ERROR)
+
+                    override suspend fun acknowledgeDeltasThrough(batchId: Long): Boolean = true
+
+                    override suspend fun refreshForHistory(operationId: Long): HistoryRefreshResult =
+                        HistoryRefreshResult.Failed("Not implemented")
+
                     override fun markOptimisticAckPending(eventId: String) {}
 
                     override fun clearOptimisticAckPending(eventId: String) {}
@@ -1202,6 +1213,14 @@ class EventsContractV292MandatoryTests {
                                 override fun refresh() {}
 
                                 override fun onViewportAtTop() {}
+
+                                override suspend fun flushPendingNewer(operationId: Long): PendingNewerFlushResult =
+                                    PendingNewerFlushResult.Rejected(operationId, FlushFailureReason.INTERNAL_ERROR)
+
+                                override suspend fun acknowledgeDeltasThrough(batchId: Long): Boolean = true
+
+                                override suspend fun refreshForHistory(operationId: Long): HistoryRefreshResult =
+                                    HistoryRefreshResult.Failed("Not implemented")
 
                                 override fun markOptimisticAckPending(eventId: String) {}
 
@@ -1666,6 +1685,14 @@ class EventsContractV292MandatoryTests {
 
                     override fun onViewportAtTop() {}
 
+                    override suspend fun flushPendingNewer(operationId: Long): PendingNewerFlushResult =
+                        PendingNewerFlushResult.Rejected(operationId, FlushFailureReason.INTERNAL_ERROR)
+
+                    override suspend fun acknowledgeDeltasThrough(batchId: Long): Boolean = true
+
+                    override suspend fun refreshForHistory(operationId: Long): HistoryRefreshResult =
+                        HistoryRefreshResult.Failed("Not implemented")
+
                     override fun markOptimisticAckPending(eventId: String) {}
 
                     override fun clearOptimisticAckPending(eventId: String) {}
@@ -1698,6 +1725,14 @@ class EventsContractV292MandatoryTests {
                     override fun refresh() {}
 
                     override fun onViewportAtTop() {}
+
+                    override suspend fun flushPendingNewer(operationId: Long): PendingNewerFlushResult =
+                        PendingNewerFlushResult.Rejected(operationId, FlushFailureReason.INTERNAL_ERROR)
+
+                    override suspend fun acknowledgeDeltasThrough(batchId: Long): Boolean = true
+
+                    override suspend fun refreshForHistory(operationId: Long): HistoryRefreshResult =
+                        HistoryRefreshResult.Failed("Not implemented")
 
                     override fun markOptimisticAckPending(eventId: String) {}
 
@@ -1822,6 +1857,14 @@ class EventsContractV292MandatoryTests {
                     override fun refresh() {}
 
                     override fun onViewportAtTop() {}
+
+                    override suspend fun flushPendingNewer(operationId: Long): PendingNewerFlushResult =
+                        PendingNewerFlushResult.Rejected(operationId, FlushFailureReason.INTERNAL_ERROR)
+
+                    override suspend fun acknowledgeDeltasThrough(batchId: Long): Boolean = true
+
+                    override suspend fun refreshForHistory(operationId: Long): HistoryRefreshResult =
+                        HistoryRefreshResult.Failed("Not implemented")
 
                     override fun markOptimisticAckPending(eventId: String) {}
 
@@ -2569,6 +2612,14 @@ class EventsContractV292MandatoryTests {
 
                     override fun onViewportAtTop() {}
 
+                    override suspend fun flushPendingNewer(operationId: Long): PendingNewerFlushResult =
+                        PendingNewerFlushResult.Rejected(operationId, FlushFailureReason.INTERNAL_ERROR)
+
+                    override suspend fun acknowledgeDeltasThrough(batchId: Long): Boolean = true
+
+                    override suspend fun refreshForHistory(operationId: Long): HistoryRefreshResult =
+                        HistoryRefreshResult.Failed("Not implemented")
+
                     override fun markOptimisticAckPending(eventId: String) {
                         pendingSet.add(eventId)
                         state.value =
@@ -2696,6 +2747,14 @@ class EventsContractV292MandatoryTests {
                     override fun refresh() {}
 
                     override fun onViewportAtTop() {}
+
+                    override suspend fun flushPendingNewer(operationId: Long): PendingNewerFlushResult =
+                        PendingNewerFlushResult.Rejected(operationId, FlushFailureReason.INTERNAL_ERROR)
+
+                    override suspend fun acknowledgeDeltasThrough(batchId: Long): Boolean = true
+
+                    override suspend fun refreshForHistory(operationId: Long): HistoryRefreshResult =
+                        HistoryRefreshResult.Failed("Not implemented")
 
                     override fun markOptimisticAckPending(eventId: String) {}
 
@@ -6297,6 +6356,14 @@ class EventsContractV292MandatoryTests {
         override fun refresh() {}
 
         override fun onViewportAtTop() {}
+
+        override suspend fun flushPendingNewer(operationId: Long): PendingNewerFlushResult =
+            PendingNewerFlushResult.Rejected(operationId, FlushFailureReason.INTERNAL_ERROR)
+
+        override suspend fun acknowledgeDeltasThrough(batchId: Long): Boolean = true
+
+        override suspend fun refreshForHistory(operationId: Long): HistoryRefreshResult =
+            HistoryRefreshResult.Failed("Not implemented")
 
         override fun markOptimisticAckPending(eventId: String) {
             val nextAck = state.value.realtimeOverlay.pendingAckIds + eventId

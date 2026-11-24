@@ -31,6 +31,9 @@ import studio.acmenra.control.feature.events.domain.model.EventsOperationResult
 import studio.acmenra.control.feature.events.domain.model.EventsQuery
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
+import studio.acmenra.control.feature.events.domain.repository.FlushFailureReason
+import studio.acmenra.control.feature.events.domain.repository.HistoryRefreshResult
+import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.domain.usecase.AcknowledgeEventUseCase
 import studio.acmenra.control.feature.events.domain.usecase.CreateEventsExportUseCase
 import studio.acmenra.control.feature.events.domain.usecase.DownloadEventsExportUseCase
@@ -94,6 +97,27 @@ class EventsViewModelTest {
         }
 
         override fun onViewportAtTop() {}
+
+        var flushResultToReturn: PendingNewerFlushResult? = null
+
+        override suspend fun flushPendingNewer(operationId: Long): PendingNewerFlushResult =
+            flushResultToReturn ?: PendingNewerFlushResult.Rejected(operationId, FlushFailureReason.INTERNAL_ERROR)
+
+        var ackResultToReturn: Boolean = true
+        var lastAckedBatchId: Long = 0L
+
+        override suspend fun acknowledgeDeltasThrough(batchId: Long): Boolean {
+            lastAckedBatchId = batchId
+            return ackResultToReturn
+        }
+
+        var refreshForHistoryResultToReturn: HistoryRefreshResult = HistoryRefreshResult.Updated
+        var refreshForHistoryCalledWithOpId: Long? = null
+
+        override suspend fun refreshForHistory(operationId: Long): HistoryRefreshResult {
+            refreshForHistoryCalledWithOpId = operationId
+            return refreshForHistoryResultToReturn
+        }
 
         override fun markOptimisticAckPending(eventId: String) {
             pendingAcks.add(eventId)

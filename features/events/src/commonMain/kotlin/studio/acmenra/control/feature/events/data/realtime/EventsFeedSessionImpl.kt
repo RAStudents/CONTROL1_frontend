@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import studio.acmenra.control.core.network.auth.AccessInvalidationListener
 import studio.acmenra.control.core.network.auth.SessionManager
 import studio.acmenra.control.core.network.client.isConnectivityError
@@ -41,9 +42,14 @@ import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionStat
 import studio.acmenra.control.feature.events.domain.repository.EventsConnectivityProvider
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedSession
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
+import studio.acmenra.control.feature.events.domain.repository.FlushFailureReason
+import studio.acmenra.control.feature.events.domain.repository.HistoryRefreshResult
 import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.domain.repository.RebootstrapState
 import kotlin.random.Random
+
+private const val SESSION_COMMAND_TIMEOUT_MS = 3_000L
+internal const val HISTORY_BOOTSTRAP_TIMEOUT_MS = 15_000L
 
 @OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
 class EventsFeedSessionImpl(
@@ -84,6 +90,16 @@ class EventsFeedSessionImpl(
     private val isTerminal = kotlin.concurrent.atomics.AtomicBoolean(false)
     private val isCleanupStarted = kotlin.concurrent.atomics.AtomicBoolean(false)
     val isClosed: Boolean get() = isTerminal.load() || isCleanupStarted.load()
+
+    private class HistoryRefreshAttempt(
+        val waiters: MutableList<CompletableDeferred<HistoryRefreshResult>> = mutableListOf(),
+        var completedResult: HistoryRefreshResult? = null,
+        var fatalError: Error? = null,
+    )
+
+    private val closedSignal = CompletableDeferred<Unit>()
+    private val refreshMutex = Mutex()
+    private var activeHistoryRefreshAttempt: HistoryRefreshAttempt? = null
     private var isOnline = true
 
     @kotlin.concurrent.Volatile
@@ -211,98 +227,124 @@ class EventsFeedSessionImpl(
     }
 
     private fun triggerBootstrap() {
-        if (!canReadEvents()) return
+        if (!canReadEvents() || isClosed || closedSignal.isCompleted) return
         bootstrapJob?.cancel()
-
         bootstrapJob =
             sessionScope.launch {
-                var attempt = 1
-                val maxAttempts = 4
-                while (isActive && attempt <= maxAttempts && canReadEvents()) {
-                    val generation = nextBootstrapGeneration()
+                startOrJoinHistoryRefreshAttempt(waiter = null)
+            }
+    }
+
+    private suspend fun executeHistoryBootstrapAttempt(attempt: HistoryRefreshAttempt) {
+        val beforeSnapshotId = state.value.snapshotId
+        val beforeBootstrapGeneration = state.value.bootstrapGeneration
+        var calculatedResult: HistoryRefreshResult? = null
+        var caughtFatalError: Error? = null
+
+        try {
+            val outcome =
+                withTimeoutOrNull(HISTORY_BOOTSTRAP_TIMEOUT_MS) {
+                    if (!canReadEvents()) {
+                        return@withTimeoutOrNull HistoryRefreshResult.Failed("Access denied")
+                    }
                     try {
-                        if (!canReadEvents()) return@launch
-                        val bootstrapDto = remoteDataSource.getBootstrap(companyId, query, limit = 50)
-                        if (!canReadEvents()) return@launch
-                        val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
-                        consecutiveHttpFailures = 0
-                        val applyResult = processor.installBootstrap(bootstrap, generation)
-                        when (applyResult) {
-                            is BootstrapApplyResult.Applied -> {
-                                if (canReadEvents()) {
-                                    connectWebSocket(
-                                        afterSequence = processor.getAsOfSequence(),
-                                        replayId = applyResult.replayId,
-                                    )
-                                }
-                                return@launch
+                        var currentAttempt = 1
+                        val maxAttempts = 4
+                        var finalResult: HistoryRefreshResult = HistoryRefreshResult.Failed("Bootstrap failed")
+
+                        while (isActive && currentAttempt <= maxAttempts && canReadEvents()) {
+                            val generation = nextBootstrapGeneration()
+                            val bootstrapDto = remoteDataSource.getBootstrap(companyId, query, limit = 50)
+                            if (!canReadEvents()) {
+                                return@withTimeoutOrNull HistoryRefreshResult.Failed("Access denied")
                             }
-                            is BootstrapApplyResult.RequiresFreshAuth -> {
-                                if (canReadEvents()) {
-                                    startFreshAuthSession(
-                                        afterSequence = applyResult.afterSequence,
-                                        initialReplayId = applyResult.initialReplayId,
-                                    )
+                            val bootstrap = EventsDtoMapper.mapBootstrap(bootstrapDto)
+                            consecutiveHttpFailures = 0
+                            val applyResult = processor.installBootstrap(bootstrap, generation)
+                            when (applyResult) {
+                                is BootstrapApplyResult.Applied -> {
+                                    if (canReadEvents()) {
+                                        connectWebSocket(
+                                            afterSequence = processor.getAsOfSequence(),
+                                            replayId = applyResult.replayId,
+                                        )
+                                    }
+                                    val updated =
+                                        state.value.snapshotId != beforeSnapshotId ||
+                                            state.value.bootstrapGeneration != beforeBootstrapGeneration
+                                    finalResult =
+                                        if (updated) HistoryRefreshResult.Updated else HistoryRefreshResult.Unchanged
+                                    break
                                 }
-                                return@launch
-                            }
-                            is BootstrapApplyResult.RetryRequired -> {
-                                attempt++
-                                if (attempt > maxAttempts) {
-                                    processor.dispatch(
-                                        SessionCommand.InitialLoadFailed(
-                                            EventsInitialLoadError.Server("Bootstrap retry attempts exhausted"),
-                                            generation = generation,
-                                        ),
-                                    )
-                                    return@launch
+                                is BootstrapApplyResult.RequiresFreshAuth -> {
+                                    if (canReadEvents()) {
+                                        startFreshAuthSession(
+                                            afterSequence = applyResult.afterSequence,
+                                            initialReplayId = applyResult.initialReplayId,
+                                        )
+                                    }
+                                    finalResult = HistoryRefreshResult.Updated
+                                    break
                                 }
-                                val backoffMs = (1L shl (attempt - 1)) * 500L + Random.nextLong(50, 200)
-                                delay(backoffMs)
-                            }
-                            is BootstrapApplyResult.Stale -> {
-                                return@launch
+                                is BootstrapApplyResult.RetryRequired -> {
+                                    currentAttempt++
+                                    if (currentAttempt > maxAttempts) {
+                                        processor.dispatch(
+                                            SessionCommand.InitialLoadFailed(
+                                                EventsInitialLoadError.Server("Bootstrap retry attempts exhausted"),
+                                                generation = generation,
+                                            ),
+                                        )
+                                        finalResult = HistoryRefreshResult.Failed("Bootstrap retry attempts exhausted")
+                                        break
+                                    }
+                                    val backoffMs = (1L shl (currentAttempt - 1)) * 500L + Random.nextLong(50, 200)
+                                    delay(backoffMs)
+                                }
+                                is BootstrapApplyResult.Stale -> {
+                                    finalResult = HistoryRefreshResult.Unchanged
+                                    break
+                                }
                             }
                         }
-                    } catch (e: CancellationException) {
-                        throw e
+                        finalResult
                     } catch (e: EventsApiException.PermissionDenied) {
                         processor.dispatch(
                             SessionCommand.InitialLoadFailed(
                                 EventsInitialLoadError.AccessDenied,
-                                generation = generation,
+                                generation = bootstrapGeneration,
                             ),
                         )
                         handleEventsReadRevoked()
-                        return@launch
+                        HistoryRefreshResult.Failed("Access denied")
                     } catch (e: EventsApiException.SnapshotTooLarge) {
                         val err =
                             EventsInitialLoadError.SnapshotTooLarge(
                                 maxItems = e.maxItems,
                                 suggestedFrom =
                                     e.suggestedFrom?.let {
-                                        runCatching {
-                                            kotlin.time.Instant.parse(it)
-                                        }.getOrNull()
+                                        runCatching { kotlin.time.Instant.parse(it) }.getOrNull()
                                     },
                                 suggestedTo =
                                     e.suggestedTo?.let {
-                                        runCatching {
-                                            kotlin.time.Instant.parse(it)
-                                        }.getOrNull()
+                                        runCatching { kotlin.time.Instant.parse(it) }.getOrNull()
                                     },
                             )
-                        processor.dispatch(SessionCommand.InitialLoadFailed(err, generation = generation))
-                        return@launch
+                        processor.dispatch(SessionCommand.InitialLoadFailed(err, generation = bootstrapGeneration))
+                        HistoryRefreshResult.Failed(e.message ?: "Snapshot too large")
                     } catch (e: EventsApiException.FilterInvalid) {
                         processor.dispatch(
                             SessionCommand.InitialLoadFailed(
                                 EventsInitialLoadError.InvalidFilter(e.invalidFields),
-                                generation = generation,
+                                generation = bootstrapGeneration,
                             ),
                         )
-                        return@launch
-                    } catch (e: Throwable) {
+                        HistoryRefreshResult.Failed(e.message ?: "Filter invalid")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Error) {
+                        throw e
+                    } catch (e: Exception) {
                         consecutiveHttpFailures++
                         checkHttpFailuresNotice()
                         val err =
@@ -311,11 +353,55 @@ class EventsFeedSessionImpl(
                             } else {
                                 EventsInitialLoadError.Server(e.message)
                             }
-                        processor.dispatch(SessionCommand.InitialLoadFailed(err, generation = generation))
-                        return@launch
+                        processor.dispatch(SessionCommand.InitialLoadFailed(err, generation = bootstrapGeneration))
+                        HistoryRefreshResult.Failed(e.message ?: "Bootstrap failed")
+                    }
+                }
+            calculatedResult = outcome ?: HistoryRefreshResult.Failed("Bootstrap timed out")
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) {
+                refreshMutex.withLock {
+                    if (activeHistoryRefreshAttempt === attempt) {
+                        activeHistoryRefreshAttempt = null
+                    }
+                    val failed = HistoryRefreshResult.Failed("Session closed")
+                    attempt.completedResult = failed
+                    val waiters = attempt.waiters.toList()
+                    attempt.waiters.clear()
+                    waiters.forEach { it.complete(failed) }
+                }
+            }
+            throw e
+        } catch (e: Error) {
+            caughtFatalError = e
+            withContext(NonCancellable) {
+                refreshMutex.withLock {
+                    attempt.fatalError = e
+                    if (activeHistoryRefreshAttempt === attempt) {
+                        activeHistoryRefreshAttempt = null
+                    }
+                    val waiters = attempt.waiters.toList()
+                    attempt.waiters.clear()
+                    waiters.forEach { it.completeExceptionally(e) }
+                }
+            }
+            throw e
+        } finally {
+            if (caughtFatalError == null) {
+                val res = calculatedResult ?: HistoryRefreshResult.Failed("Bootstrap failed")
+                withContext(NonCancellable) {
+                    refreshMutex.withLock {
+                        attempt.completedResult = res
+                        if (activeHistoryRefreshAttempt === attempt) {
+                            activeHistoryRefreshAttempt = null
+                        }
+                        val waiters = attempt.waiters.toList()
+                        attempt.waiters.clear()
+                        waiters.forEach { it.complete(res) }
                     }
                 }
             }
+        }
     }
 
     private fun triggerRebootstrap() {
@@ -740,37 +826,138 @@ class EventsFeedSessionImpl(
     }
 
     override fun refresh() {
-        if (canReadEvents()) {
-            triggerBootstrap()
+        if (isClosed || closedSignal.isCompleted || !canReadEvents()) return
+        sessionScope.launch {
+            startOrJoinHistoryRefreshAttempt(waiter = null)
         }
     }
+
+    override suspend fun refreshForHistory(operationId: Long): HistoryRefreshResult {
+        val deferred = CompletableDeferred<HistoryRefreshResult>()
+        val closeHandle =
+            closedSignal.invokeOnCompletion {
+                deferred.complete(HistoryRefreshResult.Failed("Session closed"))
+            }
+        var joinedAttempt: HistoryRefreshAttempt? = null
+        try {
+            if (deferred.isCompleted || isClosed || closedSignal.isCompleted) {
+                deferred.complete(HistoryRefreshResult.Failed("Session closed"))
+                return deferred.await()
+            }
+
+            joinedAttempt = startOrJoinHistoryRefreshAttempt(waiter = deferred)
+
+            if (deferred.isCompleted || isClosed || closedSignal.isCompleted) {
+                deferred.complete(HistoryRefreshResult.Failed("Session closed"))
+                return deferred.await()
+            }
+            return deferred.await()
+        } finally {
+            closeHandle.dispose()
+            val attempt = joinedAttempt
+            if (attempt != null && !deferred.isCompleted) {
+                withContext(NonCancellable) {
+                    refreshMutex.withLock {
+                        attempt.waiters.remove(deferred)
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun startOrJoinHistoryRefreshAttempt(
+        waiter: CompletableDeferred<HistoryRefreshResult>?,
+    ): HistoryRefreshAttempt? =
+        refreshMutex.withLock {
+            if (isClosed || closedSignal.isCompleted) {
+                waiter?.complete(HistoryRefreshResult.Failed("Session closed"))
+                return@withLock null
+            }
+            val existing = activeHistoryRefreshAttempt
+            if (existing != null) {
+                val fatal = existing.fatalError
+                if (fatal != null) {
+                    waiter?.completeExceptionally(fatal)
+                    return@withLock null
+                }
+                val done = existing.completedResult
+                if (done != null) {
+                    waiter?.complete(done)
+                    return@withLock null
+                }
+                if (waiter != null) {
+                    existing.waiters.add(waiter)
+                }
+                return@withLock existing
+            }
+
+            val created = HistoryRefreshAttempt()
+            if (waiter != null) {
+                created.waiters.add(waiter)
+            }
+            activeHistoryRefreshAttempt = created
+
+            val job =
+                sessionScope.launch {
+                    executeHistoryBootstrapAttempt(created)
+                }
+            if (job.isCancelled && created.completedResult == null && created.fatalError == null) {
+                if (activeHistoryRefreshAttempt === created) {
+                    activeHistoryRefreshAttempt = null
+                }
+                val closed = HistoryRefreshResult.Failed("Session closed")
+                created.completedResult = closed
+                created.waiters.forEach { it.complete(closed) }
+                created.waiters.clear()
+                return@withLock null
+            }
+            created
+        }
 
     override fun onViewportAtTop() {
         processor.dispatch(SessionCommand.ViewportAtTop())
     }
 
-    override suspend fun flushPendingNewer(
-        operationId: Long,
-        expectedEventIds: List<String>,
-    ): PendingNewerFlushResult {
+    override suspend fun flushPendingNewer(operationId: Long): PendingNewerFlushResult {
         if (isClosed) {
             return PendingNewerFlushResult.Rejected(
                 operationId = operationId,
-                reason = studio.acmenra.control.feature.events.domain.repository.FlushFailureReason.SESSION_CLOSED,
+                reason = FlushFailureReason.SESSION_CLOSED,
             )
         }
         val response = CompletableDeferred<PendingNewerFlushResult>()
-        processor.dispatch(SessionCommand.ViewportAtTop(operationId, expectedEventIds, response))
-        return response.await()
+        when (processor.dispatch(SessionCommand.ViewportAtTop(operationId, response))) {
+            CommandDispatchResult.ENQUEUED -> Unit
+            CommandDispatchResult.CLOSED ->
+                return PendingNewerFlushResult.Rejected(
+                    operationId = operationId,
+                    reason = FlushFailureReason.PROCESSOR_CLOSED,
+                )
+            CommandDispatchResult.FULL ->
+                return PendingNewerFlushResult.Rejected(
+                    operationId = operationId,
+                    reason = FlushFailureReason.INTERNAL_ERROR,
+                )
+        }
+        return withTimeoutOrNull(SESSION_COMMAND_TIMEOUT_MS) { response.await() }
+            ?: PendingNewerFlushResult.Rejected(
+                operationId = operationId,
+                reason = FlushFailureReason.INTERNAL_ERROR,
+            )
     }
 
-    override suspend fun acknowledgeDeltasThrough(
-        batchId: Long,
-        sessionGeneration: Long,
-    ) {
+    override suspend fun acknowledgeDeltasThrough(batchId: Long): Boolean {
+        if (isClosed) return true
         val response = CompletableDeferred<Unit>()
-        processor.dispatch(SessionCommand.AcknowledgeFeedDeltas(sessionGeneration, batchId, response))
-        response.await()
+        return when (processor.dispatch(SessionCommand.AcknowledgeFeedDeltas(batchId, response))) {
+            CommandDispatchResult.CLOSED -> true
+            CommandDispatchResult.FULL -> false
+            CommandDispatchResult.ENQUEUED ->
+                withTimeoutOrNull(SESSION_COMMAND_TIMEOUT_MS) {
+                    response.await()
+                    true
+                } ?: false
+        }
     }
 
     override fun markOptimisticAckPending(eventId: String) {
@@ -803,6 +990,7 @@ class EventsFeedSessionImpl(
     private fun performCleanup(postAction: (suspend () -> Unit)? = null) {
         if (!isCleanupStarted.compareAndSet(false, true)) return
         isTerminal.store(true)
+        closedSignal.complete(Unit)
 
         val gen = ++accessTransitionGeneration
         disconnectJob?.cancel()
@@ -830,6 +1018,7 @@ class EventsFeedSessionImpl(
     }
 
     override fun close() {
+        closedSignal.complete(Unit)
         performCleanup()
     }
 }

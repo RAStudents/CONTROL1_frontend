@@ -25,6 +25,20 @@ sealed interface RebootstrapState {
     ) : RebootstrapState
 }
 
+sealed interface DeltaDeliveryState {
+    data object Healthy : DeltaDeliveryState
+
+    data class Overflowed(
+        val firstMissingBatchId: Long,
+        val latestBatchId: Long,
+    ) : DeltaDeliveryState
+}
+
+internal data class AppendFeedDeltaResult(
+    val pendingDeltas: List<EventsFeedDelta>,
+    val deliveryState: DeltaDeliveryState,
+)
+
 data class EventsFeedDelta(
     val batchId: Long,
     val tenantSequence: Long = 0L,
@@ -73,69 +87,53 @@ data class EventsFeedState(
     val summary: EventsSummary? = null,
     val isSummaryLoading: Boolean = false,
     val pendingDeltas: List<EventsFeedDelta> = emptyList(),
+    val deltaDeliveryState: DeltaDeliveryState = DeltaDeliveryState.Healthy,
+    val bootstrapGeneration: Long = 0L,
     val feedRevision: Long = 0L,
     val nextCursor: String? = null,
     val pageGeneration: Long = 0L,
 ) {
-    constructor(
-        visibleEvents: List<Event> = emptyList(),
-        realtimeOverlay: RealtimeOverlay = RealtimeOverlay(),
-        access: EventsAccessCapabilities =
-            EventsAccessCapabilities(eventsRead = false, eventsReview = false, reportsExport = false),
-        snapshotId: String? = null,
-        asOfSequence: Long = 0L,
-        replayId: Long = 1L,
-        snapshotTotalCount: Int = 0,
-        hasMore: Boolean = false,
-        isInitialLoading: Boolean = true,
-        initialLoadError: EventsInitialLoadError? = null,
-        isLoadingNextPage: Boolean = false,
-        paginationError: EventsPaginationError? = null,
-        connectionState: RealtimeConnectionState = RealtimeConnectionState.DISCONNECTED,
-        rebootstrapState: RebootstrapState = RebootstrapState.Idle,
-        pendingNewerCount: Int = 0,
-        pendingHistoryCount: Int = 0,
-        summary: EventsSummary? = null,
-        isSummaryLoading: Boolean = false,
-        feedDelta: EventsFeedDelta?,
-    ) : this(
-        visibleEvents = visibleEvents,
-        realtimeOverlay = realtimeOverlay,
-        access = access,
-        snapshotId = snapshotId,
-        asOfSequence = asOfSequence,
-        replayId = replayId,
-        snapshotTotalCount = snapshotTotalCount,
-        hasMore = hasMore,
-        isInitialLoading = isInitialLoading,
-        initialLoadError = initialLoadError,
-        isLoadingNextPage = isLoadingNextPage,
-        paginationError = paginationError,
-        connectionState = connectionState,
-        rebootstrapState = rebootstrapState,
-        pendingNewerCount = pendingNewerCount,
-        pendingHistoryCount = pendingHistoryCount,
-        summary = summary,
-        isSummaryLoading = isSummaryLoading,
-        pendingDeltas = if (feedDelta != null) listOf(feedDelta) else emptyList(),
-    )
-
-    val feedDelta: EventsFeedDelta? get() = pendingDeltas.firstOrNull()
     val pendingAckIds: Set<String> get() = realtimeOverlay.pendingAckIds
     val requiresRefresh: Boolean get() = realtimeOverlay.requiresRefresh
 }
 
 private const val MAX_PENDING_DELTAS = 100
 
-fun appendFeedDelta(
+internal fun appendFeedDeltaChecked(
     current: List<EventsFeedDelta>,
+    currentDeliveryState: DeltaDeliveryState,
     delta: EventsFeedDelta?,
-): List<EventsFeedDelta> {
-    if (delta == null || delta.isEmpty) return current
-    val next = current + delta
-    return if (next.size > MAX_PENDING_DELTAS) {
-        next.drop(next.size - MAX_PENDING_DELTAS)
-    } else {
-        next
+): AppendFeedDeltaResult {
+    if (delta == null || delta.isEmpty) {
+        return AppendFeedDeltaResult(current, currentDeliveryState)
     }
+    val next = current + delta
+    if (next.size <= MAX_PENDING_DELTAS) {
+        val nextDelivery =
+            when (currentDeliveryState) {
+                DeltaDeliveryState.Healthy -> DeltaDeliveryState.Healthy
+                is DeltaDeliveryState.Overflowed ->
+                    currentDeliveryState.copy(
+                        latestBatchId = maxOf(currentDeliveryState.latestBatchId, delta.batchId),
+                    )
+            }
+        return AppendFeedDeltaResult(next, nextDelivery)
+    }
+
+    val droppedCount = next.size - MAX_PENDING_DELTAS
+    val firstDroppedBatchId = next.first().batchId
+    val trimmed = next.drop(droppedCount)
+    val firstMissing =
+        when (currentDeliveryState) {
+            DeltaDeliveryState.Healthy -> firstDroppedBatchId
+            is DeltaDeliveryState.Overflowed -> minOf(currentDeliveryState.firstMissingBatchId, firstDroppedBatchId)
+        }
+    return AppendFeedDeltaResult(
+        pendingDeltas = trimmed,
+        deliveryState =
+            DeltaDeliveryState.Overflowed(
+                firstMissingBatchId = firstMissing,
+                latestBatchId = trimmed.last().batchId,
+            ),
+    )
 }

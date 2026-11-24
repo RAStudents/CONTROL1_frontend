@@ -18,17 +18,13 @@ interface EventsFeedSession {
 
     fun refresh()
 
+    suspend fun refreshForHistory(operationId: Long): HistoryRefreshResult
+
     fun onViewportAtTop()
 
-    suspend fun flushPendingNewer(
-        operationId: Long = 0L,
-        expectedEventIds: List<String> = emptyList(),
-    ): PendingNewerFlushResult = PendingNewerFlushResult.NoPendingEvents(operationId = operationId)
+    suspend fun flushPendingNewer(operationId: Long = 0L): PendingNewerFlushResult
 
-    suspend fun acknowledgeDeltasThrough(
-        batchId: Long,
-        sessionGeneration: Long = 0L,
-    ) {}
+    suspend fun acknowledgeDeltasThrough(batchId: Long): Boolean
 
     fun markOptimisticAckPending(eventId: String)
 

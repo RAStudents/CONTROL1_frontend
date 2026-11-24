@@ -1,5 +1,6 @@
 package studio.acmenra.control.feature.events.data.realtime
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
@@ -29,12 +30,13 @@ import studio.acmenra.control.feature.events.domain.model.OverlayMembership
 import studio.acmenra.control.feature.events.domain.model.RealtimeConnectionState
 import studio.acmenra.control.feature.events.domain.model.RealtimeEventOrigin
 import studio.acmenra.control.feature.events.domain.model.RealtimeOverlay
+import studio.acmenra.control.feature.events.domain.repository.DeltaDeliveryState
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedDelta
 import studio.acmenra.control.feature.events.domain.repository.EventsFeedState
 import studio.acmenra.control.feature.events.domain.repository.FlushFailureReason
 import studio.acmenra.control.feature.events.domain.repository.PendingNewerFlushResult
 import studio.acmenra.control.feature.events.domain.repository.RebootstrapState
-import studio.acmenra.control.feature.events.domain.repository.appendFeedDelta
+import studio.acmenra.control.feature.events.domain.repository.appendFeedDeltaChecked
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
@@ -52,6 +54,12 @@ sealed interface BootstrapApplyResult {
     data object RetryRequired : BootstrapApplyResult
 
     data object Stale : BootstrapApplyResult
+}
+
+enum class CommandDispatchResult {
+    ENQUEUED,
+    FULL,
+    CLOSED,
 }
 
 sealed interface SessionCommand {
@@ -138,12 +146,10 @@ sealed interface SessionCommand {
 
     data class ViewportAtTop(
         val operationId: Long = 0L,
-        val expectedEventIds: List<String> = emptyList(),
         val response: CompletableDeferred<PendingNewerFlushResult>? = null,
     ) : SessionCommand
 
     data class AcknowledgeFeedDeltas(
-        val sessionGeneration: Long = 0L,
         val batchId: Long,
         val response: CompletableDeferred<Unit>? = null,
     ) : SessionCommand
@@ -201,6 +207,7 @@ class EventsSessionProcessor(
     private var currentTotalCount: Int = 0
     private var feedDeltaBatchCounter: Long = 0L
     private var feedRevisionCounter: Long = 0L
+    private var bootstrapGenerationCounter: Long = 0L
     private val earlyFramesBuffer = mutableMapOf<Long, MutableList<IncomingWsFrame>>()
 
     private data class AccessFence(
@@ -270,14 +277,27 @@ class EventsSessionProcessor(
                         when (command) {
                             is SessionCommand.InstallBootstrap -> command.response.completeExceptionally(e)
                             is SessionCommand.NextReplayGeneration -> command.response.completeExceptionally(e)
-                            is SessionCommand.ViewportAtTop -> command.response?.completeExceptionally(e)
+                            is SessionCommand.ViewportAtTop ->
+                                if (e is Error) {
+                                    command.response?.completeExceptionally(e)
+                                } else {
+                                    command.response?.complete(
+                                        PendingNewerFlushResult.Rejected(
+                                            operationId = command.operationId,
+                                            reason = FlushFailureReason.INTERNAL_ERROR,
+                                        ),
+                                    )
+                                }
                             is SessionCommand.AcknowledgeFeedDeltas -> command.response?.completeExceptionally(e)
                             else -> Unit
                         }
+                        if (e is Error) throw e
                         // Prevent uncaught exceptions from killing the command processing loop
                         isRebootstrapping = true
                         rebootstrapBuffer.clear()
                         onTriggerRebootstrap()
+                    } finally {
+                        completeCommandOnShutdown(command)
                     }
                 }
             } finally {
@@ -294,42 +314,126 @@ class EventsSessionProcessor(
         }
     }
 
-    private fun drainPendingCommands(channel: Channel<SessionCommand>) {
-        while (true) {
-            val remaining = channel.tryReceive().getOrNull() ?: break
-            when (remaining) {
-                is SessionCommand.InstallBootstrap ->
-                    remaining.response.complete(BootstrapApplyResult.Stale)
-                is SessionCommand.NextReplayGeneration ->
-                    remaining.response.completeExceptionally(
-                        kotlinx.coroutines.CancellationException("Processor closed"),
-                    )
-                is SessionCommand.ViewportAtTop ->
-                    remaining.response?.complete(
-                        PendingNewerFlushResult.Rejected(
-                            operationId = remaining.operationId,
-                            reason = FlushFailureReason.PROCESSOR_CLOSED,
-                        ),
-                    )
-                is SessionCommand.AcknowledgeFeedDeltas ->
-                    remaining.response?.complete(Unit)
-                else -> Unit
+    private fun completeCommandOnShutdown(command: SessionCommand) {
+        when (command) {
+            is SessionCommand.InstallBootstrap -> {
+                if (!command.response.isCompleted) {
+                    command.response.completeExceptionally(CancellationException("Processor closed"))
+                }
             }
+            is SessionCommand.NextReplayGeneration -> {
+                if (!command.response.isCompleted) {
+                    command.response.completeExceptionally(CancellationException("Processor closed"))
+                }
+            }
+            is SessionCommand.ViewportAtTop -> {
+                command.response?.let {
+                    if (!it.isCompleted) {
+                        it.complete(
+                            PendingNewerFlushResult.Rejected(
+                                operationId = command.operationId,
+                                reason = FlushFailureReason.PROCESSOR_CLOSED,
+                            ),
+                        )
+                    }
+                }
+            }
+            is SessionCommand.AcknowledgeFeedDeltas -> {
+                command.response?.let {
+                    if (!it.isCompleted) {
+                        it.complete(Unit)
+                    }
+                }
+            }
+            else -> Unit
         }
     }
 
-    fun dispatch(command: SessionCommand) {
-        if (isClosed.load()) {
-            when (command) {
-                is SessionCommand.InstallBootstrap ->
-                    command.response.complete(BootstrapApplyResult.Stale)
-                is SessionCommand.NextReplayGeneration ->
+    private fun completeCommandOnTerminal(command: SessionCommand) {
+        when (command) {
+            is SessionCommand.InstallBootstrap -> {
+                if (!command.response.isCompleted) {
                     command.response.completeExceptionally(
-                        kotlinx.coroutines.CancellationException("Processor closed"),
+                        IllegalStateException("Processor is terminal: access invalidated"),
                     )
-                else -> Unit
+                }
             }
-            return
+            is SessionCommand.NextReplayGeneration -> {
+                if (!command.response.isCompleted) {
+                    command.response.completeExceptionally(
+                        IllegalStateException("Processor is terminal: access invalidated"),
+                    )
+                }
+            }
+            is SessionCommand.ViewportAtTop -> {
+                command.response?.let {
+                    if (!it.isCompleted) {
+                        it.complete(
+                            PendingNewerFlushResult.Rejected(
+                                operationId = command.operationId,
+                                reason = FlushFailureReason.PROCESSOR_CLOSED,
+                            ),
+                        )
+                    }
+                }
+            }
+            is SessionCommand.AcknowledgeFeedDeltas -> {
+                command.response?.let {
+                    if (!it.isCompleted) {
+                        it.complete(Unit)
+                    }
+                }
+            }
+            else -> Unit
+        }
+    }
+
+    private fun completeCommandOnDenyLatch(command: SessionCommand) {
+        when (command) {
+            is SessionCommand.InstallBootstrap -> {
+                if (!command.response.isCompleted) {
+                    command.response.complete(BootstrapApplyResult.Stale)
+                }
+            }
+            is SessionCommand.NextReplayGeneration -> {
+                if (!command.response.isCompleted) {
+                    command.response.completeExceptionally(IllegalStateException("Read access is denied by latch"))
+                }
+            }
+            is SessionCommand.ViewportAtTop -> {
+                command.response?.let {
+                    if (!it.isCompleted) {
+                        it.complete(
+                            PendingNewerFlushResult.Rejected(
+                                operationId = command.operationId,
+                                reason = FlushFailureReason.ACCESS_DENIED,
+                            ),
+                        )
+                    }
+                }
+            }
+            is SessionCommand.AcknowledgeFeedDeltas -> {
+                command.response?.let {
+                    if (!it.isCompleted) {
+                        it.complete(Unit)
+                    }
+                }
+            }
+            else -> Unit
+        }
+    }
+
+    private fun drainPendingCommands(channel: Channel<SessionCommand>) {
+        while (true) {
+            val remaining = channel.tryReceive().getOrNull() ?: break
+            completeCommandOnShutdown(remaining)
+        }
+    }
+
+    fun dispatch(command: SessionCommand): CommandDispatchResult {
+        if (isClosed.load()) {
+            completeCommandOnShutdown(command)
+            return CommandDispatchResult.CLOSED
         }
 
         if (command is SessionCommand.WsFrameReceived) {
@@ -353,6 +457,7 @@ class EventsSessionProcessor(
                             pendingNewerCount = 0,
                             pendingHistoryCount = 0,
                             pendingDeltas = emptyList(),
+                            deltaDeliveryState = DeltaDeliveryState.Healthy,
                         )
                     }
                     if (wasRead) {
@@ -364,7 +469,11 @@ class EventsSessionProcessor(
                         // Actor saturated or not processing: invoke terminal callback synchronously
                         onAccessInvalidated(frame.frame.reason ?: "UNKNOWN", frame.frame.companyId)
                     }
-                    return
+                    return when {
+                        prioritySent.isSuccess -> CommandDispatchResult.ENQUEUED
+                        prioritySent.isClosed -> CommandDispatchResult.CLOSED
+                        else -> CommandDispatchResult.FULL
+                    }
                 }
                 is IncomingWsFrame.AuthRequired -> {
                     val prioritySent = priorityCommandChannel.trySend(command)
@@ -380,7 +489,11 @@ class EventsSessionProcessor(
                                 }
                         }
                     }
-                    return
+                    return when {
+                        prioritySent.isSuccess -> CommandDispatchResult.ENQUEUED
+                        prioritySent.isClosed -> CommandDispatchResult.CLOSED
+                        else -> CommandDispatchResult.FULL
+                    }
                 }
                 else -> {
                     val result = commandChannel.trySend(command)
@@ -390,33 +503,61 @@ class EventsSessionProcessor(
                         bufferReplayId = sequenceProcessor.currentReplayId
                         onTriggerRebootstrap()
                     }
-                    return
+                    return when {
+                        result.isSuccess -> CommandDispatchResult.ENQUEUED
+                        result.isClosed -> CommandDispatchResult.CLOSED
+                        else -> CommandDispatchResult.FULL
+                    }
                 }
             }
         }
 
         if (command is SessionCommand.Close) {
-            if (!priorityCommandChannel.trySend(command).isSuccess) {
-                commandChannel.trySend(command)
-            }
-            return
+            val sent =
+                if (priorityCommandChannel.trySend(command).isSuccess) {
+                    true
+                } else {
+                    commandChannel.trySend(command).isSuccess
+                }
+            return if (sent) CommandDispatchResult.ENQUEUED else CommandDispatchResult.CLOSED
         }
 
         val result = commandChannel.trySend(command)
-        if (result.isFailure) {
-            when (command) {
-                is SessionCommand.InstallBootstrap ->
-                    command.response.complete(BootstrapApplyResult.Stale)
-                is SessionCommand.NextReplayGeneration ->
-                    command.response.completeExceptionally(
-                        kotlinx.coroutines.CancellationException("Processor command queue full"),
-                    )
-                is SessionCommand.AccessUpdated -> {
-                    if (!command.access.eventsRead) {
-                        setImmediateEventsReadDenied(denied = true, generation = command.generation)
-                    }
+        return when {
+            result.isSuccess -> CommandDispatchResult.ENQUEUED
+            result.isClosed -> {
+                completeCommandOnShutdown(command)
+                CommandDispatchResult.CLOSED
+            }
+            else -> {
+                if (command is SessionCommand.AccessUpdated && !command.access.eventsRead) {
+                    setImmediateEventsReadDenied(denied = true, generation = command.generation)
                 }
-                else -> Unit
+                when (command) {
+                    is SessionCommand.InstallBootstrap ->
+                        if (!command.response.isCompleted) command.response.complete(BootstrapApplyResult.Stale)
+                    is SessionCommand.NextReplayGeneration ->
+                        if (!command.response.isCompleted) {
+                            command.response.completeExceptionally(
+                                CancellationException("Processor command queue full"),
+                            )
+                        }
+                    is SessionCommand.ViewportAtTop ->
+                        command.response?.let {
+                            if (!it.isCompleted) {
+                                it.complete(
+                                    PendingNewerFlushResult.Rejected(
+                                        operationId = command.operationId,
+                                        reason = FlushFailureReason.INTERNAL_ERROR,
+                                    ),
+                                )
+                            }
+                        }
+                    is SessionCommand.AcknowledgeFeedDeltas ->
+                        command.response?.let { if (!it.isCompleted) it.complete(Unit) }
+                    else -> Unit
+                }
+                CommandDispatchResult.FULL
             }
         }
     }
@@ -492,24 +633,7 @@ class EventsSessionProcessor(
                 return
             }
             // Terminal state: ignore all frames and updates
-            when (command) {
-                is SessionCommand.InstallBootstrap ->
-                    command.response.complete(BootstrapApplyResult.Stale)
-                is SessionCommand.NextReplayGeneration ->
-                    command.response.completeExceptionally(
-                        IllegalStateException("Processor is terminal: access invalidated"),
-                    )
-                is SessionCommand.ViewportAtTop ->
-                    command.response?.complete(
-                        PendingNewerFlushResult.Rejected(
-                            operationId = command.operationId,
-                            reason = FlushFailureReason.PROCESSOR_CLOSED,
-                        ),
-                    )
-                is SessionCommand.AcknowledgeFeedDeltas ->
-                    command.response?.complete(Unit)
-                else -> Unit
-            }
+            completeCommandOnTerminal(command)
             return
         }
 
@@ -518,27 +642,8 @@ class EventsSessionProcessor(
                 is SessionCommand.ConnectionStateChanged -> {
                     _state.update { it.copy(connectionState = command.state) }
                 }
-                is SessionCommand.InstallBootstrap -> {
-                    command.response.complete(BootstrapApplyResult.Stale)
-                }
-                is SessionCommand.NextReplayGeneration -> {
-                    command.response.completeExceptionally(
-                        IllegalStateException("Read access is denied by latch"),
-                    )
-                }
-                is SessionCommand.ViewportAtTop -> {
-                    command.response?.complete(
-                        PendingNewerFlushResult.Rejected(
-                            operationId = command.operationId,
-                            reason = FlushFailureReason.ACCESS_DENIED,
-                        ),
-                    )
-                }
-                is SessionCommand.AcknowledgeFeedDeltas -> {
-                    command.response?.complete(Unit)
-                }
                 else -> {
-                    // Ignore all other commands that could mutate or republish event data
+                    completeCommandOnDenyLatch(command)
                 }
             }
             return
@@ -686,6 +791,7 @@ class EventsSessionProcessor(
                             pendingHistoryCount = 0,
                             snapshotId = null,
                             pendingDeltas = emptyList(),
+                            deltaDeliveryState = DeltaDeliveryState.Healthy,
                         )
                     }
                     if (wasRead) {
@@ -762,44 +868,48 @@ class EventsSessionProcessor(
                     return
                 }
 
-                val createdIds =
+                val createdSet =
                     pendingNewerEntries
-                        .filterValues { it.origin == RealtimeEventOrigin.CREATED }
+                        .filterValues { it.origin != RealtimeEventOrigin.UPDATED }
                         .keys
-                        .toList()
-
-                val updatedIds =
+                val updatedSet =
                     pendingNewerEntries
                         .filterValues { it.origin == RealtimeEventOrigin.UPDATED }
                         .keys
-                        .toList()
-
                 val allPendingIds = pendingNewerEntries.keys.toList()
 
                 currentOverlay = RealtimeOverlayReducer.integratePendingNewer(currentOverlay)
                 val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
                 val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
 
-                val deltaBatchId = ++feedDeltaBatchCounter
+                val visibleOrder = visible.map { it.id }
+                val createdIds = visibleOrder.filter { it in createdSet }
+                val updatedIds = visibleOrder.filter { it in updatedSet }
+
                 val delta =
-                    EventsFeedDelta(
-                        batchId = deltaBatchId,
-                        tenantSequence = sequenceProcessor.currentSequence,
-                        createdEventIds = createdIds,
-                        updatedEventIds = updatedIds,
-                        removedEventIds = emptyList(),
-                    )
+                    if (createdIds.isNotEmpty() || updatedIds.isNotEmpty()) {
+                        EventsFeedDelta(
+                            batchId = ++feedDeltaBatchCounter,
+                            tenantSequence = sequenceProcessor.currentSequence,
+                            createdEventIds = createdIds,
+                            updatedEventIds = updatedIds,
+                            removedEventIds = emptyList(),
+                        )
+                    } else {
+                        null
+                    }
 
                 val nextRevision = ++feedRevisionCounter
-
-                _state.update {
-                    it.copy(
+                _state.update { current ->
+                    val appendResult = appendFeedDeltaChecked(current.pendingDeltas, current.deltaDeliveryState, delta)
+                    current.copy(
                         visibleEvents = visible,
                         realtimeOverlay = currentOverlay,
                         snapshotTotalCount = currentTotalCount,
                         pendingNewerCount = newerCount,
                         pendingHistoryCount = historyCount,
-                        pendingDeltas = appendFeedDelta(it.pendingDeltas, delta),
+                        pendingDeltas = appendResult.pendingDeltas,
+                        deltaDeliveryState = appendResult.deliveryState,
                         feedRevision = nextRevision,
                     )
                 }
@@ -807,7 +917,7 @@ class EventsSessionProcessor(
                 command.response?.complete(
                     PendingNewerFlushResult.Completed(
                         operationId = command.operationId,
-                        batchId = deltaBatchId,
+                        batchId = delta?.batchId ?: 0L,
                         snapshotId = _state.value.snapshotId,
                         feedRevision = nextRevision,
                         materializedEventIds = allPendingIds,
@@ -820,14 +930,12 @@ class EventsSessionProcessor(
             }
             is SessionCommand.AcknowledgeFeedDeltas -> {
                 _state.update { current ->
-                    val head = current.pendingDeltas.firstOrNull()
-                    val remaining =
-                        if (head != null && head.batchId <= command.batchId) {
-                            current.pendingDeltas.filter { it.batchId > command.batchId }
-                        } else {
-                            current.pendingDeltas
-                        }
-                    current.copy(pendingDeltas = remaining)
+                    val remaining = current.pendingDeltas.filter { it.batchId > command.batchId }
+                    if (remaining.size == current.pendingDeltas.size) {
+                        current
+                    } else {
+                        current.copy(pendingDeltas = remaining)
+                    }
                 }
                 command.response?.complete(Unit)
             }
@@ -1077,6 +1185,8 @@ class EventsSessionProcessor(
 
         val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
         val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
+        val nextBootstrapGen = ++bootstrapGenerationCounter
+        val nextRevision = ++feedRevisionCounter
         _state.update {
             it.copy(
                 visibleEvents = visible,
@@ -1092,9 +1202,11 @@ class EventsSessionProcessor(
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
                 pendingDeltas = emptyList(),
+                deltaDeliveryState = DeltaDeliveryState.Healthy,
+                bootstrapGeneration = nextBootstrapGen,
                 nextCursor = candidateNextCursor,
-                pageGeneration = 1L,
-                feedRevision = ++feedRevisionCounter,
+                pageGeneration = it.pageGeneration + 1L,
+                feedRevision = nextRevision,
             )
         }
 
@@ -1151,6 +1263,7 @@ class EventsSessionProcessor(
 
         val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
         val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
+        val nextRevision = ++feedRevisionCounter
         _state.update {
             it.copy(
                 visibleEvents = visible,
@@ -1161,7 +1274,7 @@ class EventsSessionProcessor(
                 pendingHistoryCount = historyCount,
                 nextCursor = page.nextCursor,
                 pageGeneration = it.pageGeneration + 1L,
-                feedRevision = ++feedRevisionCounter,
+                feedRevision = nextRevision,
             )
         }
     }
@@ -1231,6 +1344,7 @@ class EventsSessionProcessor(
         currentOverlay = currentOverlay.copy(entries = updatedEntries)
         val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
         val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
+        val nextRevision = ++feedRevisionCounter
         _state.update {
             it.copy(
                 visibleEvents = visible,
@@ -1240,7 +1354,7 @@ class EventsSessionProcessor(
                 pendingHistoryCount = historyCount,
                 nextCursor = it.nextCursor,
                 pageGeneration = it.pageGeneration,
-                feedRevision = ++feedRevisionCounter,
+                feedRevision = nextRevision,
             )
         }
     }
@@ -1316,6 +1430,7 @@ class EventsSessionProcessor(
             )
         val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
         val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
+        val nextRevision = ++feedRevisionCounter
         _state.update {
             it.copy(
                 visibleEvents = visible,
@@ -1325,7 +1440,7 @@ class EventsSessionProcessor(
                 pendingHistoryCount = historyCount,
                 nextCursor = it.nextCursor,
                 pageGeneration = it.pageGeneration,
-                feedRevision = ++feedRevisionCounter,
+                feedRevision = nextRevision,
             )
         }
     }
@@ -1597,7 +1712,7 @@ class EventsSessionProcessor(
                 tentativeOverlay = newOverlay
                 if (membership == OverlayMembership.REMOVED) {
                     removedIds.add(event.id)
-                } else {
+                } else if (membership == OverlayMembership.INCLUDED) {
                     updatedIds.add(event.id)
                 }
                 if (!tentativeOverlay.requiresRefresh) {
@@ -1649,11 +1764,11 @@ class EventsSessionProcessor(
         val visible = RealtimeOverlayReducer.computeVisibleEvents(snapshotItems, currentOverlay, query)
         val (newerCount, historyCount) = RealtimeOverlayReducer.computePendingCounts(currentOverlay)
 
+        val distinctRemoved = removedIds.distinct()
+        val distinctCreated = createdIds.distinct().filter { it !in distinctRemoved }
+        val distinctUpdated = updatedIds.distinct().filter { it !in distinctRemoved && it !in distinctCreated }
         val delta =
-            if (createdIds.isNotEmpty() || updatedIds.isNotEmpty() || removedIds.isNotEmpty()) {
-                val distinctCreated = createdIds.distinct()
-                val distinctUpdated = updatedIds.distinct().filter { it !in distinctCreated }
-                val distinctRemoved = removedIds.distinct().filter { it !in distinctCreated && it !in distinctUpdated }
+            if (distinctCreated.isNotEmpty() || distinctUpdated.isNotEmpty() || distinctRemoved.isNotEmpty()) {
                 EventsFeedDelta(
                     batchId = ++feedDeltaBatchCounter,
                     tenantSequence = sequenceProcessor.currentSequence,
@@ -1665,8 +1780,10 @@ class EventsSessionProcessor(
                 null
             }
 
-        _state.update {
-            it.copy(
+        val nextRevision = if (delta != null) ++feedRevisionCounter else _state.value.feedRevision
+        _state.update { current ->
+            val appendResult = appendFeedDeltaChecked(current.pendingDeltas, current.deltaDeliveryState, delta)
+            current.copy(
                 visibleEvents = visible,
                 realtimeOverlay = currentOverlay,
                 summary = updatedSummary,
@@ -1675,8 +1792,9 @@ class EventsSessionProcessor(
                 replayId = sequenceProcessor.currentReplayId,
                 pendingNewerCount = newerCount,
                 pendingHistoryCount = historyCount,
-                pendingDeltas = appendFeedDelta(it.pendingDeltas, delta),
-                feedRevision = if (delta != null) ++feedRevisionCounter else it.feedRevision,
+                pendingDeltas = appendResult.pendingDeltas,
+                deltaDeliveryState = appendResult.deliveryState,
+                feedRevision = nextRevision,
             )
         }
 
